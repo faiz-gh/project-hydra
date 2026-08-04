@@ -19,6 +19,8 @@ lib64/
 parts/
 sdist/
 var/
+bin/
+include/
 wheels/
 share/python-wheels/
 *.egg-info/
@@ -216,3 +218,12 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+.DS_Store
+
+# Terraform
+*.tfstate
+.terraform/
+
+plan.json
+exports/

@@ -1,0 +1,84 @@
+#!/bin/bash
+set -e
+
+# ==========================================
+# 1. Install & Configure Tailscale Mesh
+# ==========================================
+curl -fsSL https://tailscale.com/install.sh | sh
+# TF evaluates these because of single $
+tailscale up --authkey="${tailscale_key}" --hostname="${hostname}" --accept-dns=true
+
+# Deterministic check: Wait until Tailscale successfully assigns an IPv4 address
+echo "Waiting for Tailscale IP assignment..."
+TS_IP=""
+while [ -z "$TS_IP" ]; do
+    sleep 2
+    TS_IP=$(tailscale ip -4 || true)
+done
+echo "Node registered on mesh with IP: $TS_IP"
+
+# ==========================================
+# 2. DNS Verification Loop
+# ==========================================
+echo "Verifying network reachability to all cluster peers..."
+
+# TF evaluates ${join_nodes} to inject the comma-separated string
+IFS=',' read -ra PEERS <<< "${join_nodes}"
+
+# ESCAPED for Bash with $$: $${PEERS[@]}
+for peer in "$${PEERS[@]}"; do
+    # TF evaluates ${hostname}
+    if [ "$peer" == "${hostname}" ]; then
+        continue 
+    fi
+    
+    echo "Waiting for $peer to resolve and become reachable..."
+    WAIT_COUNT=0
+    MAX_RETRIES=60 # Up to 5 minutes of waiting per node
+
+    while ! ping -c 1 -W 1 "$peer" &> /dev/null; do
+        sleep 5
+        WAIT_COUNT=$((WAIT_COUNT + 1))
+        
+        if [ $WAIT_COUNT -ge $MAX_RETRIES ]; then
+            echo "WARNING: Timeout waiting for $peer. Proceeding to avoid deadlocks..."
+            break
+        fi
+    done
+    echo "Success: $peer is reachable!"
+done
+
+# ==========================================
+# 3. Install CockroachDB
+# ==========================================
+echo "Installing CockroachDB..."
+wget -qO- https://binaries.cockroachdb.com/cockroach-v23.1.5.linux-amd64.tgz | tar xvz
+cp -i cockroach-v23.1.5.linux-amd64/cockroach /usr/local/bin/
+mkdir -p /var/lib/cockroach
+
+# ==========================================
+# 4. Start Node
+# ==========================================
+echo "Starting CockroachDB node..."
+cockroach start \
+  --insecure \
+  --store=/var/lib/cockroach \
+  --listen-addr=$TS_IP:26257 \
+  --advertise-addr=$TS_IP:26257 \
+  --join=${join_nodes} \
+  --background
+
+# ==========================================
+# 5. Cluster Initialization (Failsafe logic)
+# ==========================================
+# ESCAPED for Bash with $$: $${PEERS[0]}
+PRIMARY_NODE="$${PEERS[0]}"
+
+if [ "${hostname}" == "$PRIMARY_NODE" ]; then
+    echo "I am the primary node ($PRIMARY_NODE). Initializing the cluster in 15 seconds..."
+    sleep 15
+    cockroach init --insecure --host=$TS_IP:26257 || true
+    echo "Cluster initialized successfully."
+else
+    echo "I am a secondary node. Skipping initialization; waiting for $PRIMARY_NODE to initialize the cluster."
+fi
