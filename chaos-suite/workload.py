@@ -1,6 +1,7 @@
 import asyncio
 import time
 import logging
+import itertools
 from psycopg import AsyncConnection, errors
 import numpy as np
 
@@ -15,6 +16,7 @@ class WorkloadGenerator:
         self.metrics_queue = asyncio.Queue()
         self.client_id = int(time.time())
         self.max_acked_seq = 0
+        self.global_seq = itertools.count(start=1)
 
     async def setup_db(self):
         async with await AsyncConnection.connect(self.db_uri) as conn:
@@ -32,9 +34,8 @@ class WorkloadGenerator:
         logger.info("Database schema initialized.")
 
     async def _worker(self, worker_id: int):
-        seq_id = 0
         while self.running:
-            seq_id += 1
+            seq_id = next(self.global_seq)
             start_time = time.perf_counter()
             success = False
             try:
@@ -49,7 +50,7 @@ class WorkloadGenerator:
                 success = True
                 self.max_acked_seq = max(self.max_acked_seq, seq_id)
             except (errors.OperationalError, errors.QueryCanceled, Exception) as e:
-                logger.debug(f"Worker {worker_id} transaction failed: {e}")
+                logger.error(f"Worker {worker_id} transaction failed: {e}")
                 await asyncio.sleep(0.5) # Backoff on failure
             finally:
                 latency = time.perf_counter() - start_time

@@ -156,7 +156,7 @@ if __name__ == "__main__":
     default_token = os.getenv("HCP_TOKEN")
     tf_parser.add_argument("--tf-token", default=default_token, required=not default_token, help="HCP API Token")
     
-    tf_parser.add_argument("--target-config", required=True, help="e.g., aws_config")
+    tf_parser.add_argument("--target-config", required=True, help="e.g., linode_config")
     tf_parser.add_argument("--target-node", required=True, help="e.g., node1")
 
     # 2. Network Partition Subcommand
@@ -169,7 +169,7 @@ if __name__ == "__main__":
     base_parser = subparsers.add_parser("baseline", help="Run workload and collect baseline metrics")
     base_parser.add_argument("--duration", type=int, default=60, help="Duration in seconds")
     base_parser.add_argument("--concurrency", type=int, default=30, help="Number of concurrent workers")
-    base_parser.add_argument("--output", default="baseline_metrics.csv", help="CSV output file")
+    base_parser.add_argument("--output", default="./exports/baseline_metrics.csv", help="CSV output file")
 
     args = parser.parse_args()
     

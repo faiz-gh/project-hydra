@@ -24,16 +24,14 @@ variable "cluster_join_nodes" {
   description = "Comma-separated list of hostnames for CockroachDB to join"
 }
 
-variable "aws_config" {
-  description = "AWS Configuration and Toggles"
+variable "linode_config" {
+  description = "Linode Configuration and Toggles"
   type = object({
     nodes = map(object({
-      enabled       = bool
-      region        = string
-      vpc_cidr      = string
-      subnet_cidr   = string
-      instance_type = string
-      hostname      = string
+      enabled  = bool
+      region   = string
+      type     = string
+      hostname = string
     }))
   })
 }

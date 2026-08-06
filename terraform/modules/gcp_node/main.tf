@@ -23,19 +23,33 @@ resource "google_compute_subnetwork" "this" {
   network       = google_compute_network.this.id
 }
 
-resource "google_compute_firewall" "this" {
-  name    = "${var.config.hostname}-fw"
+resource "google_compute_firewall" "ingress" {
+  name    = "${var.config.hostname}-fw-in"
   network = google_compute_network.this.name
 
   allow {
     protocol = "udp"
     ports    = ["41641"]
   }
+
   allow {
     protocol = "tcp"
     ports    = ["22"]
   }
+
   source_ranges = ["0.0.0.0/0"]
+}
+
+resource "google_compute_firewall" "egress" {
+  name      = "${var.config.hostname}-fw-out"
+  network   = google_compute_network.this.name
+  direction = "EGRESS"
+
+  allow {
+    protocol = "udp"
+  }
+
+  destination_ranges = ["0.0.0.0/0"]
 }
 
 resource "google_compute_instance" "this" {
@@ -46,6 +60,7 @@ resource "google_compute_instance" "this" {
   boot_disk {
     initialize_params {
       image = data.google_compute_image.ubuntu.self_link
+      type  = "pd-ssd" # Upgraded to SSD
     }
   }
 

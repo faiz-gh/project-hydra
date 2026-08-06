@@ -6,9 +6,9 @@ terraform {
     }
   }
   required_providers {
-    aws = {
-      source  = "hashicorp/aws"
-      version = "~> 5.0"
+    linode = {
+      source  = "linode/linode"
+      version = "~> 2.16"
     }
     azurerm = {
       source  = "hashicorp/azurerm"
@@ -21,15 +21,8 @@ terraform {
   }
 }
 
-provider "aws" {
-  alias  = "region1"
-  region = var.aws_config.nodes["node1"].region
-}
-
-provider "aws" {
-  alias  = "region2"
-  region = var.aws_config.nodes["node2"].region
-}
+# The Linode provider will automatically authenticate using the LINODE_TOKEN env var
+provider "linode" {}
 
 provider "azurerm" {
   alias = "region1"
