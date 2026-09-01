@@ -1,0 +1,44 @@
+#!/bin/bash
+set -e
+
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -yq
+apt-get install -yq wget tar curl chrony
+
+# ==========================================
+# 1. Install & Configure Tailscale Mesh
+# ==========================================
+echo "Installing Tailscale..."
+curl -fsSL https://tailscale.com/install.sh | sh
+tailscale up --authkey="${tailscale_key}" --hostname="${hostname}" --accept-dns=true
+
+echo "Waiting for Tailscale IP assignment..."
+TS_IP=""
+while [ -z "$TS_IP" ]; do
+    sleep 2
+    TS_IP=$(tailscale ip -4 || true)
+done
+echo "Node registered on mesh with IP: $TS_IP"
+
+# ==========================================
+# 2. Install & Start CockroachDB (v26.3.0)
+# ==========================================
+echo "Installing CockroachDB v26.3.0..."
+wget -qO- https://binaries.cockroachdb.com/cockroach-v26.3.0.linux-amd64.tgz | tar xvz
+cp -i cockroach-v26.3.0.linux-amd64/cockroach /usr/local/bin/
+mkdir -p /var/lib/cockroach
+
+echo "Starting CockroachDB Single-Node on Tailscale IP..."
+# Binding to TS_IP allows local Prometheus scraping from your laptop
+cockroach start-single-node \
+  --insecure \
+  --store=/var/lib/cockroach \
+  --listen-addr=$TS_IP:26257 \
+  --http-addr=$TS_IP:8080 \
+  --cache=0.25 \
+  --max-sql-memory=0.25 \
+  --background
+
+sleep 5
+cockroach sql --insecure --url="postgresql://root@$TS_IP:26257/defaultdb" -e "CREATE DATABASE IF NOT EXISTS bench;"
+echo "✅ Single-node baseline provisioned and listening on $TS_IP."

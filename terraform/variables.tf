@@ -63,3 +63,17 @@ variable "gcp_config" {
     }))
   })
 }
+
+variable "local_config" {
+  description = "Local GCP Configuration and Toggles"
+  type = object({
+    nodes = map(object({
+      enabled      = bool
+      region       = string
+      zone         = string
+      vpc_cidr     = string
+      machine_type = string
+      hostname     = string
+    }))
+  })
+}

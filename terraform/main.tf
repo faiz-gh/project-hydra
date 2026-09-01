@@ -49,3 +49,13 @@ module "gcp_node_1" {
   tailscale_auth_key = var.tailscale_auth_key
   cluster_join_nodes = var.cluster_join_nodes
 }
+
+module "local_node_1" {
+  source = "./modules/local_node"
+  count  = var.local_config.nodes["node1"].enabled ? 1 : 0
+
+  config             = var.local_config.nodes["node1"]
+  ssh_public_key     = var.ssh_public_key
+  tailscale_auth_key = var.tailscale_auth_key
+  cluster_join_nodes = var.cluster_join_nodes
+}

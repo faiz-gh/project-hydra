@@ -29,9 +29,9 @@ IFS=',' read -ra PEERS <<< "${join_nodes}"
 for peer in "$${PEERS[@]}"; do
     # TF evaluates ${hostname}
     if [ "$peer" == "${hostname}" ]; then
-        continue 
+        continue
     fi
-    
+
     echo "Waiting for $peer to resolve and become reachable..."
     WAIT_COUNT=0
     MAX_RETRIES=60 # Up to 5 minutes of waiting per node
@@ -39,7 +39,7 @@ for peer in "$${PEERS[@]}"; do
     while ! ping -c 1 -W 1 "$peer" &> /dev/null; do
         sleep 5
         WAIT_COUNT=$((WAIT_COUNT + 1))
-        
+
         if [ $WAIT_COUNT -ge $MAX_RETRIES ]; then
             echo "WARNING: Timeout waiting for $peer. Proceeding to avoid deadlocks..."
             break
@@ -49,15 +49,29 @@ for peer in "$${PEERS[@]}"; do
 done
 
 # ==========================================
-# 3. Install CockroachDB
+# 3. NTP & Clock Sync (CRDB HLC Requirement)
 # ==========================================
-echo "Installing CockroachDB..."
-wget -qO- https://binaries.cockroachdb.com/cockroach-v23.1.5.linux-amd64.tgz | tar xvz
-cp -i cockroach-v23.1.5.linux-amd64/cockroach /usr/local/bin/
+echo "Installing and configuring Chrony for strict NTP sync..."
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -yq
+apt-get install -yq chrony
+
+# Force an immediate hard-sync of the system clock, bypassing standard slew
+systemctl enable chrony
+systemctl start chrony
+chronyc makestep || true
+chronyc tracking
+
+# ==========================================
+# 4. Install CockroachDB (Updated to v26.3.0)
+# ==========================================
+echo "Installing CockroachDB v26.3.0..."
+wget -qO- https://binaries.cockroachdb.com/cockroach-v26.3.0.linux-amd64.tgz | tar xvz
+cp -i cockroach-v26.3.0.linux-amd64/cockroach /usr/local/bin/
 mkdir -p /var/lib/cockroach
 
 # ==========================================
-# 4. Start Node
+# 5. Start Node
 # ==========================================
 echo "Starting CockroachDB node..."
 cockroach start \
@@ -66,19 +80,57 @@ cockroach start \
   --listen-addr=$TS_IP:26257 \
   --advertise-addr=$TS_IP:26257 \
   --join=${join_nodes} \
+  --locality=${locality} \
   --background
 
 # ==========================================
-# 5. Cluster Initialization (Failsafe logic)
+# 6. Cluster Initialization & Topology Tuning
 # ==========================================
-# ESCAPED for Bash with $$: $${PEERS[0]}
 PRIMARY_NODE="$${PEERS[0]}"
 
 if [ "${hostname}" == "$PRIMARY_NODE" ]; then
     echo "I am the primary node ($PRIMARY_NODE). Initializing the cluster in 15 seconds..."
     sleep 15
     cockroach init --insecure --host=$TS_IP:26257 || true
-    echo "Cluster initialized successfully."
+    echo "Raft consensus initialized."
+
+    echo "Waiting for CockroachDB SQL interface to become ready..."
+    MAX_RETRIES=12 # Wait up to 60 seconds
+    READY=0
+    for i in $(seq 1 $MAX_RETRIES); do
+        # A simple SELECT 1 ensures the SQL gateway is actively responding
+        if cockroach sql --insecure --host=$TS_IP:26257 -e "SELECT 1;" > /dev/null 2>&1; then
+            echo "SQL interface is online!"
+            READY=1
+            break
+        fi
+        echo "SQL not ready yet, retrying in 5 seconds..."
+        sleep 5
+    done
+
+    if [ "$READY" -eq 1 ]; then
+        echo "Applying global zone configurations for latency optimization..."
+
+        # Create Databases bench for benchmarking purposes
+        cockroach sql --insecure --host=$TS_IP:26257 \
+            -e "CREATE DATABASE IF NOT EXISTS bench;"
+
+        # Create Database kv for key-value workloads
+        cockroach sql --insecure --host=$TS_IP:26257 \
+            -e "CREATE DATABASE IF NOT EXISTS kv;"
+
+        # 1. Force 5 replicas so data is globally mirrored (Azure survives US outages)
+        cockroach sql --insecure --host=$TS_IP:26257 \
+            -e "ALTER RANGE default CONFIGURE ZONE USING num_replicas = 5;"
+
+        # 2. Pin leaseholders (write coordinators) to the low-latency US triangle
+        cockroach sql --insecure --host=$TS_IP:26257 \
+            -e "ALTER RANGE default CONFIGURE ZONE USING lease_preferences = '[[+region=us-east], [+region=us-east1], [+region=us-west]]';"
+
+        echo "✅ Topology tuning successfully applied."
+    else
+        echo "❌ ERROR: SQL interface never became ready. Topology tuning skipped."
+    fi
 else
-    echo "I am a secondary node. Skipping initialization; waiting for $PRIMARY_NODE to initialize the cluster."
+    echo "I am a secondary node. Skipping initialization; waiting for $PRIMARY_NODE to orchestrate."
 fi

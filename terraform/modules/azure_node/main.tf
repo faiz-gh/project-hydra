@@ -110,5 +110,6 @@ resource "azurerm_linux_virtual_machine" "this" {
     tailscale_key = var.tailscale_auth_key
     hostname      = var.config.hostname
     join_nodes    = var.cluster_join_nodes
+    locality      = "cloud=azure,region=${var.config.region}"
   }))
 }

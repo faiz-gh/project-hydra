@@ -16,6 +16,7 @@ resource "linode_instance" "this" {
       tailscale_key = var.tailscale_auth_key
       hostname      = var.config.hostname
       join_nodes    = var.cluster_join_nodes
+      locality      = "cloud=linode,region=${var.config.region}"
     }))
   }
 }
