@@ -1014,3 +1014,16 @@ def test_accepting_hardware_does_not_excuse_a_workload_difference(tmp_path):
     )
     assert report.ok is False
     assert any("seed" in f.message for f in report.findings)
+
+
+def test_the_unqueued_ratio_is_computed_before_rounding(tmp_path):
+    """Rounding an input, dividing, then rounding again carries the first
+    rounding's error into the result. It produced two figures for one quantity
+    (50.37x against 50.38x), which a dissertation then has to reconcile."""
+    baseline, cluster = _low_tier_pair(tmp_path)
+    out = raft_overhead.lightest_load_write_latency(baseline, cluster)
+    exact = out["phase_iii"]["_p50_exact"] / out["phase_ii"]["_p50_exact"]
+    assert out["ratio_x"] == round(exact, 2)
+    # ...and specifically not the ratio of the displayed values.
+    from_display = round(out["phase_iii"]["p50_ms"] / out["phase_ii"]["p50_ms"], 2)
+    assert out["ratio_x"] == round(exact, 2) and abs(exact - from_display) < 1.0

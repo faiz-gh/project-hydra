@@ -439,6 +439,13 @@ def lightest_load_write_latency(
         out[key] = {
             "run_id": run.run_id,
             "concurrency": lightest,
+            # Retained unrounded so that ratios below are computed from the
+            # measurement rather than from its display form. Rounding an input,
+            # then dividing, then rounding again puts the error of the first
+            # rounding into the result: the unqueued ratio read 50.37x that way
+            # against 50.38x computed from the medians themselves, and the
+            # dissertation then had to reconcile two figures for one quantity.
+            "_p50_exact": float(row["p50_ms"]),
             "p50_ms": round(float(row["p50_ms"]), 3),
             "p99_ms": round(float(row["p99_ms"]), 3),
             "offered_load_tps": round(tps, 1),
@@ -452,7 +459,7 @@ def lightest_load_write_latency(
         }
     if out.get("phase_ii") and out.get("phase_iii"):
         out["ratio_x"] = round(
-            out["phase_iii"]["p50_ms"] / out["phase_ii"]["p50_ms"], 2
+            out["phase_iii"]["_p50_exact"] / out["phase_ii"]["_p50_exact"], 2
         )
         both_unqueued = out["phase_ii"]["unqueued"] and out["phase_iii"]["unqueued"]
         out["both_unqueued"] = both_unqueued
