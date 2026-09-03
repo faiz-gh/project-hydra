@@ -226,4 +226,12 @@ __marimo__/
 .terraform/
 
 plan.json
+plan.out
 exports/
+
+runs/
+figures/
+.claude/
+# Backups of the credential file (created when rewriting DB_URI)
+.env.bak
+.env.*.bak

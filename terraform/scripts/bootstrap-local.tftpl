@@ -20,6 +20,21 @@ while [ -z "$TS_IP" ]; do
 done
 echo "Node registered on mesh with IP: $TS_IP"
 
+# Pin this node's own name to the address CockroachDB will bind to.
+#
+# CockroachDB listens only on $TS_IP, but MagicDNS resolves the node's own
+# hostname to AAAA records on the node itself -- including a link-local address
+# that maps to a different interface. A client on this host connecting by name
+# therefore dials an address nothing is listening on and is refused. Phase II
+# runs the generator on this node and connects by name, so without this pin the
+# baseline measurement cannot be taken at all: observed after the 2026-09-02
+# redeploy as "dial tcp 10.5.0.2:26257: connect: connection refused".
+#
+# Pinning the name rather than widening --listen-addr is deliberate: the server's
+# binding is part of the measured configuration and must stay identical to a
+# cluster member's (see the --cache note below), whereas name resolution is not.
+grep -qxF "$TS_IP ${hostname}" /etc/hosts || echo "$TS_IP ${hostname}" >> /etc/hosts
+
 # ==========================================
 # 2. Install & Start CockroachDB (v26.3.0)
 # ==========================================
@@ -30,6 +45,11 @@ mkdir -p /var/lib/cockroach
 
 echo "Starting CockroachDB Single-Node on Tailscale IP..."
 # Binding to TS_IP allows local Prometheus scraping from your laptop
+# --cache and --max-sql-memory MUST be kept identical to the values in
+# scripts/bootstrap.tftpl. This node is the Phase II baseline: it should differ
+# from a cluster member only in that it does not replicate. Any other difference
+# is attributed to replication by the Phase II/III comparison and silently
+# inflates the reported Raft overhead.
 cockroach start-single-node \
   --insecure \
   --store=/var/lib/cockroach \
@@ -41,4 +61,10 @@ cockroach start-single-node \
 
 sleep 5
 cockroach sql --insecure --url="postgresql://root@$TS_IP:26257/defaultdb" -e "CREATE DATABASE IF NOT EXISTS bench;"
+# The ycsb database must exist before `cockroach workload init ycsb` can populate
+# it, and that command rejects a URI naming any other database. Creating it here
+# removes one step from the manual post-apply load; the load itself still has to
+# be run explicitly, because its --seed and --insert-count must match the profile
+# the sweep will use and a mismatch is silent and flattering (docs/defects.md, D8).
+cockroach sql --insecure --url="postgresql://root@$TS_IP:26257/defaultdb" -e "CREATE DATABASE IF NOT EXISTS ycsb;"
 echo "✅ Single-node baseline provisioned and listening on $TS_IP."

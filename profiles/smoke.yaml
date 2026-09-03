@@ -1,0 +1,28 @@
+# Fast profile for exercising the harness itself, not for producing results.
+name: smoke
+workload:
+  duration_s: 15
+  warmup_s: 3
+  concurrencies: [10, 50]
+  repetitions: 1
+  randomise_tier_order: false
+  cooldown_s: 5
+
+  # Deliberately identical to thesis.yaml. `cockroach workload init ycsb`
+  # requires the database to be named literally `ycsb` and rejects any other, so
+  # a smoke-sized working set cannot coexist with the real one -- loading it
+  # would drop the table the thesis sweep depends on. This profile therefore
+  # varies only the sweep (duration, tiers, repetitions) and runs against the
+  # same loaded dataset.
+  #
+  # Do not "simplify" these to smaller values. A seed or row count that disagrees
+  # with what the table was loaded with does not fail loudly: every operation
+  # matches no row and returns in ~3 ms, so the harness self-test would pass at
+  # an apparently excellent throughput while measuring nothing (docs/defects.md,
+  # D8). That is the one failure mode a self-test must not have.
+  seed: 42
+  insert_count: 125000
+chaos:
+  duration_s: 45
+  inject_at_s: 15
+  concurrency: 50

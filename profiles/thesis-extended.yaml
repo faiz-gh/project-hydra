@@ -1,0 +1,67 @@
+# Phase II sweep extended downward to meet the cluster's throughput range.
+#
+# Why this profile exists. A matched-throughput comparison between Phase II and
+# Phase III requires a load level at which *both* were measured. Under
+# `thesis.yaml` there is none: the cluster saturates at 1,855 ops/s (C=100) and
+# declines beyond it, while the single node's slowest tier is 2,502 ops/s
+# (C=200). The cluster's ceiling lies below the baseline's floor, so the ranges
+# cannot be made to meet by adding cluster tiers -- past saturation more workers
+# cost throughput. The only route is to measure the *baseline* at lower
+# concurrency, which is what this profile does.
+#
+# The added tiers are C = 1, 2, 5. At C=10 the baseline sustains ~2,570 ops/s at
+# an implied residence time of 3.9 ms, so a single worker should land in the low
+# hundreds and C=5 near the plateau -- bracketing the cluster's measured 624-1,855
+# ops/s band from below and above.
+#
+# The existing tiers are retained rather than split into a separate run, so the
+# whole curve comes from one sweep under one randomised tier order. Two runs
+# stitched together would reintroduce exactly the cross-run drift that
+# randomisation exists to control, and the analysis layer deliberately has no way
+# to merge two runs into one curve.
+#
+# Every other parameter is identical to `thesis.yaml`. This matters mechanically,
+# not just for tidiness: `analysis/validation.py::check_run_comparability` refuses
+# to compare two runs whose generator, mix, distribution, seed, insert count,
+# duration or warmup differ, so a casual edit here would make this run
+# incomparable with the Phase III cluster run it exists to be compared against.
+# Concurrency is deliberately *not* one of those keys -- differing tiers are the
+# entire point.
+name: thesis-extended
+
+workload:
+  generator: ycsb
+  ycsb_workload: CUSTOM
+  read_freq: 0.8
+  update_freq: 0.2
+  request_distribution: uniform
+  read_percent: 80
+  duration_s: 60
+  warmup_s: 5
+  display_every_s: 1
+
+  # The added low tiers are the reason for this profile.
+  concurrencies: [1, 2, 5, 10, 50, 100, 200]
+  repetitions: 3
+  randomise_tier_order: true
+  cooldown_s: 15
+
+  # MUST equal the values the table was loaded with. A mismatch does not error:
+  # every operation matches zero rows, returns in ~3 ms, and reports roughly
+  # twenty times the throughput at a twenty-fifth of the latency
+  # (docs/defects.md, D8).
+  seed: 42
+  insert_count: 125000
+  cycle_length: 1000000
+  block_bytes: 256
+
+chaos:
+  duration_s: 180
+  inject_at_s: 60
+  concurrency: 100
+  target: linode-2
+  recovery_threshold: 0.80
+  recovery_hold_s: 10
+  audit_interval_s: 0.02
+
+tps_ceiling: 20000
