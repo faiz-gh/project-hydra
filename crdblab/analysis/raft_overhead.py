@@ -355,12 +355,22 @@ def matched_utilisation(
             "points": [],
         }
 
-    levels = sorted(
-        {round(float(t) / peak_a, 3) for t in a["mean_total_tps"]}
-        | {round(float(t) / peak_b, 3) for t in b["mean_total_tps"]}
-    )
+    # A level is *identified* by its displayed 3 dp value, so the set of points
+    # is the set of measured tiers on either side; but the arithmetic below uses
+    # the exact ratio. Rounding a level and multiplying it back by the peak
+    # displaces the throughput it names, which silently converts a *measured*
+    # point into an interpolated one: 0.843 x 3563.335 = 3003.89 ops/s, where
+    # the C=2 tier it came from measured 3004.532. The displacement here is
+    # 0.6 ops/s; the mechanism is unbounded, and it also drops the lowest level
+    # altogether whenever rounding pushes it below ``lo``.
+    levels: dict[float, float] = {}
+    for peak, frame in ((peak_a, a), (peak_b, b)):
+        for t in frame["mean_total_tps"]:
+            exact = float(t) / peak
+            levels.setdefault(round(exact, 3), exact)
     points: list[dict[str, Any]] = []
-    for u in levels:
+    for key in sorted(levels):
+        u = levels[key]
         if not (lo <= u <= hi):
             continue
         ta, tb = u * peak_a, u * peak_b
@@ -515,12 +525,19 @@ def same_concurrency_delta(baseline: Run, cluster: Run) -> dict[str, Any]:
 
     rows: list[dict[str, Any]] = []
     for concurrency in shared:
+        # Divide the throughputs, then round the quotient -- never the reverse.
+        # The 1 dp forms below exist to be displayed; dividing them instead put
+        # the display rounding into the ratio and reported 25.26x at C=1 for a
+        # quantity whose value is 25.25x. This is the same defect the unqueued
+        # ``ratio_x`` was fixed for, in the same module.
+        phase_ii_tps = float(a.loc[concurrency, "mean_total_tps"])
+        phase_iii_tps = float(b.loc[concurrency, "mean_total_tps"])
         row: dict[str, Any] = {
             "concurrency": int(concurrency),
-            "phase_ii_tps": round(float(a.loc[concurrency, "mean_total_tps"]), 1),
-            "phase_iii_tps": round(float(b.loc[concurrency, "mean_total_tps"]), 1),
+            "phase_ii_tps": round(phase_ii_tps, 1),
+            "phase_iii_tps": round(phase_iii_tps, 1),
         }
-        row["throughput_ratio_x"] = round(row["phase_ii_tps"] / row["phase_iii_tps"], 2)
+        row["throughput_ratio_x"] = round(phase_ii_tps / phase_iii_tps, 2)
         for op in sorted(set(la["op"]) & set(lb["op"])):
             pa = la[(la["concurrency"] == concurrency) & (la["op"] == op)]["p50_ms"]
             pb = lb[(lb["concurrency"] == concurrency) & (lb["op"] == op)]["p50_ms"]

@@ -516,10 +516,22 @@ def _cmd_report(args: argparse.Namespace) -> int:
         "network": args.network or _latest_run(runs, "p1-network"),
         "baseline": args.baseline or _latest_run(runs, "p2_baseline"),
         "cluster": args.cluster or _latest_run(runs, "p3_cluster"),
-        "chaos": args.chaos or _latest_run(runs, "p4-chaos-recover"),
     }
+    # One Phase IV figure per fault class, so the default is the most recent run
+    # of *each* class. Defaulting to the recover run alone left the dead-fault
+    # timeline unreachable without an explicit argument, and the figure of it in
+    # ``figures/`` therefore had no invocation that reproduced it.
+    chaos_picks = args.chaos or [
+        run_id
+        for run_id in (
+            _latest_run(runs, "p4-chaos-recover"),
+            _latest_run(runs, "p4-chaos-dead"),
+        )
+        if run_id
+    ]
     for role, run_id in picks.items():
         print(f"  {role:9} {run_id or '(none found)'}")
+    print(f"  {'chaos':9} {'  '.join(chaos_picks) or '(none found)'}")
 
     try:
         written = figures.render_all(
@@ -527,7 +539,7 @@ def _cmd_report(args: argparse.Namespace) -> int:
             network=load_network_run(picks["network"], runs) if picks["network"] else None,
             baseline=load_run(picks["baseline"], runs) if picks["baseline"] else None,
             cluster=load_run(picks["cluster"], runs) if picks["cluster"] else None,
-            chaos=load_run(picks["chaos"], runs) if picks["chaos"] else None,
+            chaos=[load_run(run_id, runs) for run_id in chaos_picks],
         )
     except RunLoadError as exc:
         print(f"\nrefusing to draw: {exc}", file=sys.stderr)
@@ -754,7 +766,12 @@ def build_parser() -> argparse.ArgumentParser:
     figs.add_argument("--network", help="Phase I run id (default: most recent)")
     figs.add_argument("--baseline", help="Phase II run id (default: most recent)")
     figs.add_argument("--cluster", help="Phase III run id (default: most recent)")
-    figs.add_argument("--chaos", help="Phase IV run id (default: most recent recover run)")
+    figs.add_argument(
+        "--chaos",
+        action="append",
+        help="Phase IV run id; repeatable (default: the most recent run of each "
+        "fault class, one figure per class)",
+    )
     figs.set_defaults(func=_cmd_report)
 
     val = sub.add_parser("validate", help="check a run for internal consistency")

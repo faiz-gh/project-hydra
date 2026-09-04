@@ -1027,3 +1027,93 @@ def test_the_unqueued_ratio_is_computed_before_rounding(tmp_path):
     # ...and specifically not the ratio of the displayed values.
     from_display = round(out["phase_iii"]["p50_ms"] / out["phase_ii"]["p50_ms"], 2)
     assert out["ratio_x"] == round(exact, 2) and abs(exact - from_display) < 1.0
+
+
+def test_the_same_concurrency_throughput_ratio_is_computed_before_rounding(tmp_path):
+    """The same defect as ``ratio_x``, twelve lines further down the module.
+
+    ``phase_ii_tps`` and ``phase_iii_tps`` are rounded to 1 dp for display.
+    Dividing the displayed forms rather than the measured ones reported 25.26x
+    at C=1 for a quantity whose value is 25.25x, in a table the dissertation
+    quotes.
+    """
+    baseline = load_run(
+        _write_run(
+            tmp_path,
+            "p2_ratio",
+            _rows([(1, 1365.813, 0.4, 341.453, 1.416),
+                   (10, 2840.465, 2.0, 710.116, 5.093)]),
+            phase="p2_baseline",
+        )
+    )
+    cluster = load_run(
+        _write_run(
+            tmp_path,
+            "p3_ratio",
+            _rows([(1, 54.087, 0.7, 13.522, 71.325),
+                   (10, 507.062, 1.1, 126.766, 72.013)]),
+            phase="p3_cluster",
+        )
+    )
+    row = next(
+        r
+        for r in raft_overhead.same_concurrency_delta(baseline, cluster)["rows"]
+        if r["concurrency"] == 1
+    )
+    a = steady_state.per_tier(baseline).set_index("concurrency")
+    b = steady_state.per_tier(cluster).set_index("concurrency")
+    exact = float(a.loc[1, "mean_total_tps"]) / float(b.loc[1, "mean_total_tps"])
+    assert row["throughput_ratio_x"] == round(exact, 2)
+    # ...and specifically not the ratio of the displayed values, which differs
+    # here in the second decimal.
+    from_display = round(row["phase_ii_tps"] / row["phase_iii_tps"], 2)
+    assert from_display != row["throughput_ratio_x"]
+
+
+def test_a_matched_utilisation_level_is_not_rounded_before_it_is_used(tmp_path):
+    """Rounding a level and multiplying it back by the peak moves the point.
+
+    A level is a *measured* tier's share of its phase's peak. Round it to 3 dp
+    and multiply back and the throughput it names is no longer the throughput
+    that was measured, so the latency reported against it is interpolated from
+    neighbouring tiers instead of read off the tier itself -- and a level that
+    rounds below the lower bound is dropped from the table entirely.
+    """
+    baseline = load_run(
+        _write_run(
+            tmp_path,
+            "p2_util",
+            _rows([(1, 1365.813, 0.4, 341.453, 1.416),
+                   (2, 2403.626, 0.5, 600.906, 1.485),
+                   (50, 2850.668, 6.0, 712.667, 19.606)]),
+            phase="p2_baseline",
+        )
+    )
+    cluster = load_run(
+        _write_run(
+            tmp_path,
+            "p3_util",
+            _rows([(1, 54.087, 0.7, 13.522, 71.325),
+                   (2, 107.167, 0.74, 26.792, 71.351),
+                   (50, 1479.638, 3.0, 369.910, 105.472)]),
+            phase="p3_cluster",
+        )
+    )
+    out = raft_overhead.matched_utilisation(baseline, cluster)
+    tiers = steady_state.per_tier(baseline).set_index("concurrency")
+    lat = steady_state.latency_by_op(baseline)
+    lat = lat[lat["op"] == "update"].set_index("concurrency")
+    peak = float(tiers["mean_total_tps"].max())
+
+    for concurrency in (1, 2):
+        tps = float(tiers.loc[concurrency, "mean_total_tps"])
+        level = round(tps / peak, 3)
+        point = next(p for p in out["points"] if p["utilisation"] == level)
+        # The point sits on the tier it came from, not near it.
+        assert point["phase_ii_tps"] == round(tps, 1)
+        assert point["phase_ii_latency_ms"] == round(
+            float(lat.loc[concurrency, "p50_ms"]), 3
+        )
+    # The lowest level is the bottom of the comparable range, not a casualty of
+    # rounding it below that bound.
+    assert min(p["utilisation"] for p in out["points"]) == out["utilisation_range"][0]
