@@ -86,19 +86,29 @@ def test_nearest_rank_quantile_is_exact_at_the_boundaries():
 def test_quorum_floor_is_the_ack_that_completes_the_majority():
     """Five voters need the leader plus two followers, so the second-fastest binds.
 
-    Measured RTTs from the gateway on 2026-09-02. The floor of ~70 ms is what
+    Measured RTTs from the gateway, taken from
+    runs/20260902T152535Z_p1-network/network.csv (the crdb-gcp-1 source rows,
+    the gateway since the CPU confound was removed). The floor of ~69 ms is what
     makes a reported 3.1 ms write latency detectably impossible rather than
     merely surprising (docs/defects.md, D8).
+
+    The floor moved from 70.6 ms to 68.8 ms when the gateway moved from
+    crdb-linode-1 to crdb-gcp-1, because it is a property of the *gateway's* view
+    of the cluster and not of the cluster alone. Two percent is immaterial to
+    D8's argument -- 3.1 ms is impossible against either -- but the number is
+    re-read from the matrix rather than carried over, because a floor quoted from
+    the wrong vantage point is the kind of stale constant this project keeps
+    finding.
     """
     rtts = {
-        "crdb-gcp-1": 24.7,
-        "crdb-linode-2": 70.6,
-        "crdb-azure-1": 191.3,
-        "crdb-azure-2": 200.5,
+        "crdb-linode-1": 23.7,
+        "crdb-linode-2": 68.8,
+        "crdb-azure-2": 197.6,
+        "crdb-azure-1": 218.5,
     }
-    assert quorum_floor_ms(rtts, voters=5) == pytest.approx(70.6)
+    assert quorum_floor_ms(rtts, voters=5) == pytest.approx(68.8)
     # Three voters need only one follower ack, so the fastest binds.
-    assert quorum_floor_ms(rtts, voters=3) == pytest.approx(24.7)
+    assert quorum_floor_ms(rtts, voters=3) == pytest.approx(23.7)
 
 
 def test_quorum_floor_rejects_a_configuration_that_cannot_form_a_majority():

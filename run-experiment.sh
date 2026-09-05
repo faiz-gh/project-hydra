@@ -123,13 +123,26 @@ command -v tailscale >/dev/null 2>&1 && {
 
 step "Resolving topology"
 
-read -r GW_USER GW_HOST BL_USER BL_HOST < <("$PY" - <<'PYEOF'
+read -r GW_USER GW_HOST GW_REGION BL_USER BL_HOST < <("$PY" - <<'PYEOF'
 from crdblab.topology import DEFAULT_TOPOLOGY as t, BASELINE_NODE as b
 g = t.gateway
-print(g.user, g.host, b.user, b.host)
+print(g.user, g.host, g.region, b.user, b.host)
 PYEOF
 ) || die "could not resolve topology from crdblab.topology"
-ok "gateway $GW_USER@$GW_HOST   baseline $BL_USER@$BL_HOST"
+ok "gateway $GW_USER@$GW_HOST ($GW_REGION)   baseline $BL_USER@$BL_HOST"
+
+# The gateway is declared in crdblab/topology.py, but DB_URI is hand-written in
+# .env and nothing else reconciles the two. `crdblab capture` drives the
+# generator at whatever DB_URI names while every measured phase drives it at the
+# topology's gateway, so a stale .env does not fail -- it quietly captures a
+# column layout from one machine and measures on another. Since the gateway moved
+# from crdb-linode-1 to crdb-gcp-1 that is a live hazard for anyone with an older
+# .env, so it is asserted here rather than trusted.
+DB_HOST="$(printf '%s' "$DB_URI" | sed -E 's|^[a-z]+://||; s|^[^@/]*@||; s|[:/?].*$||')"
+[ "$DB_HOST" = "$GW_HOST" ] || die "DB_URI names '$DB_HOST' but the gateway is '$GW_HOST'.
+  The gateway is declared in crdblab/topology.py and .env must agree with it. Set:
+    DB_URI=postgresql://root@$GW_HOST:26257/ycsb?sslmode=disable"
+ok "DB_URI names the gateway"
 
 # The seed and row count are read from the profile the sweep will actually use.
 # Hardcoding them here would create a second source of truth for the one
@@ -174,7 +187,29 @@ LEASE=$(remote "$GW_USER" "$GW_HOST" \
   "cockroach sql --insecure --host=$GW_HOST:26257 -e 'SHOW ZONE CONFIGURATION FROM DATABASE ycsb;' 2>/dev/null \
    | grep -o \"lease_preferences = '[^']*'\" || true")
 case "$LEASE" in
-  *"[[+region="*) ok "lease preferences applied  ${LEASE#*= }" ;;
+  *"[[+region=$GW_REGION]"*)
+    ok "lease preferences applied, headed by $GW_REGION  ${LEASE#*= }" ;;
+  *"[[+region="*)
+    # Not D7 -- the preferences are present, they simply name another region
+    # first. That is worse than it looks: the cluster is healthy, every
+    # consistency check passes, and the only symptom is that each operation
+    # crosses to the leaseholder and back. From crdb-gcp-1 to crdb-linode-1 that
+    # is ~20 ms added to a write path whose quorum floor is ~70 ms, which is a
+    # ~30% inflation that would be attributed to replication rather than to a
+    # misconfiguration.
+    die "lease_preferences is applied but does not name the gateway's region first.
+  observed: ${LEASE#*= }
+  expected: the list to begin [+region=$GW_REGION], because the generator runs on
+  $GW_HOST and a leaseholder elsewhere puts a wide-area hop on every operation.
+  The provisioning bootstrap orders the fast triangle us-east, us-east1, us-west,
+  which suited the previous gateway (crdb-linode-1, us-east). Re-order it on the
+  live cluster with:
+    cockroach sql --insecure --host=$GW_HOST:26257 -e \\
+      \"ALTER RANGE default CONFIGURE ZONE USING lease_preferences =
+        '[[+region=$GW_REGION], [+region=us-east], [+region=us-west]]';\"
+  then allow a few seconds for the leases to transfer. terraform/scripts/
+  bootstrap.tftpl needs the same re-ordering before the next 'terraform apply',
+  or a fresh deployment will come back with the old order (instructions.md, section 2)." ;;
   *) die "lease_preferences is empty or unreadable on database 'ycsb'.
   The bootstrap raced: it applied num_replicas and then failed to apply the
   lease preference, so leaseholders may sit outside the fast triangle.
@@ -244,14 +279,33 @@ if [ "$RUN_CHAOS" -eq 1 ]; then
   # unit, so there is no service to start and a reboot would not bring it back.
   # The memory flags are NOT optional: omitting them takes the 128 MiB default
   # and silently reintroduces the block-cache asymmetry of D9.
+  #
+  # The three redirections on the REMOTE side of the command are what stop this
+  # step from hanging, and they are not the same thing as the local
+  # `>/dev/null 2>&1` after it. `--background` forks cockroach and returns, but
+  # the forked process inherits the remote shell's stdout and stderr -- which are
+  # the SSH channel itself. ssh does not close a session while any process still
+  # holds those pipes open, so it waits for the *database* to exit: the restore
+  # blocks until the connection eventually times out, and a sweep that has
+  # already finished measuring appears to hang for tens of minutes at the last
+  # step. Observed on 2026-09-05, where it added ~50 minutes to a 75-minute run.
+  # Redirecting the remote fds detaches the daemon from the channel so ssh can
+  # return immediately. Local redirection cannot do this; it only discards what
+  # the client prints.
   remote "$CT_USER" "$CT_HOST" "TS_IP=\$(tailscale ip -4); cockroach start --insecure \
       --store=/var/lib/cockroach \
       --listen-addr=\$TS_IP:26257 --advertise-addr=\$TS_IP:26257 \
       --locality=$CT_LOCALITY \
       --cache=0.25 --max-sql-memory=0.25 \
-      --join=$GW_HOST:26257 --background" >/dev/null 2>&1 || true
+      --join=$GW_HOST:26257 --background </dev/null >/dev/null 2>&1" >/dev/null 2>&1 || true
 
-  for _ in 1 2 3 4 5 6; do
+  # Now that the restore returns promptly, the poll has to do its own waiting.
+  # It previously inherited the hang as an accidental grace period: six
+  # back-to-back status calls take about ten seconds, which is less than a node
+  # needs to rejoin and be marked live, so without a sleep this would report "has
+  # not rejoined" on a node that was merely still starting.
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    sleep 5
     LIVE=$(remote "$GW_USER" "$GW_HOST" \
       "cockroach node status --insecure --host=$GW_HOST:26257 --format=csv 2>/dev/null | tail -n +2 | wc -l" \
       | tr -d ' ' || echo 0)
@@ -293,12 +347,20 @@ step "Analysis"
 [ -n "$P3" ] && "$CRDBLAB" analyze steady-state "$P3"
 
 if [ -n "$P2" ] && [ -n "$P3" ]; then
-  # --accept-hardware-difference is required on this testbed and is not a
-  # formality: the baseline is a GCP instance and the gateway a Linode one, so
-  # they differ in CPU model. The flag downgrades the refusal to a recorded
-  # warning rather than suppressing it. See instructions.md.
+  # --accept-hardware-difference is deliberately NOT passed any more. It used to
+  # be mandatory here: the Phase II baseline is a GCP instance and the gateway
+  # was a Linode one, so the two phases differed in CPU model and the flag was
+  # the only way to compute the comparison at all (D11a). The gateway is now
+  # crdb-gcp-1, the same GCP machine type as the baseline, so there should be
+  # nothing left to accept -- and running without the flag is what makes that a
+  # tested claim rather than an assumption. If this refuses, the two runs really
+  # do differ and the refusal names exactly how; do not paper over it by adding
+  # the flag back without reading what it says.
   "$CRDBLAB" analyze raft-overhead --baseline "$P2" --cluster "$P3" \
-      --accept-hardware-difference
+    || die "raft-overhead refused to compare Phase II with Phase III.
+  Read the refusal above. Since the gateway moved to crdb-gcp-1 the two phases
+  are supposed to be on identical hardware, so a hardware refusal here means the
+  testbed does not match crdblab/topology.py -- not that the flag is missing."
 fi
 [ -n "$P4R" ] && "$CRDBLAB" analyze resilience "$P4R"
 [ -n "$P4D" ] && "$CRDBLAB" analyze resilience "$P4D"
@@ -308,6 +370,14 @@ FIG_ARGS=()
 [ -n "$P1" ]  && FIG_ARGS+=(--network  "$(basename "$P1")")
 [ -n "$P2" ]  && FIG_ARGS+=(--baseline "$(basename "$P2")")
 [ -n "$P3" ]  && FIG_ARGS+=(--cluster  "$(basename "$P3")")
+# BOTH fault classes, because there is one timeline figure per class and
+# `--chaos` is a pin, not a filter. Passing only the dead run left
+# fig6_resilience_timeline_recover untouched, so it kept whatever data the last
+# run that did draw it had used -- and after a redeploy that is a figure from a
+# different cluster sitting in the same directory as five from this one, with
+# nothing about either file saying so. Observed on 2026-09-05: five figures dated
+# the 6th beside one dated the 4th, drawn from the pre-move Linode gateway.
+[ -n "$P4R" ] && FIG_ARGS+=(--chaos    "$(basename "$P4R")")
 [ -n "$P4D" ] && FIG_ARGS+=(--chaos    "$(basename "$P4D")")
 "$CRDBLAB" report figures "${FIG_ARGS[@]}"
 

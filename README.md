@@ -27,14 +27,14 @@ alongside the session log it was distilled from.
 
    ```
    cockroach workload init ycsb --drop --seed=42 --insert-count=125000 \
-     'postgresql://root@crdb-linode-1:26257/ycsb?sslmode=disable'
+     'postgresql://root@crdb-gcp-1:26257/ycsb?sslmode=disable'
    ```
 
    Repeat against `crdb-local-1` for the Phase II baseline, which needs its own
    working set. The seed and row count **must** match the profile you intend to
    sweep with (`profiles/thesis-extended.yaml` for the dissertation's runs). They
    are not incidental — see the seed commitment below.
-3. `.venv/bin/crdblab capture --node linode-1 --pty --duration 15`
+3. `.venv/bin/crdblab capture --node gcp-1 --pty --duration 15`
    Pins the column layout emitted by the CockroachDB version actually
    installed. Nothing else should be run until the reported operation types and
    latency columns have been inspected.
@@ -53,6 +53,14 @@ alongside the session log it was distilled from.
    cloud-init with `--background`, not as a systemd unit, so there is no service
    to start and a reboot will not bring it back; replay the start command, keeping
    `--cache=0.25 --max-sql-memory=0.25` (see `instructions.md`).
+   Each chaos run also carries a **high-frequency RTO probe** on a background
+   path: a pool of canary writers on their own connections and their own table,
+   dispatching every 2 ms, recording when the database stopped and resumed
+   serving writes into `rto_probe.csv` and a flushed-as-it-happens
+   `rto_probe.log`. It exists because neither of the other two clients can time a
+   recovery: the generator samples once a second, and the RPO audit writer is
+   serialised at the cost of one quorum write. `crdblab probe rto --duration 60`
+   runs it standalone, with no benchmark anywhere.
 7. `crdblab validate runs/<run-id>` — gate before any analysis.
 8. `crdblab analyze steady-state <run>` — Phase II or III throughput and latency
    by tier, with an interval estimate across repetitions.
@@ -61,12 +69,16 @@ alongside the session log it was distilled from.
    unqueued (both phases at one worker), matched throughput, and matched
    utilisation. It refuses to compare two runs configured differently, and
    declines the matched-throughput scalar where the phases' ranges do not overlap
-   rather than extrapolating. On this testbed it also needs
-   `--accept-hardware-difference`, because the two phases sit at different
-   providers and therefore on different CPU models; the flag downgrades that
-   refusal to a *recorded warning* rather than suppressing it.
-   `crdblab analyze resilience <chaos-run>` — both RTOs with their limits, the
-   RPO, and the clock alignment every timing depends on.
+   rather than extrapolating. It no longer needs
+   `--accept-hardware-difference`: the gateway is `crdb-gcp-1`, the same machine
+   type as the Phase II baseline, so the two phases differ in replication and
+   nothing else the harness can see. The flag is retained for re-analysing runs
+   measured before that move, whose gateway was a Linode node with a different
+   CPU, and it downgrades the refusal to a *recorded warning* rather than
+   suppressing it.
+   `crdblab analyze resilience <chaos-run>` — all three RTO figures with their
+   limits (throughput-based, audit-log-based, and the probe's), the RPO, and the
+   clock alignment every timing depends on.
 9. `crdblab report figures` — renders the dissertation figures into `figures/`,
    defaulting to the most recent run of each phase. Every figure resolves through
    the analysis loader, so an unvalidated or manifest-less run cannot reach one,

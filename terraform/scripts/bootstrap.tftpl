@@ -171,7 +171,7 @@ if [ "${hostname}" == "$PRIMARY_NODE" ]; then
 
         # 2. Pin leaseholders (write coordinators) to the low-latency US triangle
         cockroach sql --insecure --host=$TS_IP:26257 \
-            -e "ALTER RANGE default CONFIGURE ZONE USING lease_preferences = '[[+region=us-east], [+region=us-east1], [+region=us-west]]';"
+            -e "ALTER RANGE default CONFIGURE ZONE USING lease_preferences = '[[+region=us-east1], [+region=us-east], [+region=us-west]]';"
 
         # Assert the end state rather than trusting that each statement ran.
         # num_replicas applied while lease_preferences did not on the first run,

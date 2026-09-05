@@ -8,7 +8,8 @@ Provenance of the fixtures
 --------------------------
 Both fixtures are verbatim captures taken from the provisioned testbed on
 2026-09-02: CockroachDB v26.3.0, generator executed on the gateway node
-``linode-1`` against a single-host connection string, 15 s at concurrency 10,
+(``linode-1``, before the gateway moved to ``gcp-1``) against a single-host
+connection string, 15 s at concurrency 10,
 ``ycsb`` against a 125,000-row (~205 MB) working set loaded under seed 42.
 ``ycsb_multi_op.txt`` is the CUSTOM 80/20 read/update mix; ``ycsb_single_op.txt``
 is workload C, read-only.
@@ -176,16 +177,22 @@ def test_result_block_is_the_cross_op_aggregate():
 def test_update_latency_is_above_the_quorum_floor():
     """A committed write cannot be faster than the follower that completes quorum.
 
-    Measured RTTs from the gateway are 24.7 ms (gcp us-east1), 70.6 ms (linode
-    us-west) and 191/200 ms (azure). Quorum over five voters needs the leader plus
-    two followers, so no committed write can beat ~70 ms. Under a mismatched
+    Measured RTTs from the gateway (crdb-gcp-1, us-east1) are 23.7 ms (linode
+    us-east), 68.8 ms (linode us-west) and 197/218 ms (azure). Quorum over five
+    voters needs the leader plus two followers, so no committed write can beat
+    ~69 ms. Under a mismatched
     generator seed, updates matched zero rows and returned in 3.1 ms -- below the
     floor, and therefore a detectable impossibility rather than a good result.
     This test pins that reasoning to the fixture so a future capture taken under a
     silently broken configuration fails here.
     """
     ticks = list(group_ticks(_samples("ycsb_multi_op.txt")))
-    quorum_floor_ms = 70.6
+    # The fixture was captured with crdb-linode-1 as the gateway, whose floor was
+    # 70.6 ms; the gateway is now crdb-gcp-1 at 68.8 ms. The lower of the two is
+    # used, because this test asserts an impossibility and must not manufacture
+    # one: a capture taken from either vantage point has to clear the floor that
+    # actually applied to it.
+    quorum_floor_ms = 68.8
     observed = [t.latency_ms("update", "p50") for t in ticks]
     assert min(observed) >= quorum_floor_ms * 0.9, (
         f"update p50 {min(observed)} ms is below the {quorum_floor_ms} ms quorum "

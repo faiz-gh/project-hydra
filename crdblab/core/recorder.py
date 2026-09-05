@@ -130,8 +130,71 @@ AUDIT_COLUMNS: tuple[str, ...] = (
 )
 
 
+#: Schema for the high-frequency RTO probe: one row per canary write the probe
+#: dispatched, in order, with when it was dispatched, when it returned and what
+#: the client observed.
+#:
+#: This is a *separate* table from :data:`AUDIT_COLUMNS` and not an extension of
+#: it, because the two clients answer different questions and their sampling
+#: rates are chosen for different reasons. The RPO audit writes a monotonic
+#: sequence slowly and its value is the three-way ack/ambiguous/refusal
+#: classification; the probe writes as fast as its pool allows and its value is
+#: the *timing* of the edges -- the last write served before a fault and the
+#: first served after it. Merging them would force one cadence on both and make
+#: the RPO classification depend on how hard the probe was pushing.
+#:
+#: Both a dispatch and a completion offset are recorded, and the distinction is
+#: load-bearing. During an outage a write does not fail, it *blocks*: the
+#: statement sits in the database until the lease transfers and then commits. Its
+#: completion is therefore an observation of the instant service resumed, precise
+#: to the process that observed it, while its dispatch says only that the probe
+#: was already waiting. Recording one without the other would leave the recovery
+#: edge attributable to either, and the resolution of an RTO claim is exactly the
+#: question of which.
+#:
+#: ``ts_utc`` carries microseconds. The offsets are the ones to compute with --
+#: they share their origin with ``events.json`` and with ``wall_offset_s`` in
+#: :data:`COLUMNS` -- and the wall clock is recorded so a row can be tied to an
+#: external log without trusting that the epoch in the manifest was read
+#: correctly.
+PROBE_COLUMNS: tuple[str, ...] = (
+    "ts_utc",
+    "seq_id",
+    "dispatch_offset_s",
+    "complete_offset_s",
+    "duration_ms",
+    "outcome",
+    "worker",
+    "detail",
+)
+
+#: Outcomes the probe distinguishes. ``ok`` is the only one that establishes the
+#: database was serving writes; the other three are kept apart rather than
+#: pooled into a single failure state because they have different meanings for a
+#: downtime figure. A ``refused`` write was rejected by a database that was
+#: reachable and talking (a constraint violation, a syntax error) and is a bug in
+#: the probe, not an outage. A ``conn_error`` says the connection broke or could
+#: not be made. A ``timeout`` says the database accepted the statement and did
+#: not answer within the budget, which is what a lease transfer looks like from a
+#: client and is the outage's actual signature here. Collapsing the three would
+#: let a probe bug read as downtime.
+PROBE_OUTCOMES: tuple[str, ...] = ("ok", "timeout", "conn_error", "refused")
+
+
 def utcnow() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def utcnow_us() -> str:
+    """UTC timestamp at microsecond resolution.
+
+    :func:`utcnow` is fine for stamping a run; it is not fine for stamping an
+    event in a millisecond-resolution outage measurement, where two adjacent
+    observations can share a second and their order is the measurement.
+    """
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace(
+        "+00:00", "Z"
+    )
 
 
 def new_run_id(phase: str) -> str:
@@ -210,6 +273,25 @@ class RunDirectory:
     def audit_csv(self) -> Path:
         """Phase IV audit attempt log, written under :data:`AUDIT_COLUMNS`."""
         return self.path / "audit.csv"
+
+    @property
+    def probe_csv(self) -> Path:
+        """High-frequency RTO probe attempts, written under :data:`PROBE_COLUMNS`."""
+        return self.path / "rto_probe.csv"
+
+    @property
+    def probe_log(self) -> Path:
+        """Connection-lifecycle log for the RTO probe, one JSON object per line.
+
+        Deliberately a second file rather than more rows in
+        :attr:`probe_csv`. The CSV is written when the run ends, from a list held
+        in memory; this is appended and flushed as each event happens, so a run
+        that is killed mid-fault -- which is a normal outcome of chaos testing and
+        the case where the timings matter most -- still leaves the outage edges on
+        disk. It also records what the CSV has no column for: the connection
+        opening and closing underneath the attempts.
+        """
+        return self.path / "rto_probe.log"
 
     @property
     def preflight_json(self) -> Path:

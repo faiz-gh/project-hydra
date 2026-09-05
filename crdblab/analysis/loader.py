@@ -39,7 +39,7 @@ import pandas as pd
 
 from ..config import DEFAULT_RUNS_DIR
 from ..core.recorder import COLUMNS, NETWORK_COLUMNS
-from .validation import ValidationReport, validate
+from .validation import ValidationReport, validate, validate_probe
 
 #: Quantile columns, in the order the invariant p50 <= p95 <= p99 <= pMax asserts.
 QUANTILES: tuple[str, ...] = ("p50_ms", "p95_ms", "p99_ms", "pmax_ms")
@@ -237,6 +237,23 @@ def load_run(
             f"{path.name} does not pass validation and must not be used for figures: "
             f"{errors}"
         )
+
+    # A Phase IV run may also carry a probe log, under its own schema. It is
+    # gated here for the same reason everything else is: `probe_availability`
+    # reads it with a bare `read_csv`, and the whole point of this loader is that
+    # no analysis reaches a CSV that has not been checked first. A run that
+    # predates the probe simply has no such file and is unaffected.
+    probe_csv = path / "rto_probe.csv"
+    if require_valid and probe_csv.exists():
+        probe_report = validate_probe(pd.read_csv(probe_csv))
+        if not probe_report.ok:
+            errors = "; ".join(
+                f.message for f in probe_report.findings if f.severity == "error"
+            )
+            raise RunLoadError(
+                f"{path.name} carries an RTO probe log that does not pass "
+                f"validation, so its recovery-time figures must not be used: {errors}"
+            )
 
     # Pre-flight is a separate gate and must be checked separately. ``validate``
     # asks whether the recorded numbers are consistent with each other;

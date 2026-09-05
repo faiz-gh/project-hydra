@@ -34,6 +34,19 @@ audit series at the interesting moment. Here every attempt takes a fresh number
 and its outcome is classified as acknowledged, ambiguous or refused. Only writes
 the client was *told* had committed can constitute data loss; a gap in the table
 alone establishes nothing.
+
+**RTO is measured by a third client, not by either of the first two.** The
+generator answers "when did throughput come back" at one sample a second; the
+audit writer answers "what did the client lose" at the pace of one serialised
+quorum write, ~14 a second. Neither can time a recovery to better than about a
+tenth of a second, and the audit writer's own docstring says so.
+:class:`crdblab.core.rto_probe.RtoProbe` runs alongside both, on its own threads,
+its own connections and its own table, holding several canary writes in flight so
+that the interval between observations is the write cost *divided by* the pool
+size. It is additive in every direction: the RPO series is untouched and paced
+exactly as its recorded runs were, ``audit.csv`` still carries the availability
+figure derived from it, and a probe that fails is recorded as a failed probe
+rather than as a failed run.
 """
 
 from __future__ import annotations
@@ -41,6 +54,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Iterator
 
@@ -49,12 +63,14 @@ from ..core import preflight, ssh
 from ..core.recorder import (
     AUDIT_COLUMNS,
     COLUMNS,
+    PROBE_COLUMNS,
     Manifest,
     MetricsWriter,
     RunDirectory,
     new_run_id,
     utcnow,
 )
+from ..core.rto_probe import CREATE_TABLE_SQL, RtoProbe
 from ..core.workload import PERIODIC, Sample, WorkloadParser, group_timed_ticks
 from ..topology import Node, Topology
 
@@ -342,6 +358,21 @@ def find_recovery(
     return None
 
 
+@contextmanager
+def _optional(resource):
+    """Enter ``resource`` if there is one, and do nothing if there is not.
+
+    So that disabling the probe changes one flag rather than duplicating the
+    body of the run under an ``if``. Two copies of a measurement loop is how the
+    runner and the evaluator came to disagree about the same run (D5).
+    """
+    if resource is None:
+        yield None
+        return
+    with resource as entered:
+        yield entered
+
+
 def run(
     settings: Settings,
     profile: Profile,
@@ -371,11 +402,21 @@ def run(
     workload_dsn = f"postgresql://root@{gateway.host}:26257/{database}?sslmode=disable"
     audit_dsn = f"postgresql://root@{gateway.host}:26257/{audit_database}?sslmode=disable"
 
+    # Both tables are dropped and recreated, and they are two tables rather than
+    # one. Sharing would put the RPO sequence and the RTO canary in the same
+    # range under the same lease, so an outage of that one range would appear in
+    # both series and the two measurements would stop being independent readings.
+    canary_ddl = (
+        f"DROP TABLE IF EXISTS {chaos.probe_table}; "
+        + CREATE_TABLE_SQL.format(table=chaos.probe_table)
+        + ";"
+    )
     ssh.run(
         gateway,
         f"cockroach sql --insecure --host={gateway.host}:26257 --database={audit_database} "
         '-e "DROP TABLE IF EXISTS rpo_audit; '
-        'CREATE TABLE rpo_audit (seq_id INT8 PRIMARY KEY, ts TIMESTAMPTZ DEFAULT now());"',
+        'CREATE TABLE rpo_audit (seq_id INT8 PRIMARY KEY, ts TIMESTAMPTZ DEFAULT now()); '
+        f'{canary_ddl}"',
         timeout=60,
     )
 
@@ -396,6 +437,11 @@ def run(
     manifest.cockroach_version = server.get("version")
     manifest.note(f"server: {server['start_command']}")
     manifest.note(f"host: {preflight.format_hardware(server['hardware'])}")
+    manifest.note(
+        f"rto probe: {'enabled' if chaos.probe_enabled else 'DISABLED'}, "
+        f"{chaos.probe_workers} worker(s) at {chaos.probe_interval_s * 1000:.0f} ms "
+        f"dispatch into {audit_database}.{chaos.probe_table}"
+    )
 
     generator = (
         f"cockroach workload run {spec.generator} "
@@ -436,34 +482,56 @@ def run(
     raw_path = run_dir.raw(f"chaos_{mode}.txt")
 
     print(f"  running {chaos.duration_s}s at C={chaos.concurrency}, injecting at {chaos.inject_at_s}s")
-    with AuditWriter(audit_dsn, chaos.audit_interval_s) as audit:
-        t_zero = time.monotonic()
-        events["t_start_utc"] = utcnow()
-        manifest.clock_epoch_utc = events["t_start_utc"]
-        timer_thread = threading.Thread(target=timer, args=(t_zero,), daemon=True)
-        timer_thread.start()
 
-        with open(raw_path, "w") as tee:
-            with ssh.StreamingRemote(gateway, ssh.force_tty(generator), tee=tee) as stream:
-                def feed() -> Iterator[tuple[float, Sample]]:
-                    for line in stream:
-                        sample = parser.feed(line)
-                        if sample is not None:
-                            samples.append(sample)
-                            yield time.monotonic(), sample
+    # The probe's epoch is taken *before* it starts and is then handed to it, so
+    # every offset it records shares an origin with events.json, audit.csv and
+    # metrics.csv's wall_offset_s. Letting it take its own zero would put a fourth
+    # clock in the run directory whose offset to the others nobody measured --
+    # which is D5 exactly, and is why the epoch is a parameter and not a default.
+    t_zero = time.monotonic()
+    probe = (
+        RtoProbe(
+            audit_dsn,
+            table=chaos.probe_table,
+            interval_s=chaos.probe_interval_s,
+            workers=chaos.probe_workers,
+            statement_timeout_ms=chaos.probe_statement_timeout_ms,
+            connect_timeout_s=chaos.probe_connect_timeout_s,
+            log_path=run_dir.probe_log,
+            epoch_monotonic=t_zero,
+        )
+        if chaos.probe_enabled
+        else None
+    )
 
-                for arrived, tick in group_timed_ticks(feed()):
-                    offset = arrived - t_zero
-                    observed_at[tick.elapsed_s] = offset
-                    series.append((offset, tick.total_tps))
-                    if tick.errors_cum > 0 and first_error_at is None:
-                        first_error_at = offset
-                        events["t_first_error_offset_s"] = round(offset, 3)
-                    if int(tick.elapsed_s) % 15 == 0:
-                        print(f"  [{offset:6.1f}s] tps={tick.total_tps:8.1f} errors={tick.errors_cum}")
+    with _optional(probe):
+        with AuditWriter(audit_dsn, chaos.audit_interval_s) as audit:
+            events["t_start_utc"] = utcnow()
+            manifest.clock_epoch_utc = events["t_start_utc"]
+            timer_thread = threading.Thread(target=timer, args=(t_zero,), daemon=True)
+            timer_thread.start()
 
-        stop_timer.set()
-        timer_thread.join(timeout=5)
+            with open(raw_path, "w") as tee:
+                with ssh.StreamingRemote(gateway, ssh.force_tty(generator), tee=tee) as stream:
+                    def feed() -> Iterator[tuple[float, Sample]]:
+                        for line in stream:
+                            sample = parser.feed(line)
+                            if sample is not None:
+                                samples.append(sample)
+                                yield time.monotonic(), sample
+
+                    for arrived, tick in group_timed_ticks(feed()):
+                        offset = arrived - t_zero
+                        observed_at[tick.elapsed_s] = offset
+                        series.append((offset, tick.total_tps))
+                        if tick.errors_cum > 0 and first_error_at is None:
+                            first_error_at = offset
+                            events["t_first_error_offset_s"] = round(offset, 3)
+                        if int(tick.elapsed_s) % 15 == 0:
+                            print(f"  [{offset:6.1f}s] tps={tick.total_tps:8.1f} errors={tick.errors_cum}")
+
+            stop_timer.set()
+            timer_thread.join(timeout=5)
 
     audit_result = audit.collect(audit_dsn)
 
@@ -492,11 +560,35 @@ def run(
                 }
             )
 
+    probe_summary: dict[str, Any] = {"enabled": probe is not None}
+    if probe is not None:
+        # Ordered by completion, which is the order the observations were made
+        # in. With several writes in flight that is not the order of seq_id, and
+        # sorting by seq_id here would silently reorder the outage edges.
+        attempts_in_order = sorted(probe.attempts, key=lambda a: a.complete_offset_s)
+        with MetricsWriter(run_dir.probe_csv, PROBE_COLUMNS) as probe_log:
+            for attempt in attempts_in_order:
+                probe_log.write(attempt.to_row())
+        probe_summary.update(probe.summary())
+        probe_summary["error"] = probe.error
+        probe_summary["log"] = run_dir.probe_log.name
+        probe_summary["attempts_csv"] = run_dir.probe_csv.name
+        probe_summary["rto"] = (
+            probe.rto(injected["at_offset_s"])
+            if injected.get("at_offset_s") is not None
+            else {"measurable": False, "detail": "fault was never injected"}
+        )
+
     events.update(
         {
             "clock": clock_offsets(observed_at),
             "injected": injected,
             "availability": avail,
+            # A second, finer reading of the same quantity, from an independent
+            # client. Recorded beside `availability` rather than replacing it:
+            # the two are measured at different resolutions by different code,
+            # and a disagreement between them is information, not noise.
+            "probe": probe_summary,
             "baseline_tps": round(baseline_tps, 2),
             "recovery_threshold": chaos.recovery_threshold,
             "recovery_floor_tps": round(baseline_tps * chaos.recovery_threshold, 2),

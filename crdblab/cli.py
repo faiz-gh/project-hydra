@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -278,6 +279,58 @@ def _cmd_chaos(args: argparse.Namespace) -> int:
     )
     if avail.get("write_gap_s") is not None:
         print(f"     write outage   {avail['write_gap_s']:.2f} s between acknowledged writes")
+
+    # The probe measures the same thing as `RTO availability` above, from a
+    # separate client at a finer resolution. Both are printed, and printed
+    # adjacently, because the useful thing about a second measurement is whether
+    # it agrees with the first.
+    probe = events.get("probe") or {}
+    if not probe.get("enabled"):
+        print("  RTO probe         disabled for this run (chaos.probe_enabled)")
+    elif probe.get("error"):
+        print(f"  RTO probe         FAILED: {probe['error']}", file=sys.stderr)
+    else:
+        p_rto = probe.get("rto") or {}
+        resolution = p_rto.get("resolution_s")
+        print(
+            "  RTO probe         "
+            + (p_rto.get("claim") or p_rto.get("detail", "not measured"))
+        )
+        if p_rto.get("observed_outage_s") is not None:
+            if p_rto.get("fault_attributable", True):
+                print(
+                    f"     write outage   {p_rto['observed_outage_s'] * 1000:.0f} ms between "
+                    "served canary writes (the offset-cancelling figure; prefer it)"
+                )
+            else:
+                # The gap exists but failed the exceedance-rate test: it is not
+                # distinguishable from this probe's own tail over a longer
+                # window. The claim string above already says so; this is the
+                # supporting evidence for it, not a second number to quote.
+                attribution = p_rto.get("attribution", {})
+                print(
+                    f"     (unattributed gap {p_rto['observed_outage_s'] * 1000:.0f} ms; "
+                    f"{attribution.get('post_fault_exceedances')} large gaps observed "
+                    f"after the fault vs {attribution.get('expected_post_fault_exceedances')} "
+                    "expected from the pre-fault rate -- not a recovery time)"
+                )
+        if p_rto.get("detection_lag_s") is not None:
+            print(
+                f"     detection      {p_rto['detection_lag_s'] * 1000:.0f} ms from the "
+                "fault to the first blocked or failed write"
+            )
+        print(
+            f"     sampling       {probe.get('attempts', 0)} attempts, "
+            f"{probe.get('achieved_rate_per_s')}/s achieved of "
+            f"{1 / probe['dispatch_interval_s']:.0f}/s dispatched"
+            if probe.get("dispatch_interval_s")
+            else f"     sampling       {probe.get('attempts', 0)} attempts"
+        )
+        if resolution:
+            print(
+                f"     resolution     {resolution * 1000:.1f} ms; an interval shorter "
+                "than this is indistinguishable from no interruption"
+            )
     p_rto = events["performance_rto_s"]
     print(
         f"  RTO performance   "
@@ -464,6 +517,42 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
         if avail.get("caveat"):
             print(f"  caveat: {avail['caveat']}")
 
+        probe = summary.get("probe_rto") or {}
+        if probe.get("available"):
+            print("\nRTO, availability (high-frequency probe):")
+            print(f"  {probe.get('claim', probe.get('detail'))}")
+            if probe.get("observed_outage_s") is not None:
+                if probe.get("fault_attributable", True):
+                    print(
+                        f"  {probe['observed_outage_s'] * 1000:.0f} ms between served canary "
+                        "writes. Prefer this figure: the probe writes from the "
+                        "workstation, so each timestamp carries ~188 ms of link, and "
+                        "that offset cancels between two of its own observations but "
+                        "not against the fault's"
+                    )
+                else:
+                    attribution = probe.get("attribution", {})
+                    print(
+                        f"  gap of {probe['observed_outage_s'] * 1000:.0f} ms observed, but "
+                        "NOT attributed to the fault: "
+                        f"{attribution.get('post_fault_exceedances')} gaps over the healthy "
+                        f"95th percentile occurred afterward against "
+                        f"{attribution.get('expected_post_fault_exceedances')} expected from "
+                        "the pre-fault rate (ratio "
+                        f"{attribution.get('exceedance_rate_ratio')}x). A longer post-fault "
+                        "window draws a larger maximum from the same tail on its own; do "
+                        "not quote this as a recovery time"
+                    )
+            if probe.get("detection_lag_s") is not None:
+                print(
+                    f"  {probe['detection_lag_s'] * 1000:.0f} ms from the fault to the "
+                    "first blocked or failed write, which is detection and not recovery"
+                )
+            if probe.get("resolution_s"):
+                print(f"  resolution {probe['resolution_s'] * 1000:.1f} ms")
+        elif probe.get("detail"):
+            print(f"\nRTO, availability (high-frequency probe):\n  {probe['detail']}")
+
         perf = summary["performance_rto"]
         print("\nRTO, performance:")
         print(f"  {perf.get('claim', perf.get('detail'))}")
@@ -554,9 +643,10 @@ def _cmd_report(args: argparse.Namespace) -> int:
 def _cmd_validate(args: argparse.Namespace) -> int:
     import pandas as pd
 
-    from .analysis.validation import validate
+    from .analysis.validation import validate, validate_probe
 
     path = Path(args.run)
+    probe_dir = path if path.is_dir() else path.parent
     if path.is_dir():
         # A Phase I run records network.csv under a different schema -- network
         # data shares no dimensions with a workload sample -- so it has no
@@ -571,6 +661,23 @@ def _cmd_validate(args: argparse.Namespace) -> int:
                     "assertions are in preflight.json."
                 )
                 return 0
+            # A standalone `crdblab probe rto` run has no generator behind it and
+            # so no workload table. It is still a measurement with a manifest and
+            # a schema, so it validates -- under its own checks rather than under
+            # the workload ones, which have nothing to say about it.
+            if (path / "rto_probe.csv").exists():
+                report = validate_probe(pd.read_csv(path / "rto_probe.csv"))
+                for finding in report.findings:
+                    print(f"[{finding.severity.upper():7}] {finding.check}: {finding.message}")
+                print(
+                    "PASS: probe log is internally consistent"
+                    if report.ok
+                    else "FAIL: probe log is not internally consistent and must "
+                    "not be used for figures"
+                )
+                if args.json:
+                    print(json.dumps(report.to_dict(), indent=2))
+                return 0 if report.ok else 1
             print(f"{path} contains no metrics.csv; is it a run directory?")
             return 2
         path = path / "metrics.csv"
@@ -583,13 +690,150 @@ def _cmd_validate(args: argparse.Namespace) -> int:
 
     for finding in report.findings:
         print(f"[{finding.severity.upper():7}] {finding.check}: {finding.message}")
-    if report.ok:
-        print("PASS: no consistency errors detected")
+
+    # A Phase IV run may also carry a probe log, under its own schema. It is
+    # checked here rather than in a separate command so that "the run validates"
+    # keeps meaning "everything this run recorded validates" -- a second gate
+    # nobody remembers to run is not a gate.
+    probe_report = None
+    probe_csv = probe_dir / "rto_probe.csv" if probe_dir else None
+    if probe_csv is not None and probe_csv.exists():
+        probe_report = validate_probe(pd.read_csv(probe_csv))
+        for finding in probe_report.findings:
+            print(f"[{finding.severity.upper():7}] {finding.check}: {finding.message}")
+
+    ok = report.ok and (probe_report is None or probe_report.ok)
+    if ok:
+        print(
+            "PASS: no consistency errors detected"
+            + (" (workload and probe logs)" if probe_report else "")
+        )
     else:
         print("FAIL: run is not internally consistent and must not be used for figures")
     if args.json:
-        print(json.dumps(report.to_dict(), indent=2))
-    return 0 if report.ok else 1
+        payload = report.to_dict()
+        if probe_report is not None:
+            payload["probe"] = probe_report.to_dict()
+        print(json.dumps(payload, indent=2))
+    return 0 if ok else 1
+
+
+def _cmd_probe(args: argparse.Namespace) -> int:
+    """Run the RTO probe on its own, with no workload generator anywhere.
+
+    The probe is designed to run *beside* a Phase IV chaos run and does so by
+    default, but it is genuinely independent of the generator and this is the
+    command that demonstrates it. Two uses:
+
+    * Verifying that the probe reaches the cluster, and reading its achieved rate
+      and resolution against the live link, before committing a chaos run to
+      them. The numbers in its docstring are from one testbed on one day.
+    * Measuring an outage caused by something other than this harness -- a manual
+      restart, a provider event, a change being rolled out -- where there is no
+      benchmark to attach to and the question is only how long writes stopped.
+
+    It produces a normal run directory: manifest, probe log, attempt CSV. A
+    measurement without a manifest is not usable later, and there is no reason
+    for this one to be the exception.
+    """
+    from .core import ssh
+    from .core.recorder import PROBE_COLUMNS, Manifest, MetricsWriter, RunDirectory, new_run_id, utcnow
+    from .core.rto_probe import CREATE_TABLE_SQL, RtoProbe
+
+    settings = Settings.from_env()
+    profile = Profile.load(args.profile)
+    chaos = profile.chaos
+    gateway = settings.topology.gateway
+    dsn = f"postgresql://root@{gateway.host}:26257/{args.database}?sslmode=disable"
+
+    workers = args.workers if args.workers is not None else chaos.probe_workers
+    interval = args.interval if args.interval is not None else chaos.probe_interval_s
+
+    if not args.keep_table:
+        ssh.run(
+            gateway,
+            f"cockroach sql --insecure --host={gateway.host}:26257 "
+            f"--database={args.database} "
+            f'-e "DROP TABLE IF EXISTS {chaos.probe_table}; '
+            f'{CREATE_TABLE_SQL.format(table=chaos.probe_table)};"',
+            timeout=60,
+        )
+
+    run_dir = RunDirectory(settings.runs_dir, new_run_id("p4-probe"))
+    manifest = Manifest(
+        run_id=run_dir.path.name,
+        phase="p4_probe",
+        profile=profile.to_dict(),
+        topology=[{"name": gateway.name, "host": gateway.host, "role": "probe endpoint"}],
+        ssh_options=list(ssh.SSH_OPTIONS),
+    )
+
+    print(
+        f"probing {gateway.host} for {args.duration}s: {workers} worker(s), "
+        f"{interval * 1000:.1f} ms dispatch into {args.database}.{chaos.probe_table}"
+    )
+    probe = RtoProbe(
+        dsn,
+        table=chaos.probe_table,
+        interval_s=interval,
+        workers=workers,
+        statement_timeout_ms=chaos.probe_statement_timeout_ms,
+        connect_timeout_s=chaos.probe_connect_timeout_s,
+        log_path=run_dir.probe_log,
+    )
+    manifest.clock_epoch_utc = probe.epoch_utc
+    # Carriage-return progress only when someone is watching. run-experiment.sh
+    # tees this to a log file, where \r produces one unreadable kilometre-long
+    # line; a non-tty gets a periodic newline-terminated line instead.
+    tty = sys.stdout.isatty()
+    with probe:
+        deadline = time.monotonic() + args.duration
+        last_line = 0.0
+        while time.monotonic() < deadline:
+            time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
+            served = sum(1 for a in probe.attempts if a.served)
+            line = (
+                f"  [{probe.offset():6.1f}s] {len(probe.attempts)} attempts, "
+                f"{served} served"
+            )
+            if tty:
+                print(line, end="\r")
+            elif probe.offset() - last_line >= 15.0:
+                print(line)
+                last_line = probe.offset()
+    if tty:
+        print()
+
+    with MetricsWriter(run_dir.probe_csv, PROBE_COLUMNS) as writer:
+        for attempt in sorted(probe.attempts, key=lambda a: a.complete_offset_s):
+            writer.write(attempt.to_row())
+
+    summary = probe.summary()
+    manifest.finished_utc = utcnow()
+    manifest.validation = {"probe": summary}
+    run_dir.write_manifest(manifest)
+    run_dir.write_events({"phase": "p4_probe", "probe": {"enabled": True, **summary}})
+
+    if probe.error:
+        print(f"probe failed: {probe.error}", file=sys.stderr)
+        return 1
+
+    print(f"run: {run_dir.path}")
+    print(f"  attempts      {summary['attempts']}  {summary['outcomes']}")
+    print(
+        f"  achieved      {summary['achieved_rate_per_s']}/s of "
+        f"{1 / interval:.0f}/s dispatched "
+        f"({summary['dispatch_saturation_pct']}% of ticks found every worker busy)"
+    )
+    print(f"  median write  {summary['median_write_ms']} ms")
+    print(
+        f"  resolution    {summary['resolution_s'] * 1000:.1f} ms"
+        if summary["resolution_s"]
+        else "  resolution    not measurable (fewer than two served writes)"
+    )
+    print(f"\nlog: {run_dir.probe_log}")
+    print(f"next: crdblab validate {run_dir.path}")
+    return 0
 
 
 def _cmd_profile(args: argparse.Namespace) -> int:
@@ -609,7 +853,12 @@ def build_parser() -> argparse.ArgumentParser:
         "capture",
         help="capture raw generator output and report its column layout",
     )
-    cap.add_argument("--node", default="linode-1", help="node on which to run the generator")
+    cap.add_argument(
+        "--node",
+        default="gcp-1",
+        help="node on which to run the generator; defaults to the gateway, which "
+        "is where every measured workload runs (crdblab.topology)",
+    )
     cap.add_argument("--generator", default="ycsb", choices=("ycsb", "kv"))
     cap.add_argument("--concurrency", type=int, default=10)
     cap.add_argument("--duration", type=int, default=15)
@@ -700,6 +949,47 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ben.set_defaults(func=_cmd_bench)
 
+    prb = sub.add_parser(
+        "probe",
+        help="high-frequency availability probe, standalone (no workload generator)",
+    )
+    prb_sub = prb.add_subparsers(dest="probe_command", required=True)
+    prb_rto = prb_sub.add_parser(
+        "rto",
+        help="write canary rows continuously and record when the database "
+        "stopped and resumed serving them",
+    )
+    prb_rto.add_argument(
+        "--duration", type=int, default=60, help="seconds to probe for (default: 60)"
+    )
+    prb_rto.add_argument("--profile", default="thesis")
+    prb_rto.add_argument(
+        "--database",
+        default="bench",
+        help="database holding the canary table; deliberately not the workload's",
+    )
+    prb_rto.add_argument(
+        "--workers",
+        type=int,
+        help="concurrent in-flight canary writes; overrides the profile. This is "
+        "the resolution dial: the gap between observations is roughly the write "
+        "cost over this number",
+    )
+    prb_rto.add_argument(
+        "--interval",
+        type=float,
+        help="dispatch cadence in seconds; overrides the profile. Ticks that find "
+        "every worker busy are dropped and counted, so this is an upper bound on "
+        "the sampling rate rather than the rate itself",
+    )
+    prb_rto.add_argument(
+        "--keep-table",
+        action="store_true",
+        help="do not drop and recreate the canary table first. For probing a "
+        "cluster you would rather not issue DDL against",
+    )
+    prb_rto.set_defaults(func=_cmd_probe)
+
     cha = sub.add_parser("chaos", help="Phase IV: fault injection, RTO and RPO")
     cha_sub = cha.add_subparsers(dest="chaos_command", required=True)
     cha_run = cha_sub.add_parser("run", help="inject a fault into a steady-state run")
@@ -744,7 +1034,10 @@ def build_parser() -> argparse.ArgumentParser:
         "models or memory sizes. Use only when that difference is a stated "
         "limitation of the study rather than a mistake; it is recorded as a "
         "warning in the output. Latency ratios on a network-bound path are "
-        "least affected by it, absolute throughput most.",
+        "least affected by it, absolute throughput most. NOT needed for runs "
+        "measured since the gateway moved to gcp-1, which is the same machine "
+        "type as the Phase II baseline; it is for re-analysing older runs, "
+        "whose gateway was a Linode node with a different CPU.",
     )
     ro.add_argument("--json", action="store_true")
     ro.set_defaults(func=_cmd_analyze, analysis="raft-overhead")

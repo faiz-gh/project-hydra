@@ -455,13 +455,18 @@ def check_run_comparability(
         if differing_hw:
             # Downgraded to a warning only when the caller has said so
             # explicitly, and the acknowledgement is recorded in the finding
-            # rather than making the difference disappear. The two phases of
-            # this study are permanently on different CPU models -- the baseline
-            # an Intel Xeon, the gateway an AMD EPYC -- which is a stated
-            # limitation of the comparison rather than a defect to be fixed, so
-            # a hard block would make the project's own headline result
-            # uncomputable. Defaulting to an error keeps anyone from stumbling
-            # into an unlike comparison without having decided to.
+            # rather than making the difference disappear.
+            #
+            # This override existed because the two phases *were* permanently on
+            # different CPU models -- the baseline an Intel Xeon, the gateway an
+            # AMD EPYC (D11a) -- so a hard block would have made the project's own
+            # headline result uncomputable. That is no longer the case: the
+            # gateway moved to crdb-gcp-1, the same GCP machine type as the
+            # baseline, and `run-experiment.sh` deliberately stopped passing the
+            # flag so that the claim gets tested on every sweep. It is retained
+            # for re-analysing runs measured before the move, which genuinely do
+            # differ. Defaulting to an error keeps anyone from stumbling into an
+            # unlike comparison without having decided to.
             detail = ", ".join(
                 f"{k}: {v0!r} vs {v1!r}" for k, (v0, v1) in differing_hw.items()
             )
@@ -522,6 +527,164 @@ def validate_comparison(
     report.findings.extend(
         check_run_comparability(a, b, label_a, label_b, accept_hardware_difference)
     )
+    return report
+
+
+#: Outcomes the RTO probe is allowed to record. Kept as a literal here rather
+#: than imported from the recorder so that validation of a *recorded* file does
+#: not silently follow a change to the writer: if the two ever disagree, the file
+#: on disk is what a figure was drawn from and the disagreement should be loud.
+PROBE_OUTCOMES = ("ok", "timeout", "conn_error", "refused")
+
+
+def check_probe_ordering(df: pd.DataFrame) -> list[Finding]:
+    """A write cannot return before it was sent, nor a row precede its own epoch.
+
+    Both are conservation statements about the probe's two clocks rather than
+    thresholds, which is the kind of check this project trusts. They catch the
+    realistic failure: an attempt recorded against the wrong worker's dispatch
+    timestamp, or offsets written against a second epoch. Either would move an
+    outage edge without making any value look implausible, and the whole claim of
+    the probe is the position of those edges.
+    """
+    findings: list[Finding] = []
+    backwards = df[df["complete_offset_s"] < df["dispatch_offset_s"] - 1e-9]
+    if not backwards.empty:
+        findings.append(
+            Finding(
+                "probe_ordering",
+                "error",
+                f"{len(backwards)} probe attempt(s) completed before they were "
+                "dispatched; the two offset columns are not on the same clock",
+                {"rows": backwards.index.tolist()[:10]},
+            )
+        )
+    negative = df[df["dispatch_offset_s"] < -1e-9]
+    if not negative.empty:
+        findings.append(
+            Finding(
+                "probe_ordering",
+                "error",
+                f"{len(negative)} probe attempt(s) were dispatched before the run's "
+                "epoch; the probe was given an epoch later than its own start",
+                {"rows": negative.index.tolist()[:10]},
+            )
+        )
+    return findings
+
+
+def check_probe_outcomes(df: pd.DataFrame) -> list[Finding]:
+    """Every attempt is classified, and a classification the reader knows.
+
+    An unrecognised outcome is an error rather than a curiosity: downtime is
+    computed by partitioning attempts into served and not-served, so a value that
+    falls through that partition would be counted as an outage without anyone
+    having decided that it was one.
+
+    A ``refused`` write is reported as a *warning* and named separately. It means
+    a reachable database rejected the statement -- a duplicate key, a missing
+    table -- which is a fault in the probe rather than an outage, and it would
+    otherwise be indistinguishable from downtime in the served/not-served split.
+    """
+    findings: list[Finding] = []
+    seen = set(df["outcome"].dropna().unique())
+    unknown = sorted(seen - set(PROBE_OUTCOMES))
+    if unknown:
+        findings.append(
+            Finding(
+                "probe_outcomes",
+                "error",
+                f"probe log contains unrecognised outcome(s) {unknown}; the "
+                f"downtime split is defined only over {list(PROBE_OUTCOMES)}",
+                {"unknown": unknown},
+            )
+        )
+    refused = int((df["outcome"] == "refused").sum())
+    if refused:
+        findings.append(
+            Finding(
+                "probe_outcomes",
+                "warning",
+                f"{refused} probe write(s) were refused by a reachable database. "
+                "That is a defect in the probe, not an outage, and those attempts "
+                "must not be read as downtime",
+                {"refused": refused},
+            )
+        )
+    if not (df["outcome"] == "ok").any():
+        findings.append(
+            Finding(
+                "probe_outcomes",
+                "error",
+                "no probe write was ever served, so there is no baseline against "
+                "which an outage could be measured; the probe never reached the "
+                "database",
+                {},
+            )
+        )
+    return findings
+
+
+def check_probe_sequence(df: pd.DataFrame) -> list[Finding]:
+    """No sequence number is used twice.
+
+    Gaps are expected and are not checked: the dispatcher hands out a number per
+    tick and a run that ends with jobs still queued consumes numbers that are
+    never attempted. A *repeat*, though, means an attempt was retried under its
+    own id -- the livelock the RPO audit writer was rewritten to avoid -- and it
+    would make one observation appear as several at the exact moment the series
+    matters most.
+    """
+    duplicated = int(df["seq_id"].duplicated().sum())
+    if not duplicated:
+        return []
+    return [
+        Finding(
+            "probe_sequence",
+            "error",
+            f"{duplicated} probe sequence number(s) appear more than once; an "
+            "attempt was retried under its own id, which double-counts an "
+            "observation",
+            {"duplicates": df.loc[df["seq_id"].duplicated(), "seq_id"].tolist()[:10]},
+        )
+    ]
+
+
+def validate_probe(df: pd.DataFrame) -> ValidationReport:
+    """Consistency checks for an ``rto_probe.csv``.
+
+    Deliberately separate from :func:`validate`, which is defined over the
+    workload schema and would have nothing to say here -- there is no
+    concurrency, no operation type and no throughput in a probe log, so Little's
+    law and the quantile ordering do not apply to it. Sharing one function would
+    have meant either weakening those checks or writing mostly-null rows, which
+    is the same reasoning that keeps ``NETWORK_COLUMNS`` a separate schema.
+    """
+    report = ValidationReport()
+    required = {"seq_id", "dispatch_offset_s", "complete_offset_s", "outcome"}
+    missing = sorted(required - set(df.columns))
+    if missing:
+        report.add(
+            "probe_schema",
+            "error",
+            f"probe log is missing required column(s) {missing}",
+            missing=missing,
+        )
+        return report
+    if df.empty:
+        report.add(
+            "probe_schema",
+            "error",
+            "probe log has no rows, so the probe recorded no observation of "
+            "availability at all",
+        )
+        return report
+    for finding in (
+        *check_probe_ordering(df),
+        *check_probe_outcomes(df),
+        *check_probe_sequence(df),
+    ):
+        report.findings.append(finding)
     return report
 
 

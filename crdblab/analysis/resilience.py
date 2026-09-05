@@ -53,6 +53,7 @@ from typing import Any
 import pandas as pd
 
 from ..core.preflight import quorum_floor_ms
+from ..core.rto_probe import attempts_from_rows, measure_rto, outage_windows
 
 # Recovery detection is imported from the phase that performs it rather than
 # reimplemented. The legacy pipeline used one recovery threshold in the runner
@@ -332,6 +333,70 @@ def availability(run: Run) -> dict[str, Any]:
             f"writes resumed {rto:.2f} s after the fault"
             + (f", measured at {resolution:.2f} s resolution" if resolution else "")
         )
+    return out
+
+
+def probe_availability(run: Run) -> dict[str, Any]:
+    """Availability RTO re-derived from the high-frequency probe, if one ran.
+
+    A third reading of the same quantity :func:`availability` reports, at a
+    resolution the RPO audit writer's serialised single connection cannot reach.
+    It is reported *beside* that one and never in place of it: they are separate
+    clients over separate connections writing separate tables, so agreement
+    between them is corroboration and disagreement is a fact about the run that a
+    single figure would have hidden.
+
+    Like :func:`availability`, it recomputes from ``rto_probe.csv`` rather than
+    reading back the summary the phase wrote, so the published number can be
+    disputed against the observations behind it.
+
+    ``observed_outage_s`` is the quantity to prefer when the two differ. The
+    probe writes from the workstation, 376 ms round trip from the gateway, so
+    every completion timestamp carries about half of that as a systematic offset;
+    it appears identically on the last write before the fault and the first after
+    it, and therefore cancels in their difference but not in the interval from
+    the fault, which is timestamped by the injector rather than by the probe.
+    """
+    probe_csv = run.path / "rto_probe.csv"
+    events = run.events or {}
+    recorded = (events.get("probe") or {})
+
+    if not probe_csv.exists():
+        if recorded.get("enabled") is False:
+            return {
+                "available": False,
+                "detail": "the high-frequency probe was disabled for this run",
+            }
+        return {
+            "available": False,
+            "detail": (
+                f"{run.run_id} predates the high-frequency RTO probe. Its "
+                "availability RTO comes from the RPO audit log alone and is "
+                "bounded by that client's cadence, not by the probe's"
+            ),
+        }
+
+    injected = (events.get("injected") or {}).get("at_offset_s")
+    if injected is None:
+        return {"available": False, "detail": "no fault was injected"}
+
+    attempts = attempts_from_rows(pd.read_csv(probe_csv).to_dict("records"))
+    measured = measure_rto(attempts, float(injected))
+    windows = outage_windows(attempts)
+    out: dict[str, Any] = {
+        "available": True,
+        "source": "re-derived from rto_probe.csv",
+        **measured,
+    }
+    # The longest gap between served writes anywhere in the run, which is not
+    # necessarily the one the fault caused. Reported so that an outage the fault
+    # did not produce -- a stall on the client, a lease moving for its own
+    # reasons -- is visible rather than absorbed into the headline number.
+    if windows:
+        out["longest_gap_between_served_writes"] = windows[0]
+    for key in ("achieved_rate_per_s", "served_rate_per_s", "workers", "dispatch_interval_s"):
+        if key in recorded:
+            out[key] = recorded[key]
     return out
 
 
@@ -641,6 +706,12 @@ def summarise(
         "clock_alignment": alignment.to_dict(),
         "fault": fault_offsets(run, alignment),
         "availability_rto": availability(run),
+        # The same quantity at a finer resolution, from an independent client.
+        # Added as a sibling key rather than folded into `availability_rto`
+        # because a consumer that predates the probe must keep reading the audit
+        # figure it was written against, and because two readings that disagree
+        # should be visible as two readings.
+        "probe_rto": probe_availability(run),
         "performance_rto": performance(run, alignment),
         "quorum_geometry": quorum_geometry(run, network_csv, topology),
         "rpo": rpo(run),

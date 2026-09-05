@@ -64,4 +64,24 @@ chaos:
   recovery_hold_s: 10
   audit_interval_s: 0.02
 
+  # High-frequency RTO probe: a second, independent client on a background path,
+  # measuring how long the database could not serve a write. It is not a faster
+  # setting of the audit writer above -- that one is paced for RPO and is
+  # deliberately left alone -- but a separate pool of writers against a separate
+  # table. See crdblab/core/rto_probe.py.
+  #
+  # probe_workers is the dial between resolution and perturbation. From the
+  # workstation a canary write costs ~370 ms, dominated by the link rather than
+  # by the ~70 ms quorum, so the gap between observations is ~370/workers.
+  # Measured on the live cluster: 8 workers resolve to 125 ms at 18 writes/s
+  # (~5% of a C=100 tier's writes), 24 to 64 ms at 43 writes/s (~12%). Both ends
+  # of that trade are recorded per run (events.json -> probe), so the setting can
+  # be defended from the data rather than from this comment.
+  probe_enabled: true
+  probe_interval_s: 0.002
+  probe_workers: 8
+  probe_statement_timeout_ms: 5000
+  probe_connect_timeout_s: 2.0
+  probe_table: rto_canary
+
 tps_ceiling: 20000

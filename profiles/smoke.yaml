@@ -26,3 +26,11 @@ chaos:
   duration_s: 45
   inject_at_s: 15
   concurrency: 50
+
+  # The probe runs in the self-test too, and deliberately so: it opens
+  # connections and issues DDL against the cluster, and a smoke test that skipped
+  # it would not be exercising the path the real run takes. Two workers rather
+  # than the thesis profile's eight -- the self-test is checking that the probe
+  # works, not resolving anything.
+  probe_enabled: true
+  probe_workers: 2

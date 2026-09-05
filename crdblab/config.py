@@ -94,7 +94,42 @@ class ChaosSpec:
     target: str = "linode-2"
     recovery_threshold: float = 0.80
     recovery_hold_s: int = 10
+    #: Cadence of the RPO audit writer, which writes one sequence at a time on
+    #: one connection. It bounds the resolution of the availability RTO derived
+    #: from ``audit.csv`` at the cost of a quorum write (~69 ms here), not at this
+    #: value. The high-frequency probe below exists because of that bound; this
+    #: number is left alone so the RPO series keeps the cadence its recorded runs
+    #: were measured at.
     audit_interval_s: float = 0.02
+
+    # --- high-frequency RTO probe ----------------------------------------
+    #
+    # A second, independent client on a background path, measuring how long the
+    # database could not serve a write. It is separate from the RPO audit above
+    # rather than a faster setting of it because the two are paced for different
+    # questions; see crdblab/core/rto_probe.py.
+    #
+    # These are profile parameters rather than constants because they are the
+    # dial between resolution and perturbation -- more workers observe the outage
+    # edges more finely and add more writes to the cluster being measured -- and a
+    # run must record which way that dial was set. They land in the manifest with
+    # the rest of the profile.
+    probe_enabled: bool = True
+    #: Dispatch cadence. Sub-5 ms. What the probe *achieves* is bounded by
+    #: ``probe_workers`` over the write latency and is measured per run.
+    probe_interval_s: float = 0.002
+    #: Eight in-flight writes. From the workstation a canary write costs ~370 ms,
+    #: dominated by the link rather than by the ~70 ms quorum, so the gap between
+    #: observations is ~370/workers. Measured live: 8 workers resolve to 125 ms at
+    #: 18 writes/s, 24 to 64 ms at 43 writes/s. Concurrency is the cheap axis here
+    #: and the dispatch interval is not. See crdblab/core/rto_probe.py.
+    probe_workers: int = 8
+    #: Generous on purpose: a write that blocks through a lease transfer and then
+    #: commits is the most precise observation of recovery there is, and a tight
+    #: timeout would abort it.
+    probe_statement_timeout_ms: int = 5000
+    probe_connect_timeout_s: float = 2.0
+    probe_table: str = "rto_canary"
 
 
 @dataclass

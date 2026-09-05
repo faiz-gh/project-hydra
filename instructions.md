@@ -113,6 +113,14 @@ the machines for another two to three minutes. Watch the primary:
 ssh root@crdb-linode-1 'tail -f /var/log/cloud-init-output.log'
 ```
 
+> `crdb-linode-1` is the *bootstrap* primary — the first entry in
+> `cluster_join_nodes`, which is the node cloud-init elects to run `cockroach
+> init` and apply the zone configuration. It is **not** the harness gateway. The
+> gateway is `crdb-gcp-1` (`crdblab/topology.py`), which is where every generator
+> and audit client runs. The two were the same machine until the gateway moved to
+> GCP to match the Phase II baseline's CPU; they are unrelated roles that happened
+> to coincide.
+
 You are waiting for the zone-configuration step to report success. It logs
 `Only 1/5 nodes live` → … → `All 5 nodes are live`, then applies
 `num_replicas = 5` and `lease_preferences`. **The bootstrap deliberately exits
@@ -124,13 +132,37 @@ reported full health (§3.3).
 Verify placement took:
 
 ```bash
-ssh root@crdb-linode-1 "cockroach sql --insecure --host=crdb-linode-1:26257 \
+ssh ubuntu@crdb-gcp-1 "cockroach sql --insecure --host=crdb-gcp-1:26257 \
   -e 'SHOW ZONE CONFIGURATION FROM DATABASE ycsb;'"
 ```
 
-`lease_preferences` must be `[[+region=us-east], [+region=us-east1], [+region=us-west]]`
-and `num_replicas` must be `5`. An empty `lease_preferences` means the bootstrap
+`num_replicas` must be `5`. An empty `lease_preferences` means the bootstrap
 raced; re-run `terraform apply` or re-apply the zone config by hand.
+
+**`lease_preferences` must name `us-east1` first — this is a required manual step
+after `terraform apply`.** The bootstrap writes
+`[[+region=us-east], [+region=us-east1], [+region=us-west]]`, which put the
+leaseholder on `crdb-linode-1` back when that was the gateway. The gateway is now
+`crdb-gcp-1` in `us-east1`, and a leaseholder in `us-east` would put an ~20 ms
+wide-area hop on *every* operation the generator issues — on a write path whose
+quorum floor is ~70 ms, a ~30% inflation that would be read as replication cost.
+Nothing about the cluster looks unhealthy when this happens; it is D7's shape with
+a smaller constant. Re-order the list on the live cluster:
+
+```bash
+ssh ubuntu@crdb-gcp-1 "cockroach sql --insecure --host=crdb-gcp-1:26257 -e \
+  \"ALTER RANGE default CONFIGURE ZONE USING lease_preferences =
+    '[[+region=us-east1], [+region=us-east], [+region=us-west]]';\""
+```
+
+Leases transfer within a few seconds. `run-experiment.sh` refuses to start unless
+the gateway's region heads the list, and `crdblab net probe` asserts the placement
+that actually resulted, so a forgotten re-order aborts the sweep rather than
+reaching a figure.
+
+`terraform/scripts/bootstrap.tftpl` still writes the old order and is outside this
+repository's change scope (it is applied manually). Until that line is re-ordered
+there, **every fresh `terraform apply` needs the statement above re-applied.**
 
 ---
 
@@ -144,9 +176,9 @@ The bootstrap creates the `ycsb` database but no tables. Load both tiers:
 
 ```bash
 # Cluster (via the gateway)
-ssh root@crdb-linode-1 "cockroach workload init ycsb --drop \
+ssh ubuntu@crdb-gcp-1 "cockroach workload init ycsb --drop \
   --seed=42 --insert-count=125000 \
-  'postgresql://root@crdb-linode-1:26257/ycsb?sslmode=disable'"
+  'postgresql://root@crdb-gcp-1:26257/ycsb?sslmode=disable'"
 
 # Unreplicated baseline
 ssh ubuntu@crdb-local-1 "cockroach workload init ycsb --drop \
@@ -181,9 +213,17 @@ Each load writes 125,000 rows ≈ 179 MiB and takes about a minute.
 Create `.env` in the repository root:
 
 ```bash
-DB_URI=postgresql://root@crdb-linode-1:26257/ycsb?sslmode=disable
+DB_URI=postgresql://root@crdb-gcp-1:26257/ycsb?sslmode=disable
 CRDBLAB_RUNS_DIR=runs
 ```
+
+> **If your `.env` predates the gateway move, it names `crdb-linode-1` and must be
+> changed.** `run-experiment.sh` now asserts that `DB_URI`'s host equals the
+> gateway declared in `crdblab/topology.py` and refuses to start otherwise. The
+> measured phases resolve their own connection string from the topology and would
+> not have noticed, but `crdblab capture` uses `DB_URI` directly — so a stale
+> value pins the generator's column layout against one machine while every
+> measurement runs on another.
 
 Those are the only two variables `crdblab` reads. An older `.env.example` also
 carried `HCP_TOKEN`, `HCP_ORG` and `HCP_WORKSPACE`; nothing in this harness uses
@@ -193,7 +233,7 @@ them.
 both before it will start.**
 
 - **It names exactly one host.** A multi-host URI —
-  `root@crdb-linode-1,crdb-linode-2,…` — puts the wide-area network back on the
+  `root@crdb-gcp-1,crdb-linode-2,…` — puts the wide-area network back on the
   client's path, which is exactly the latency that running the generator *on the
   gateway* exists to exclude. It would inflate every measured latency and mask
   the consensus overhead being measured.
@@ -210,9 +250,11 @@ Before committing an hour to the full sweep, confirm the generator's output
 format still parses and the pre-flight assertions pass:
 
 ```bash
-.venv/bin/crdblab capture --node linode-1 --pty --duration 15
+.venv/bin/crdblab capture --node gcp-1 --pty --duration 15
 ```
 
+`--node` defaults to `gcp-1`, the gateway, so it can be omitted; it is spelled out
+here because the node the layout is pinned on must be the node the sweep measures.
 This pins the column layout against the deployed CockroachDB version. If it
 raises `WorkloadParseError`, the generator's output format has changed and the
 parser needs updating before any measurement is trustworthy — that is the
@@ -302,6 +344,71 @@ warmup differ. Concurrency is deliberately *not* one of those keys.
 genuinely coordinating writes — failing a node outside the write path would be a
 far weaker test.
 
+Each chaos run now also carries a **high-frequency RTO probe**. It is a third
+client, independent of both the generator and the RPO audit writer: its own
+threads, its own connections, its own table (`bench.rto_canary`), started and
+stopped with the run. It writes canary rows continuously and records when the
+database stopped and resumed serving them, which is the one question neither of
+the other two can answer at a useful resolution — the generator samples once a
+second, and the audit writer is serialised at the cost of one quorum write.
+
+It leaves two files in the run directory:
+
+| File | What it is |
+|---|---|
+| `rto_probe.csv` | One row per canary write: dispatch and completion offsets, duration, and the outcome (`ok`, `timeout`, `conn_error`, `refused`). Written under its own declared schema and checked by `crdblab validate`. |
+| `rto_probe.log` | JSON per line, flushed as it happens: every failure, every connection opened or lost, every successful reconnect, with microsecond timestamps. It survives a run that is killed mid-fault, which the CSV does not. |
+
+Three things to know before quoting a number from it.
+
+- **Read `observed_outage_s`, not just `rto_s`.** The probe writes from your
+  workstation, 376 ms round trip from the gateway, so every timestamp it takes
+  carries about 188 ms of link. That offset is identical on both edges of an
+  outage and cancels in the interval between two of the probe's own observations;
+  it does not cancel against the injector's fault timestamp.
+- **`detection_lag_s` is not part of the recovery.** A five-voter cluster losing
+  one member keeps committing until it notices, ~6 s here. The probe reports the
+  detection interval separately rather than folding it into the RTO — which is
+  precisely the conflation that made the legacy pipeline's 6.0 s and 5.2 s
+  "RTOs" measurements of its own guard interval.
+- **`resolution_s` is what the figure may be quoted to,** and it is measured per
+  run rather than taken from `probe_interval_s`. The dispatch cadence is 2 ms;
+  the achieved cadence is bounded by the pool size over the write cost, and from
+  this workstation a canary write costs ~370 ms — the link, not the quorum. Two
+  60 s runs on 2026-09-05 measured **125 ms at the default eight workers** and
+  **64 ms at twenty-four**. A reported outage shorter than that is
+  indistinguishable from no interruption, and the probe says so instead of
+  printing the smaller number. `resolution_s` is the 95th percentile of the gap
+  between served writes, not the median: compare it against `gap_p50_s`, and if
+  they differ by orders of magnitude the pool was sampling in bursts and the
+  coarser number is the real one.
+
+The probe adds 18 writes/s to a cluster already serving ~371 — about 5%, measured
+— and both figures are recorded (`events.json` → `probe`) so the perturbation can
+be checked rather than assumed. Raising `chaos.probe_workers` buys resolution
+sub-linearly and load linearly (24 workers: 64 ms, 43 writes/s, ~12%), so raise it
+when the outage being timed is short enough to need it and read `resolution_s`
+back afterwards. `chaos.probe_enabled: false` turns it off; the RPO audit and
+every other Phase IV figure are unaffected either way.
+
+If you need single-digit-millisecond resolution, the lever is *where the probe
+runs*, not the pool size: a client on the gateway pays ~70 ms a write instead of
+~370 ms. This probe runs from the workstation deliberately — it matches the RPO
+audit writer, keeps the log on the machine that analyses it, and survives the node
+under test going away — but that choice is what sets the ceiling.
+
+To run the probe on its own, with no benchmark anywhere — to check it reaches the
+cluster and see its achieved rate against the live link, or to time an outage
+this harness did not cause:
+
+```bash
+.venv/bin/crdblab probe rto --duration 60
+.venv/bin/crdblab probe rto --duration 300 --workers 16   # finer, more load
+```
+
+It writes a normal run directory (`runs/<stamp>_p4-probe/`) with a manifest, so
+its numbers are traceable like any other measurement.
+
 **A `dead` run leaves the node down. The harness does not restore it** — the
 fault is real, and restarting is a deliberate operator action. CockroachDB is
 launched by cloud-init with `--background` rather than as a systemd unit, so
@@ -314,10 +421,10 @@ ssh root@crdb-linode-2 'TS_IP=$(tailscale ip -4); cockroach start --insecure \
   --listen-addr=$TS_IP:26257 --advertise-addr=$TS_IP:26257 \
   --locality=cloud=linode,region=us-west \
   --cache=0.25 --max-sql-memory=0.25 \
-  --join=crdb-linode-1:26257 --background'
+  --join=crdb-gcp-1:26257 --background'
 
 sleep 20
-ssh root@crdb-linode-1 "cockroach node status --insecure --host=crdb-linode-1:26257"
+ssh ubuntu@crdb-gcp-1 "cockroach node status --insecure --host=crdb-gcp-1:26257"
 ```
 
 All five nodes must show `is_available = true` again before the next
@@ -376,14 +483,24 @@ run whose numbers look fine. The analysis layer refuses a run that fails either.
 Run ids are the directory names under `runs/`. Add `--json` to any of these for
 machine-readable output.
 
-`--accept-hardware-difference` is required in this topology and is not a
-formality. The comparison refuses outright when the two runs were measured on
-different CPU models or memory sizes, because a throughput difference between
-unlike machines is not attributable to replication. Here the baseline is an Intel
-Xeon and the cluster gateway an AMD EPYC — a known, documented limitation of the
-study (§7.3) rather than a mistake — so the difference is *accepted explicitly*
-and recorded as a warning in the output rather than being silently ignored. Drop
-the flag and read the refusal at least once; it names exactly what differs.
+`--accept-hardware-difference` **is no longer required, and should not be
+passed.** It used to be mandatory: the comparison refuses outright when the two
+runs were measured on different CPU models or memory sizes, and while the gateway
+was `crdb-linode-1` the baseline was an Intel Xeon and the gateway an AMD EPYC
+(D11a) — so the flag was the only way to compute the study's headline number at
+all, at the cost of carrying a CPU confound into it.
+
+The gateway is now `crdb-gcp-1`, the same GCP machine type as the Phase II
+baseline (`n2-custom-2-4096`, 2 vCPU / ~4 GiB, Intel Xeon), so the two phases
+differ in replication and nothing else the harness can see.
+`run-experiment.sh` therefore invokes `raft-overhead` **without** the flag, which
+is what turns "the hardware now matches" into a checked claim rather than an
+assumption. If it refuses, the testbed does not match `crdblab/topology.py`; read
+the refusal, which names exactly what differs, rather than adding the flag back.
+
+The flag itself is retained for re-analysing runs measured before the move — the
+committed `runs/` from Deployment A and B were gateway-on-Linode and genuinely do
+need it.
 
 `raft-overhead` prints the same-concurrency delta under a **NOT A RESULT**
 banner. That is intentional: refuting the intuitive comparison is more useful
@@ -500,6 +617,22 @@ hardware differ.
 
 ---
 
+## The RTO probe
+
+Both `crdblab chaos run` and `crdblab probe rto` produce `rto_probe.csv` and
+`rto_probe.log`; §6 covers what they are and how to read them. Two operational
+notes:
+
+- `crdblab validate <run>` checks the probe log alongside `metrics.csv` and fails
+  the run if the two offset columns disagree, a sequence number repeats, an
+  outcome is unrecognised, or nothing was ever served. `analysis/loader.py`
+  applies the same gate, so a corrupt probe log cannot reach a figure.
+- The canary table is dropped and recreated at the start of each run. Pass
+  `--keep-table` to `probe rto` when probing a cluster you would rather not issue
+  DDL against.
+
+---
+
 ## What a run directory contains
 
 ```
@@ -509,8 +642,12 @@ runs/20260902T195644Z_p3_cluster/
 │                    realised tier order, clock epoch
 ├── metrics.csv      long format: one row per (interval, operation type)
 ├── preflight.json   every assertion with its observed value
-├── audit.csv        Phase IV only: one row per audit write attempt
-├── events.json      Phase IV only: fault timeline
+├── audit.csv        Phase IV only: one row per RPO audit write attempt
+├── rto_probe.csv    Phase IV only: one row per canary write the RTO probe
+│                    dispatched, with dispatch and completion offsets
+├── rto_probe.log    Phase IV only: JSON per line, flushed as it happens —
+│                    every probe failure, connection loss and reconnect
+├── events.json      Phase IV only: fault timeline, both RTO figures, RPO
 └── raw/             the generator's verbatim stdout, per tier
 ```
 
@@ -545,7 +682,7 @@ azure_subscription_id = "00000000-0000-0000-0000-000000000000"
 gcp_project_id        = "my-gcp-chaos-project"
 tailscale_auth_key    = "tskey-auth-xxxxxx-xxxxxx"
 
-cluster_join_nodes = "crdb-linode-1,crdb-linode-2,crdb-azure-1,crdb-azure-2,crdb-gcp-1"
+cluster_join_nodes = "crdb-gcp-1,crdb-azure-1,crdb-azure-2,crdb-linode-1,crdb-linode-2"
 
 linode_config = {
   nodes = {
@@ -585,9 +722,13 @@ Three things about this configuration are load-bearing rather than incidental:
 - **`local_config` provisions the Phase II baseline, and it is a GCP instance**
   despite its `region=self-hosted` locality label. That label says it is an
   isolated single-node server rather than a cluster member; it does not describe
-  where it runs. This is why the two phases differ in CPU model — Intel Xeon on
-  GCP against AMD EPYC on Linode — which is a stated limitation of the study
-  (§7.3 of the dissertation).
+  where it runs. This used to be why the two phases differed in CPU model — Intel
+  Xeon on GCP against AMD EPYC on Linode — and it is why the harness gateway is
+  `crdb-gcp-1` rather than `crdb-linode-1`: `gcp_config.node1` is the same
+  `n2-custom-2-4096` machine type as `local_config.node1`, so Phase II and Phase
+  III now run on identical processors and the replication delta is no longer
+  confounded by them. Moving the gateway back to a Linode node reintroduces the
+  confound, and `raft-overhead` will refuse the comparison rather than report it.
 - **Every node is `enabled` here.** Each is wrapped in a `count` driven by that
   flag, so a subset can be provisioned by editing a value — but the quorum
   arithmetic assumes five voters. Disabling a cluster node changes the quorum

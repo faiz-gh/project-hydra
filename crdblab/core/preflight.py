@@ -41,7 +41,7 @@ MIN_ROW_MATCH_RATE = 0.99
 #: These commands are trivial -- read a clock, list zone configuration, read a
 #: counter -- so their wall cost is dominated by SSH session setup across the
 #: WAN, which is a property of the link on the day and not a constant. Measured
-#: from the workstation to the us-east gateway on 2026-09-02: 376 ms round trip,
+#: from the workstation to the gateway on 2026-09-02: 376 ms round trip,
 #: and 6.2-6.9 s for a complete `ssh ... chronyc tracking`. The previous 20 s
 #: budget on the clock check was about three times that, and a transient spike
 #: duly exceeded it and refused an entire Phase III sweep.
