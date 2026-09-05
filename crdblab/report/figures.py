@@ -431,6 +431,28 @@ def raft_overhead_curve(
     )
 
 
+#: Output filename per fault class. Phase IV runs one fault of each class and
+#: the two timelines are different figures, so the name is keyed on the class
+#: rather than fixed: rendering a second run through a single hard-coded
+#: ``fig5`` filename silently overwrote the first, which is why
+#: ``fig6_resilience_timeline_recover.png`` existed in ``figures/`` with no path
+#: through this module that could produce it. The names are constants, not
+#: derived from the run id, so a caption citing fig5 or fig6 keeps meaning the
+#: same figure across a re-render.
+_RESILIENCE_FIGURES = {
+    "dead": "fig5_resilience_timeline.png",
+    "recover": "fig6_resilience_timeline_recover.png",
+}
+
+
+def _resilience_filename(mode: str | None) -> str:
+    """Filename for one fault class, distinct for any class not yet named."""
+    if mode in _RESILIENCE_FIGURES:
+        return _RESILIENCE_FIGURES[mode]
+    slug = "".join(c if c.isalnum() else "_" for c in str(mode or "unknown"))
+    return f"fig5_resilience_timeline_{slug}.png"
+
+
 # --- Phase IV --------------------------------------------------------------
 
 def resilience_timeline(run: Run, out_dir: Path) -> Path:
@@ -450,6 +472,7 @@ def resilience_timeline(run: Run, out_dir: Path) -> Path:
     profile = resilience.degradation_profile(run, alignment)
     performance = resilience.performance(run, alignment)
     fault = resilience.fault_offsets(run, alignment)
+    mode = (run.events or {}).get("mode")
 
     fig, ax = plt.subplots(figsize=(6.2, 3.6))
 
@@ -473,7 +496,7 @@ def resilience_timeline(run: Run, out_dir: Path) -> Path:
     if alignment.exact and fault.get("wall_offset_s") is not None:
         ax.axvline(
             fault["wall_offset_s"], color=CRITICAL, linewidth=1.6,
-            label=f"fault ({run.events.get('mode')})",
+            label=f"fault ({mode})",
         )
     elif fault.get("generator_elapsed_bounds_s"):
         low, high = fault["generator_elapsed_bounds_s"]
@@ -505,12 +528,12 @@ def resilience_timeline(run: Run, out_dir: Path) -> Path:
              f"+/-{alignment.uncertainty_s / 2:.1f} s"
     )
     ax.set_title(
-        f"Throughput through a {run.events.get('mode')} fault on "
+        f"Throughput through a {mode} fault on "
         f"{run.events.get('target')}\n{subtitle}",
         loc="left",
     )
     ax.legend(labelcolor=INK_SECONDARY, loc="lower right", fontsize=7.5)
-    return _finish(fig, ax, [run.run_id], out_dir / "fig5_resilience_timeline.png")
+    return _finish(fig, ax, [run.run_id], out_dir / _resilience_filename(mode))
 
 
 def render_all(
@@ -518,9 +541,15 @@ def render_all(
     network: NetworkRun | None = None,
     baseline: Run | None = None,
     cluster: Run | None = None,
-    chaos: Run | None = None,
+    chaos: Run | Sequence[Run] | None = None,
 ) -> list[Path]:
-    """Render every figure whose inputs are available."""
+    """Render every figure whose inputs are available.
+
+    ``chaos`` accepts a sequence because Phase IV produces one timeline per
+    fault class and they are separate figures. Calling
+    :func:`resilience_timeline` once here was the other half of the fig6
+    provenance gap: even with both runs loaded, only one could be drawn.
+    """
     written: list[Path] = []
     floor = network.quorum_floor_ms if network else None
     if network is not None:
@@ -533,5 +562,7 @@ def render_all(
     if baseline is not None and cluster is not None:
         written.append(raft_overhead_curve(baseline, cluster, out_dir, quorum_floor_ms=floor))
     if chaos is not None:
-        written.append(resilience_timeline(chaos, out_dir))
+        runs = [chaos] if isinstance(chaos, Run) else list(chaos)
+        for run in runs:
+            written.append(resilience_timeline(run, out_dir))
     return written
