@@ -322,16 +322,23 @@ testbed, not something touched by most code changes to `crdblab/`.
   variation over a window excluding `LIVENESS_SETTLE_S` -- and a settled value
   within `LATENCY_SHIFT_TOLERANCE` (15%) of baseline is `returned_to_baseline`;
   outside it, `structural_latency_shift`.
-  **Known gap found while adding this:** `quorum_geometry()` computes RTTs
-  from `gateway_rtts()`, which returns round trips *from the gateway node*.
-  Every chaos profile's target is `gcp-1`, which is also the gateway, so
-  `before` already has the target's row removed as "self" before `after`'s
-  target-filter runs -- the filter is then a no-op and `before == after`
-  always, silently reporting "the write path is unaffected" regardless of what
-  actually happened. This is why `write_latency_recovery` and
-  `quorum_geometry` disagreed on the run above. Not fixed here -- caught during
-  validation of an unrelated change, flagged rather than fixed to keep that
-  change's diff reviewable on its own.
+  **`quorum_geometry()` had a matching bug, fixed the same day.** It computed
+  RTTs via `gateway_rtts()`, which returns round trips *from the gateway
+  node*. Every chaos profile's target is `gcp-1`, which is also the gateway,
+  so `before` already had the target's row removed as "self" before `after`'s
+  target-filter ran -- that filter then had nothing left to remove, and
+  `before == after` on every single dead/recover run in this project,
+  regardless of what actually happened. It reported "the write path is
+  unaffected" on the same run `write_latency_recovery` measured a 1.38x
+  settled shift on -- that disagreement is what caught it. Fixed by branching
+  on `target.host == gateway.host` (`leaseholder_displaced`): when the target
+  is a follower, the original single-value computation is unchanged and still
+  correct; when the target *is* the leaseholder, there is no "its row minus
+  one entry" to compute, since the leaseholder itself is gone, so every
+  surviving node is evaluated as a candidate leader from its own RTT row and
+  the result is reported as a range (`surviving_quorum_floor_range_ms`,
+  `candidate_floors_ms`) rather than a single value pretending to predict
+  which survivor CockroachDB's allocator will actually promote.
 - **The chaos generator runs with `--tolerate-errors`; the bench sweep must
   not.** Without it `cockroach workload run` *exits* on its first failed
   statement, and during a chaos run the first failed statement is the fault.

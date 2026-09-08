@@ -717,6 +717,31 @@ def quorum_geometry(
 
     Computed from the Phase I matrix rather than asserted, so "the target was in
     the fast quorum" is a measurement.
+
+    **The leaseholder-is-the-target case is handled separately, and has to be.**
+    Every chaos profile in this project targets the gateway (``gcp-1``), which
+    ``lease_preferences`` also pins as the leaseholder -- so the ordinary case
+    this function was first written for, "the leader survives and loses one
+    follower," never actually occurs here; what happens instead is "the leader
+    is the one that dies." Computing ``after`` by removing the target's entry
+    from *the gateway's own RTT row* is meaningless once the gateway is the
+    thing that died: there is no row left to remove an entry from, since
+    :func:`crdblab.core.preflight.gateway_rtts` only returns a node's RTT to
+    *other* nodes and the dead node never had an entry for itself in the first
+    place. The earlier implementation did exactly this and it silently
+    degenerated into a no-op -- ``after`` always equalled ``before`` -- which
+    reported "the write path is unaffected" on every ``dead``/``recover`` run
+    in this project regardless of what the run actually measured. It was
+    caught only because :func:`write_latency_recovery`, computed independently
+    from the metrics table rather than from this RTT matrix, disagreed with it
+    on a live run (1.38x settled shift, reported here as "unaffected").
+
+    Which surviving node CockroachDB promotes to leaseholder is an allocator
+    decision this static matrix cannot predict -- ``lease_preferences`` names
+    only the dead node's region, so there is no configured fallback to read.
+    Every survivor is therefore evaluated as a candidate leader, using *its
+    own* RTT row, and the result is reported as the range across candidates
+    rather than a single value dressed up as a prediction of which one wins.
     """
     events = run.events or {}
     target_name = events.get("target")
@@ -734,45 +759,119 @@ def quorum_geometry(
     except KeyError:
         return {"available": False, "detail": f"unknown chaos target {target_name!r}"}
 
-    rtts = gateway_rtts(network_csv, gateway.host)
-    rtts.pop(gateway.host, None)
     voters = len(topology)
-    surviving = {host: v for host, v in rtts.items() if host != target.host}
+    leaseholder_displaced = target.host == gateway.host
 
+    before_rtts = gateway_rtts(network_csv, gateway.host)
     try:
-        before = quorum_floor_ms(rtts, voters)
-        after = quorum_floor_ms(surviving, voters)
+        before = quorum_floor_ms(before_rtts, voters)
     except ValueError as exc:
         return {"available": False, "detail": str(exc)}
+
+    if not leaseholder_displaced:
+        # The ordinary case: the leaseholder survives, and losing a follower
+        # only removes one entry from its own row. Unchanged from the original
+        # implementation, and still correct -- the bug is specific to the case
+        # handled below.
+        surviving = {host: v for host, v in before_rtts.items() if host != target.host}
+        try:
+            after = quorum_floor_ms(surviving, voters)
+        except ValueError as exc:
+            return {"available": False, "detail": str(exc)}
+
+        return {
+            "available": True,
+            "voters": voters,
+            "target": target.name,
+            "target_region": target.region,
+            "leaseholder_displaced": False,
+            "quorum_floor_ms": round(before, 2),
+            "surviving_quorum_floor_ms": round(after, 2),
+            "floor_ratio_x": round(after / before, 2) if before else None,
+            "target_in_fast_quorum": bool(after > before + 1e-9),
+            "detail": (
+                f"with {target.name} ({target.region}) unavailable, the write path's "
+                f"floor rises from {before:.1f} ms to {after:.1f} ms, a factor of "
+                f"{after / before:.2f}. Writes continue -- a quorum survives -- so this "
+                "is a latency change, not an outage"
+                if after > before
+                else f"{target.name} is not a member of the fast quorum, so its loss "
+                f"leaves the write floor at {before:.1f} ms and the write path is "
+                "unaffected"
+            ),
+            "consequence": (
+                "whether aggregate throughput regains the recovery threshold depends "
+                "on how much of the added write latency the offered concurrency can "
+                "hide, and on the read share, which is unaffected. A performance RTO "
+                "that comes back undefined for a fault on this member is explained by "
+                "this geometry; one that comes back defined is not contradicted by it"
+                if after > before
+                else "a full performance recovery is physically available for a fault "
+                "on this member"
+            ),
+        }
+
+    # The leaseholder is the target. Evaluate every surviving node as a
+    # candidate leader, from its own measured RTTs, rather than reusing the
+    # dead node's row.
+    candidates: dict[str, float] = {}
+    for candidate in topology.nodes:
+        if candidate.host == target.host:
+            continue
+        candidate_rtts = gateway_rtts(network_csv, candidate.host)
+        candidate_rtts.pop(target.host, None)
+        try:
+            candidates[candidate.name] = quorum_floor_ms(candidate_rtts, voters)
+        except ValueError:
+            continue
+
+    if not candidates:
+        return {
+            "available": False,
+            "detail": (
+                f"{target.name} is both the chaos target and the gateway, and no "
+                "surviving node's RTTs could be read from the Phase I matrix to "
+                "estimate a replacement leaseholder's quorum floor"
+            ),
+        }
+
+    after_min = min(candidates.values())
+    after_max = max(candidates.values())
+    best = min(candidates, key=candidates.get)
+    worst = max(candidates, key=candidates.get)
+    ratio_min = round(after_min / before, 2) if before else None
+    ratio_max = round(after_max / before, 2) if before else None
 
     return {
         "available": True,
         "voters": voters,
         "target": target.name,
         "target_region": target.region,
+        "leaseholder_displaced": True,
         "quorum_floor_ms": round(before, 2),
-        "surviving_quorum_floor_ms": round(after, 2),
-        "floor_ratio_x": round(after / before, 2) if before else None,
-        "target_in_fast_quorum": bool(after > before + 1e-9),
+        "surviving_quorum_floor_range_ms": [round(after_min, 2), round(after_max, 2)],
+        "candidate_floors_ms": {name: round(ms, 2) for name, ms in candidates.items()},
+        "best_case_leader": best,
+        "worst_case_leader": worst,
+        "floor_ratio_range_x": [ratio_min, ratio_max],
+        "target_in_fast_quorum": bool(after_min > before + 1e-9),
         "detail": (
-            f"with {target.name} ({target.region}) unavailable, the write path's "
-            f"floor rises from {before:.1f} ms to {after:.1f} ms, a factor of "
-            f"{after / before:.2f}. Writes continue -- a quorum survives -- so this "
-            "is a latency change, not an outage"
-            if after > before
-            else f"{target.name} is not a member of the fast quorum, so its loss "
-            f"leaves the write floor at {before:.1f} ms and the write path is "
-            "unaffected"
+            f"{target.name} ({target.region}) was the leaseholder, so its loss "
+            "displaces it rather than merely removing a follower. Depending on "
+            f"which survivor CockroachDB promotes, the write path's floor rises "
+            f"from {before:.1f} ms to somewhere between {after_min:.1f} ms "
+            f"({best}, best case) and {after_max:.1f} ms ({worst}, worst case) -- "
+            f"{ratio_min:.2f}x to {ratio_max:.2f}x. Writes continue -- a quorum "
+            "survives among any three of the four remaining voters -- so this is "
+            "a latency change, not an outage, in every candidate"
         ),
         "consequence": (
             "whether aggregate throughput regains the recovery threshold depends on "
             "how much of the added write latency the offered concurrency can hide, "
-            "and on the read share, which is unaffected. A performance RTO that "
-            "comes back undefined for a fault on this member is explained by this "
-            "geometry; one that comes back defined is not contradicted by it"
-            if after > before
-            else "a full performance recovery is physically available for a fault "
-            "on this member"
+            "and on the read share, which is unaffected regardless of which "
+            "candidate takes the lease. A performance RTO that comes back undefined "
+            "is explained by this geometry at every candidate in the range; one "
+            "that comes back defined is not contradicted by it"
         ),
     }
 

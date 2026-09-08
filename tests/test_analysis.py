@@ -17,7 +17,8 @@ import pytest
 from crdblab.analysis import engine_comparison, resilience, steady_state
 from crdblab.analysis.loader import RunLoadError, load_run
 from crdblab.analysis.validation import validate_comparison
-from crdblab.core.recorder import COLUMNS
+from crdblab.core.recorder import COLUMNS, NETWORK_COLUMNS
+from crdblab.topology import Node, Topology
 
 # --- fixtures --------------------------------------------------------------
 
@@ -1199,3 +1200,145 @@ def test_write_latency_recovery_reports_unavailable_without_a_fault(tmp_path):
     )
     result = resilience.write_latency_recovery(run, resilience.align(run))
     assert result["available"] is False
+
+
+# --------------------------------------------------------------------------
+# quorum_geometry's leaseholder-displaced case. Every chaos profile in this
+# project targets the gateway itself, which is also the leaseholder -- the
+# ordinary "leader survives, loses one follower" code path this function
+# started with never actually runs here. The original implementation removed
+# the target's entry from the GATEWAY'S OWN RTT row to compute the post-fault
+# floor; when the target *is* the gateway, that row has no such entry to
+# remove (a node has no RTT to itself in the matrix), so the removal was
+# always a no-op and `after` silently equalled `before` on every real run.
+# --------------------------------------------------------------------------
+
+_FIVE_NODES = Topology(
+    nodes=(
+        Node("gcp-1", "crdb-gcp-1", "ubuntu", "gcp", "us-east1",
+             "cloud=gcp,region=us-east1", gateway=True),
+        Node("linode-1", "crdb-linode-1", "root", "linode", "us-east",
+             "cloud=linode,region=us-east"),
+        Node("linode-2", "crdb-linode-2", "root", "linode", "us-west",
+             "cloud=linode,region=us-west"),
+        Node("azure-1", "crdb-azure-1", "ubuntu", "azure", "centralindia",
+             "cloud=azure,region=centralindia"),
+        Node("azure-2", "crdb-azure-2", "ubuntu", "azure", "eastasia",
+             "cloud=azure,region=eastasia"),
+    )
+)
+
+
+def _write_network_csv(tmp_path: Path, rtts: dict) -> Path:
+    """A minimal, valid network.csv: symmetric RTTs, one row per direction.
+
+    ``rtts`` maps a frozenset({host_a, host_b}) to a mean RTT in ms.
+    """
+    rows = []
+    for pair, ms in rtts.items():
+        a, b = tuple(pair)
+        for source, dest in ((a, b), (b, a)):
+            rows.append(
+                {
+                    "ts_utc": "2026-09-08T00:00:00Z",
+                    "source": source,
+                    "destination": dest,
+                    "source_region": "",
+                    "destination_region": "",
+                    "samples": 100,
+                    "loss_pct": 0.0,
+                    "rtt_min_ms": ms,
+                    "rtt_mean_ms": ms,
+                    "rtt_p50_ms": ms,
+                    "rtt_p95_ms": ms,
+                    "rtt_p99_ms": ms,
+                    "rtt_max_ms": ms,
+                    "rtt_mdev_ms": 0.1,
+                    "rtt_resolution_ms": 0.1,
+                }
+            )
+    path = tmp_path / "network.csv"
+    pd.DataFrame(rows, columns=list(NETWORK_COLUMNS)).to_csv(path, index=False)
+    return path
+
+
+# RTTs modelled on the live testbed's own matrix: gcp-1/linode-1/linode-2 form
+# a fast triangle under 70ms, the two Azure nodes sit at 150-230ms from
+# everything, matching the geometry that produced the 2026-09-08 bug report.
+_TESTBED_RTTS = {
+    frozenset({"crdb-gcp-1", "crdb-linode-1"}): 24.9,
+    frozenset({"crdb-gcp-1", "crdb-linode-2"}): 69.7,
+    frozenset({"crdb-gcp-1", "crdb-azure-1"}): 210.1,
+    frozenset({"crdb-gcp-1", "crdb-azure-2"}): 198.9,
+    frozenset({"crdb-linode-1", "crdb-linode-2"}): 68.8,
+    frozenset({"crdb-linode-1", "crdb-azure-1"}): 179.1,
+    frozenset({"crdb-linode-1", "crdb-azure-2"}): 199.1,
+    frozenset({"crdb-linode-2", "crdb-azure-1"}): 231.1,
+    frozenset({"crdb-linode-2", "crdb-azure-2"}): 153.7,
+    frozenset({"crdb-azure-1", "crdb-azure-2"}): 87.1,
+}
+
+
+def test_a_fault_on_a_follower_uses_the_original_still_correct_path(tmp_path):
+    """azure-1 dying while gcp-1 stays leaseholder: remove one entry from the
+    gateway's own row. This is the case the function was first written for."""
+    network_csv = _write_network_csv(tmp_path, _TESTBED_RTTS)
+    events = dict(_EVENTS, target="azure-1")
+    run = load_run(
+        _write_run(
+            tmp_path, "chaos_follower_fault",
+            _rows([(10, 800, 1.0, 200, 40.0)]),
+            phase="p4_chaos", events=events,
+        )
+    )
+    geom = resilience.quorum_geometry(run, network_csv, _FIVE_NODES)
+    assert geom["available"] is True
+    assert geom["leaseholder_displaced"] is False
+    # linode-1 (24.9) and linode-2 (69.7) are still there; losing azure-1 does
+    # not touch the fast quorum at all.
+    assert geom["surviving_quorum_floor_ms"] == pytest.approx(69.68, abs=0.05)
+    assert geom["target_in_fast_quorum"] is False
+
+
+def test_a_fault_on_the_leaseholder_is_reported_as_a_range_not_a_false_point(tmp_path):
+    """The bug this pins: gcp-1 IS the gateway for every real chaos profile, so
+    there is no "gateway's row minus one entry" to compute -- the leaseholder
+    itself is gone and a survivor takes over. The old code silently returned
+    before == after here on every run."""
+    network_csv = _write_network_csv(tmp_path, _TESTBED_RTTS)
+    events = dict(_EVENTS, target="gcp-1")
+    run = load_run(
+        _write_run(
+            tmp_path, "chaos_leader_fault",
+            _rows([(10, 800, 1.0, 200, 40.0)]),
+            phase="p4_chaos", events=events,
+        )
+    )
+    geom = resilience.quorum_geometry(run, network_csv, _FIVE_NODES)
+    assert geom["available"] is True
+    assert geom["leaseholder_displaced"] is True
+    # It must NOT collapse to before == after -- that was the bug.
+    lo, hi = geom["surviving_quorum_floor_range_ms"]
+    assert lo > geom["quorum_floor_ms"] + 1.0
+    assert hi > lo
+    # linode-2 and azure-2 (153.7ms to each other) is the best surviving pair;
+    # linode-1 as leader must reach into Azure at 179ms, the worst case.
+    assert geom["best_case_leader"] == "linode-2"
+    assert geom["worst_case_leader"] == "linode-1"
+    assert geom["target_in_fast_quorum"] is True
+    assert "displaces it" in geom["detail"]
+
+
+def test_the_displaced_case_evaluates_every_survivor_as_a_candidate(tmp_path):
+    network_csv = _write_network_csv(tmp_path, _TESTBED_RTTS)
+    events = dict(_EVENTS, target="gcp-1")
+    run = load_run(
+        _write_run(
+            tmp_path, "chaos_candidates",
+            _rows([(10, 800, 1.0, 200, 40.0)]),
+            phase="p4_chaos", events=events,
+        )
+    )
+    geom = resilience.quorum_geometry(run, network_csv, _FIVE_NODES)
+    assert set(geom["candidate_floors_ms"]) == {"linode-1", "linode-2", "azure-1", "azure-2"}
+    assert "gcp-1" not in geom["candidate_floors_ms"]
