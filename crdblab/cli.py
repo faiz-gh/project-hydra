@@ -527,10 +527,10 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
                 if probe.get("fault_attributable", True):
                     print(
                         f"  {probe['observed_outage_s'] * 1000:.0f} ms between served canary "
-                        "writes. Prefer this figure: the probe writes from the "
-                        "workstation, so each timestamp carries ~188 ms of link, and "
-                        "that offset cancels between two of its own observations but "
-                        "not against the fault's"
+                        "writes. Prefer this figure: it is the interval between two "
+                        "of the probe's own observations, so whatever each timestamp "
+                        "carries in link cost cancels between them -- which it does "
+                        "not when a probe timestamp is differenced against the fault's"
                     )
                 else:
                     attribution = probe.get("attribution", {})

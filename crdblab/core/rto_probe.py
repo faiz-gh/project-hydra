@@ -37,12 +37,17 @@ number of extra writes per second against the same cluster, reported in
 ``summary()`` as ``achieved_rate_per_s`` so that it can be set against the
 workload's own write rate and judged rather than assumed negligible.
 
-**It writes from the workstation, and that has to be stated because it sets the
-arithmetic.** Like the RPO audit writer, it connects directly rather than being
-shipped to the gateway, and the workstation is 376 ms round trip from the gateway
-(the measurement behind ``preflight.CONTROL_TIMEOUT_S``). Each canary write
-therefore costs that link plus the ~70 ms quorum, near 450 ms, and *not* the
-~70 ms a client on the gateway would pay. Three consequences, none of which are worked around silently:
+**Where it writes from sets the arithmetic, so it is stated.** It runs on the
+dedicated client node (:mod:`crdblab.core.remote_probe` ships this module there
+and executes it), which is a Tailscale peer of every cluster member. A canary
+write costs 123 ms measured -- the cross-region quorum (~70 ms floor) plus the
+client's own hop -- and the pool achieves ~59 writes a second, resolving 21-29 ms.
+
+It used to run in the harness process on the operator's workstation, where the
+same write cost 332 ms, the pool achieved 21 a second and the probe resolved
+only 64 ms; the recorded figures below from 2026-09-05 are from that
+arrangement and are kept because they are what the design decisions were made
+against. Three consequences, none of which are worked around silently:
 
 * Resolution is the write cost over the worker count, and it is measured per
   run rather than asserted. Two 60 s runs against the live cluster on
@@ -74,8 +79,8 @@ therefore costs that link plus the ~70 ms quorum, near 450 ms, and *not* the
 are recorded.** The dispatcher ticks on absolute monotonic deadlines at
 ``interval_s`` -- 2 ms by default, and it does not accumulate drift because each
 deadline is computed from the epoch rather than by adding to the last one. But a
-tick only becomes an attempt if a worker is free, and with writes costing ~450 ms
-from the workstation and eight workers, all but about one tick in fifty finds
+tick only becomes an attempt if a worker is free, and with writes costing ~123 ms
+from the client node and eight workers, the overwhelming majority of ticks find
 none. Reporting the configured 2 ms as the
 resolution of an RTO would be false precision of exactly the kind this
 project's recorded instrumentation defects are made of, so what
@@ -118,8 +123,9 @@ from .recorder import PROBE_OUTCOMES, utcnow_us
 DEFAULT_INTERVAL_S = 0.002
 
 #: Concurrent in-flight writes. The gap between observations is roughly the write
-#: cost over the pool size, and from the workstation that cost is ~370 ms measured
-#: (376 ms of link dominating a ~70 ms quorum).
+#: cost over the pool size, and from the client node that cost is ~123 ms measured
+#: -- the cross-region quorum (~70 ms floor) plus the client's hop, rather than
+#: the 332 ms it was when the probe ran from the operator's workstation.
 #:
 #: Measured against the live cluster rather than reasoned about, because the first
 #: version of this constant was reasoned about and was wrong by a factor of two:
@@ -509,8 +515,8 @@ class RtoProbe:
         46 ms, and the workers spread out and stay spread.
 
         It is derived from the run's own observations rather than configured. The
-        write cost here is a property of the link on the day -- 368 ms from this
-        workstation, ~69 ms from a client on the gateway -- so a constant would be
+        write cost here is a property of the link on the day -- 123 ms from the
+        client node, 332 ms when this ran from the workstation -- so a constant would be
         wrong for one of them and unmaintainable for both. Until enough writes
         have completed to estimate it, dispatch is governed by ``interval_s``
         alone, which fills the pool quickly at the start of a run.
@@ -834,8 +840,8 @@ def tail_attribution(
     failover event out of the probe's own jitter.
 
     The threshold is the healthy 95th percentile rather than a constant: it is
-    scale-free, so this works identically for a probe on the gateway paying 70 ms
-    a write and one on a workstation paying 370 ms.
+    scale-free, so this works identically for a probe on the client node paying
+    123 ms a write and one on a workstation paying 332 ms.
 
     Returns the evidence rather than a verdict alone, so a marginal call can be
     inspected instead of trusted.

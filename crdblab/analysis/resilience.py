@@ -350,12 +350,15 @@ def probe_availability(run: Run) -> dict[str, Any]:
     reading back the summary the phase wrote, so the published number can be
     disputed against the observations behind it.
 
-    ``observed_outage_s`` is the quantity to prefer when the two differ. The
-    probe writes from the workstation, 376 ms round trip from the gateway, so
-    every completion timestamp carries about half of that as a systematic offset;
-    it appears identically on the last write before the fault and the first after
-    it, and therefore cancels in their difference but not in the interval from
-    the fault, which is timestamped by the injector rather than by the probe.
+    ``observed_outage_s`` is the quantity to prefer when the two differ. Every
+    completion timestamp carries the probe's own write path as a systematic
+    offset -- 123 ms from the client node where the probe runs, and 332 ms back
+    when it ran from the operator's workstation. That offset appears identically
+    on the last write before the fault and the first after it, so it cancels in
+    their difference but not in the interval measured from the fault, which is
+    timestamped by the injector rather than by the probe. Moving the probe onto
+    the client node shrank the offset; it did not remove the reason to prefer
+    the difference.
     """
     probe_csv = run.path / "rto_probe.csv"
     events = run.events or {}

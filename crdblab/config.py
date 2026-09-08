@@ -141,11 +141,13 @@ class ChaosSpec:
     #: Dispatch cadence. Sub-5 ms. What the probe *achieves* is bounded by
     #: ``probe_workers`` over the write latency and is measured per run.
     probe_interval_s: float = 0.002
-    #: Eight in-flight writes. From the workstation a canary write costs ~370 ms,
-    #: dominated by the link rather than by the ~70 ms quorum, so the gap between
-    #: observations is ~370/workers. Measured live: 8 workers resolve to 125 ms at
-    #: 18 writes/s, 24 to 64 ms at 43 writes/s. Concurrency is the cheap axis here
-    #: and the dispatch interval is not. See crdblab/core/rto_probe.py.
+    #: Eight in-flight writes. The gap between observations is the write cost over
+    #: the pool size. From the client node -- where the probe now runs -- a canary
+    #: write costs ~123 ms, so 8 workers resolve to 21-29 ms at ~59 writes/s.
+    #: (From the operator's workstation the same write cost 332 ms and 8 workers
+    #: resolved only 64 ms at 21 writes/s, which is why the probe moved.)
+    #: Concurrency is the cheap axis here and the dispatch interval is not.
+    #: See crdblab/core/rto_probe.py and crdblab/core/remote_probe.py.
     probe_workers: int = 8
     #: Generous on purpose: a write that blocks through a lease transfer and then
     #: commits is the most precise observation of recovery there is, and a tight

@@ -185,15 +185,20 @@ import json,sys; print(json.load(sys.stdin)["chaos"]["target"])')"
 # chaos target now defaults to the gateway itself (CHAOS_TARGET == gcp-1), so
 # --join can no longer just be $GW_HOST -- that would tell a node being
 # restarted to join itself, which is not a real join hint.
-read -r CT_USER CT_HOST CT_LOCALITY JOIN_HOST < <("$PY" - "$CHAOS_TARGET" <<'PYEOF'
+read -r CT_USER CT_HOST CT_LOCALITY JOIN_USER JOIN_HOST < <("$PY" - "$CHAOS_TARGET" <<'PYEOF'
 import sys
 from crdblab.topology import DEFAULT_TOPOLOGY as t
 n = t.get(sys.argv[1])
 peer = next(p for p in t.nodes if p.name != n.name)
-print(n.user, n.host, n.locality, peer.host)
+print(n.user, n.host, n.locality, peer.user, peer.host)
 PYEOF
 ) || die "could not resolve chaos target '$CHAOS_TARGET'"
-note "chaos target $CT_HOST ($CT_LOCALITY); rejoin via $JOIN_HOST"
+# JOIN_USER is emitted alongside JOIN_HOST and is NOT interchangeable with
+# CT_USER: the SSH user differs per provider (root on Linode, ubuntu on GCP
+# and Azure), so `ssh $CT_USER@$JOIN_HOST` never connects and every command
+# run through it returns nothing. That is exactly how the liveness poll below
+# reported "0 live" on 2026-09-08 while the node was in fact already back.
+note "chaos target $CT_HOST ($CT_LOCALITY); rejoin via $JOIN_USER@$JOIN_HOST"
 
 # --- 3. the testbed ---------------------------------------------------------
 
@@ -394,7 +399,7 @@ if [ "$RUN_CHAOS" -eq 1 ]; then
     # it is alive: the query fails, `wc -l` returns 0, and the step reported
     # "has not rejoined (0 live)" on every dead-mode run regardless of the
     # truth. Observed 2026-09-08.
-    LIVE=$(remote "$CT_USER" "$JOIN_HOST" \
+    LIVE=$(remote "$JOIN_USER" "$JOIN_HOST" \
       "cockroach node status --insecure --host=$JOIN_HOST:26257 --format=csv 2>/dev/null | tail -n +2 | wc -l" \
       | tr -d ' ' || echo 0)
     [ "$LIVE" = "5" ] && break
@@ -456,7 +461,12 @@ FIG_ARGS=()
 
 elapsed=$(( $(date -u +%s) - started_at ))
 step "Done in $((elapsed / 60))m $((elapsed % 60))s"
-for r in "$P1" "$P2" "$P3" "$P4R" "$P4D"; do
+# No $P3: the pre-rearchitecture design had a `p3_cluster` run, and the
+# variable was never assigned after that phase was folded into `bench`. Under
+# `set -u` the stale reference aborted the script at the final summary -- after
+# every measurement and figure was already written, so it cost nothing but the
+# summary and a non-zero exit. Phases are P1, P2 (bench), P4R and P4D.
+for r in "$P1" "$P2" "$P4R" "$P4D"; do
   [ -n "$r" ] && note "$(basename "$r")"
 done
 note "figures/  (PNG at >=4K, with a vector PDF beside each)"
