@@ -5,7 +5,13 @@ Every figure here is resolved from a ``run_id`` through
 refuses a run with no manifest and refuses a run that does not pass validation,
 so a figure that renders is a figure whose provenance can be stated. Each one
 also stamps the run ids it was drawn from into its own footer, because a figure
-separated from its caption must still be traceable to the measurement.
+separated from its caption must still be traceable to the measurement -- and
+carries the same provenance in its *filename* (:func:`_provenance_slug`),
+because a footer inside an image cannot distinguish two files sitting in one
+directory.
+
+Each figure is written twice, as a PNG at :data:`EXPORT_WIDTH_PX` and as a
+vector file beside it (:data:`EXPORT_VECTOR_EXT`).
 
 Aggregation is never recomputed here. Throughput sums and latency does not pool
 in :meth:`Run.ticks` / :meth:`Run.latency_by_op`; tier statistics come from

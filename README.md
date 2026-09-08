@@ -41,7 +41,10 @@ alongside the session log it was distilled from.
 4. `crdblab net probe` — Phase I substrate validation. Records the all-pairs RTT
    matrix and asserts clock offset and leaseholder placement. Its derived quorum
    floor is what makes the later write-latency check possible, so it must run
-   before any benchmark.
+   before any benchmark. It takes the same top-level `--engine` as the phases
+   below: ping does not depend on which database is deployed, but a redeploy to
+   the other engine replaces every cluster node, so the run and its figure
+   belong to one deployment and say which.
 5. `crdblab bench --profile thesis-extended` — Phase II, the benchmark, driven
    from the dedicated client node rather than from a node under test.
    Pre-flight refuses to start unless a Phase I run exists to supply the

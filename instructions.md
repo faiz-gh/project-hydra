@@ -309,7 +309,9 @@ Then a two-tier end-to-end pass, about four minutes:
 ```bash
 .venv/bin/crdblab net probe    --profile smoke
 .venv/bin/crdblab bench --profile smoke
-# PostgreSQL/Patroni instead: crdblab --engine postgresql bench --profile smoke
+# PostgreSQL/Patroni instead:
+#   crdblab --engine postgresql net probe --profile smoke
+#   crdblab --engine postgresql bench     --profile smoke
 ```
 
 `bench` ends with `all N pre-flight checks passed`; `net probe` prints a `[PASS]`
@@ -328,7 +330,18 @@ ordering is load-bearing rather than conventional.
 
 ```bash
 .venv/bin/crdblab net probe --profile thesis-extended
+# PostgreSQL/Patroni instead: crdblab --engine postgresql net probe --profile ...
 ```
+
+Run it once per deployment, with the `--engine` of whichever one is up. The
+measurement itself does not depend on the engine — ping does not care what is
+listening on 26257 — but the machines do: switching engines replaces every
+cluster node, so a matrix taken against the CockroachDB deployment describes a
+different set of hosts than one taken against the PostgreSQL deployment.
+Recording the engine is what lets the two matrices sit in `figures/` under
+distinct names (§9) instead of one silently replacing the other. Phase I runs
+recorded before this flag existed carry no engine and read back as
+`cockroachdb`, which is what all of them were.
 
 Produces the all-pairs RTT matrix, MTU, clock offsets and leaseholder placement,
 and derives the **quorum floor** — the round trip to the second-fastest
@@ -357,7 +370,11 @@ and its benchmark runs must not be pooled with earlier ones.
 
 Run once per engine you want in the comparison. `--engine` is a top-level flag
 and must precede the subcommand; passing it after `bench` is rejected by
-argparse rather than silently ignored.
+argparse rather than silently ignored. `net probe` (§6, Phase I) and
+`chaos run` take it the same way, and all three record it in the run manifest —
+which is what puts the engine in each figure's filename (§9). `validate`,
+`analyze` and `report figures` do not take it: they are given run ids, and every
+run already says which engine produced it.
 
 Sweeps C = 1, 2, 5, 10, 50, 100, 200 with three repetitions each, in an
 order shuffled from the **profile seed** rather than the wall clock, so the
@@ -592,7 +609,15 @@ so a smoke render, a thesis render and a PostgreSQL render coexist in one
 directory instead of overwriting each other. Phase I's matrix is named the same
 way: ping does not care which database is listening, but switching engines
 replaces every cluster node, so the matrix still belongs to one deployment —
-`net probe` records `--engine` in its manifest for that reason. The throughput-sweep and
+`net probe` records `--engine` in its manifest for that reason.
+
+These names changed on 2026-09-08 (they were previously `fig2_throughput_sweep.png`
+and so on, with a `_postgresql` suffix as the only variation), so a caption
+citing a figure by filename needs re-checking against what `report figures`
+now writes. The figure *numbers* did not move: fig2 is still the throughput
+sweep, fig5 still the `dead` timeline, fig6 still `recover`.
+
+The throughput-sweep and
 latency-by-operation figures are drawn from whichever single benchmark run is
 picked — CockroachDB or PostgreSQL, whichever the `--cluster` run id names or
 was most recently benchmarked — not from both engines at once; there is no

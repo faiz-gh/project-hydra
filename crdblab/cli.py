@@ -858,11 +858,18 @@ def build_parser() -> argparse.ArgumentParser:
         prog="crdblab",
         description="Multi-cloud Database benchmarking and chaos testbed harness",
     )
+    # Top-level rather than per-subcommand because it selects the deployment
+    # under test, not one command's behaviour: `bench`, `chaos run` and
+    # `net probe` all read it and all record it in their manifest. Being
+    # top-level, argparse requires it *before* the subcommand name --
+    # `crdblab --engine postgresql bench ...`, never `crdblab bench --engine`.
     parser.add_argument(
         "--engine",
         default="cockroachdb",
         choices=("cockroachdb", "postgresql"),
-        help="target database engine (default: cockroachdb)",
+        help="database engine deployed on the testbed, recorded in the run "
+        "manifest and in every figure's filename (default: cockroachdb). "
+        "Must precede the subcommand.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -1068,8 +1075,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     rep = sub.add_parser("report", help="render dissertation figures from validated runs")
     rep_sub = rep.add_subparsers(dest="report_command", required=True)
-    figs = rep_sub.add_parser("figures", help="render every figure whose inputs exist")
-    figs.add_argument("--out", default="figures", help="output directory")
+    figs = rep_sub.add_parser(
+        "figures",
+        help="render every figure whose inputs exist, as a PNG and an SVG each",
+    )
+    figs.add_argument(
+        "--out",
+        default="figures",
+        help="output directory. Filenames carry the engine, profile and run id "
+        "behind each figure, so renders of different runs coexist here rather "
+        "than overwriting each other (default: figures)",
+    )
     figs.add_argument("--network", help="Phase I run id (default: most recent)")
     figs.add_argument("--cluster", help="benchmark cluster run id (default: most recent)")
     figs.add_argument(

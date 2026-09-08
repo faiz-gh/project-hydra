@@ -123,7 +123,9 @@ it does not deploy anything, since switching engines is a `terraform apply
 measures one engine; run it once per engine and then compare with `crdblab
 analyze engine-comparison --crdb <run> --pg <run>`, which the script never runs
 itself. The flag is spliced in *before* the subcommand (`crdblab --engine ...
-bench`) because it is top-level, and only `bench` and `chaos run` are given it.
+bench`) because it is top-level, and is given to the three commands that write a
+run — `net probe`, `bench`, `chaos run` — but not to `validate`, `analyze` or
+`report figures`, which take run ids that already name their engine.
 It also branches the script's own pre-flight and repair steps, which are
 otherwise CockroachDB-only: node-liveness and `lease_preferences` become a poll
 of every member's Patroni REST API (`:8008/health`, plus an assertion that
@@ -179,7 +181,9 @@ project's most dangerous failure mode (fails *flatteringly*, not loudly).
 
 **`crdblab/phases/`** — one module per measurement phase:
 - `p1_network.py` — RTT matrix, clock offsets, derives the quorum floor
-  other phases assert against.
+  other phases assert against. Takes `engine=` and records it in the manifest:
+  the measurement does not depend on the engine, but the deployment does (a
+  redeploy replaces every cluster node), and it is what names the figure.
 - `bench.py` — throughput/latency sweep across concurrency tiers. `Target`
   carries an `engine` (`"cockroachdb"` or `"postgresql"`); `Target.db_uri` is
   a **single** connection string in both cases — for CockroachDB, the gateway
@@ -239,8 +243,11 @@ ids into each figure's footer.
 `validate`, `profile`). Each `_cmd_*` function is a thin adapter over the
 modules above. A top-level `--engine {cockroachdb,postgresql}` flag
 (default `cockroachdb`) is parsed on the root parser and read via
-`args.engine` in `_cmd_bench`/`_cmd_chaos`. **It must precede the
-subcommand** (`crdblab --engine postgresql bench --profile ...`) — argparse
+`args.engine` in `_cmd_bench`, `_cmd_chaos` and `_cmd_net_probe` — the three
+commands that *write* a run, each of which records it in the manifest.
+`validate`, `analyze` and `report figures` deliberately don't take it: they are
+given run ids, and every run already states its own engine. **It must precede
+the subcommand** (`crdblab --engine postgresql bench --profile ...`) — argparse
 rejects it after the subcommand name, since `bench`'s own subparser doesn't
 declare `--engine`.
 

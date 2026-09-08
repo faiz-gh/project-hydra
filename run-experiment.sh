@@ -121,9 +121,12 @@ esac
 
 # --engine is a TOP-LEVEL crdblab flag and argparse rejects it after the
 # subcommand name, so it is spliced in before the subcommand rather than
-# appended (see CLAUDE.md / crdblab/cli.py). Only `bench` and `chaos run` read
-# it; `net probe`, `validate`, `analyze` and `report figures` do not, so it is
-# not passed to them.
+# appended (see CLAUDE.md / crdblab/cli.py). `bench`, `chaos run` and `net
+# probe` all read it -- Phase I's ping measurement does not depend on the
+# engine, but the deployment it was taken against does, and it is the manifest
+# field that names the run's figure. `validate`, `analyze` and `report figures`
+# do not read it: they take run ids, and every run already says which engine
+# produced it.
 ENGINE_ARGS=(--engine "$ENGINE")
 
 mkdir -p "$LOG_DIR"
@@ -463,7 +466,7 @@ phase() {  # phase <label> <crdblab args...>
   "$CRDBLAB" "$@" || die "$label failed. Nothing after this point has run."
 }
 
-phase "Phase I — network substrate"        net probe    --profile "$PROFILE"
+phase "Phase I — network substrate"        "${ENGINE_ARGS[@]}" net probe --profile "$PROFILE"
 phase "Phase II — benchmark, five-node cluster" "${ENGINE_ARGS[@]}" bench --profile "$PROFILE"
 
 if [ "$RUN_CHAOS" -eq 1 ]; then
