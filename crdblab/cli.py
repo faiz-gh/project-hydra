@@ -567,6 +567,16 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
                 f"(sd {state['sd_tps']:.0f}{frac_str}) over {state['intervals']} intervals"
             )
 
+        wlat = summary.get("write_latency_recovery") or {}
+        if wlat.get("available"):
+            print(f"\nRTO, write-path latency ({wlat.get('op', 'update')}):")
+            print(f"  {wlat.get('claim', wlat.get('detail'))}")
+            if wlat.get("classification") == "structural_latency_shift":
+                print(
+                    "  a throughput-based recovery figure recovering alongside this "
+                    "is not a contradiction -- see quorum geometry below"
+                )
+
         geom = summary["quorum_geometry"]
         if geom.get("available"):
             print("\nquorum geometry:")

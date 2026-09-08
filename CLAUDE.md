@@ -307,6 +307,31 @@ testbed, not something touched by most code changes to `crdblab/`.
   the run reports that the fault was never injected instead of hanging.
   `events.json` carries both `at_offset_s` (from the epoch, unchanged) and
   the new `at_steady_state_offset_s`.
+- **`resilience.write_latency_recovery()` is a second, independent recovery
+  axis from `performance()`, on the write operation's own p50 latency rather
+  than aggregate TPS.** Added because this workload is 80% reads served
+  locally by the leaseholder: aggregate throughput can fully recover after a
+  fault that permanently changes the write path's floor, and on this testbed
+  it does -- a `dead` run against `gcp-1` settled write (`update`) p50 at
+  209.7ms against a 151.5ms baseline (1.38x, held for the rest of the run)
+  while `performance()` reported a clean 8.0s recovery on the same data. Both
+  figures are correct; they answer different questions, and reporting only one
+  would either hide a structural degradation (TPS-only) or misreport a healthy
+  read-dominated workload as unrecovered (latency-only). Settling is judged the
+  same way `post_fault_steady_state` judges throughput -- coefficient of
+  variation over a window excluding `LIVENESS_SETTLE_S` -- and a settled value
+  within `LATENCY_SHIFT_TOLERANCE` (15%) of baseline is `returned_to_baseline`;
+  outside it, `structural_latency_shift`.
+  **Known gap found while adding this:** `quorum_geometry()` computes RTTs
+  from `gateway_rtts()`, which returns round trips *from the gateway node*.
+  Every chaos profile's target is `gcp-1`, which is also the gateway, so
+  `before` already has the target's row removed as "self" before `after`'s
+  target-filter runs -- the filter is then a no-op and `before == after`
+  always, silently reporting "the write path is unaffected" regardless of what
+  actually happened. This is why `write_latency_recovery` and
+  `quorum_geometry` disagreed on the run above. Not fixed here -- caught during
+  validation of an unrelated change, flagged rather than fixed to keep that
+  change's diff reviewable on its own.
 - **The chaos generator runs with `--tolerate-errors`; the bench sweep must
   not.** Without it `cockroach workload run` *exits* on its first failed
   statement, and during a chaos run the first failed statement is the fault.

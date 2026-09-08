@@ -79,6 +79,16 @@ LIVENESS_SETTLE_S = 15.0
 #: more precision than a 1 Hz sample stream supports.
 SETTLED_CV = 0.25
 
+#: A settled post-fault write latency within this fraction of its pre-fault
+#: baseline is reported as "returned to baseline" rather than as a structural
+#: shift. Not a claim of measurement precision -- it exists only to keep
+#: ordinary run-to-run noise (a few percent, observed) from being reported as
+#: a permanent latency change when it is not one. 15% is loose enough to clear
+#: that noise and tight enough to still catch a real quorum-geometry shift,
+#: which on this testbed is not subtle: losing a fast-triangle member measured
+#: at 2.7x the write floor (69.7 ms to 190 ms), not 1.15x.
+LATENCY_SHIFT_TOLERANCE = 0.15
+
 
 class AlignmentError(RuntimeError):
     """Raised when a run's two timelines cannot be related at all."""
@@ -566,6 +576,120 @@ def post_fault_steady_state(run: Run, alignment: Alignment) -> dict[str, Any]:
     }
 
 
+def write_latency_recovery(
+    run: Run, alignment: Alignment, op: str = "update"
+) -> dict[str, Any]:
+    """Did the write path itself come back, independent of aggregate throughput.
+
+    ``post_fault_steady_state`` answers "did throughput recover" and can answer
+    yes even when the write path did not: this workload is 80% reads served
+    locally by the leaseholder, so a permanently slower write path can be
+    invisible in aggregate TPS while it is fully visible in the write
+    operation's own latency. Losing a fast-quorum member is the case this
+    project's own topology produces (see :func:`quorum_geometry`) -- the write
+    floor measured 69.7 ms with the member up and 190 ms without it, a 2.7x
+    change that a throughput-only view can miss entirely if the workload has
+    enough read share and offered concurrency to hide it.
+
+    This is not a replacement for :func:`performance`; it is a second,
+    independent axis. A run can be `recovered` on throughput and
+    `structural_latency_shift` here at the same time, and that combination is
+    itself the finding: the system survived and kept serving its throughput
+    target, but it is no longer the same system it was before the fault.
+
+    Settling is judged the same way :func:`post_fault_steady_state` judges
+    throughput -- coefficient of variation over a window that excludes
+    :data:`LIVENESS_SETTLE_S` after the fault, so failover itself is not
+    mistaken for an unstable new state. Baseline is the mean of the last 20
+    pre-fault intervals of the same operation type, matching how every other
+    baseline in this module is taken.
+    """
+    fault = fault_offsets(run, alignment)
+    wall = fault.get("wall_offset_s")
+    if wall is None:
+        return {"available": False, "detail": "no fault was injected"}
+
+    op_rows = run.metrics[run.metrics["op"] == op]
+    if op_rows.empty:
+        return {"available": False, "detail": f"no {op!r} samples in this run"}
+
+    if alignment.exact and run.records_wall_clock:
+        times = op_rows["wall_offset_s"].astype(float)
+        fault_at = float(wall)
+    else:
+        times = op_rows["elapsed_s"].astype(float)
+        # The later bound, for the same reason `post_fault_steady_state` takes
+        # it: an uncertain alignment must err toward excluding data, never
+        # toward smuggling a pre-fault interval into the post-fault window.
+        _, fault_at = alignment.to_generator(float(wall))
+
+    pre = op_rows.loc[times < fault_at, "p50_ms"].astype(float)
+    if pre.empty:
+        return {
+            "available": False,
+            "detail": f"no pre-fault {op!r} samples to baseline against",
+        }
+    baseline = float(pre.tail(20).mean())
+
+    window = op_rows.loc[times >= fault_at + LIVENESS_SETTLE_S, "p50_ms"].astype(float)
+    if len(window) < 3:
+        return {
+            "available": True,
+            "op": op,
+            "settled": None,
+            "baseline_p50_ms": round(baseline, 1),
+            "detail": (
+                f"only {len(window)} {op!r} interval(s) after the "
+                f"{LIVENESS_SETTLE_S:.0f}s settling window; too few to characterise "
+                "what the write path settled to"
+            ),
+        }
+
+    mean = float(window.mean())
+    sd = float(window.std(ddof=1))
+    cv = sd / mean if mean else float("inf")
+    settled = bool(cv < SETTLED_CV)
+    ratio = (mean / baseline) if baseline else None
+    shifted = bool(ratio is not None and abs(ratio - 1.0) > LATENCY_SHIFT_TOLERANCE)
+
+    out: dict[str, Any] = {
+        "available": True,
+        "op": op,
+        "settled": settled,
+        "baseline_p50_ms": round(baseline, 1),
+        "settled_p50_ms": round(mean, 1),
+        "sd_ms": round(sd, 1),
+        "coefficient_of_variation": round(cv, 4),
+        "ratio_to_baseline": round(ratio, 3) if ratio is not None else None,
+        "intervals": len(window),
+        "settling_window_excluded_s": LIVENESS_SETTLE_S,
+    }
+
+    if not settled:
+        out["classification"] = "unsettled_within_run"
+        out["claim"] = (
+            f"{op} latency had not settled to a stable value by the end of the "
+            f"run (CV={cv:.2f}); no latency-floor comparison can be stated"
+        )
+    elif shifted:
+        out["classification"] = "structural_latency_shift"
+        direction = "higher" if ratio > 1 else "lower"
+        out["claim"] = (
+            f"{op} latency settled at a stable {mean:.1f} ms against a "
+            f"{baseline:.1f} ms baseline -- {ratio:.2f}x, {direction} -- and held "
+            "there for the rest of the run. This is a structural change to the "
+            "write path, not a transient effect of the fault, and a throughput "
+            "figure recovering alongside it does not contradict it"
+        )
+    else:
+        out["classification"] = "returned_to_baseline"
+        out["claim"] = (
+            f"{op} latency settled back within {LATENCY_SHIFT_TOLERANCE * 100:.0f}% "
+            f"of its pre-fault baseline ({mean:.1f} ms vs {baseline:.1f} ms)"
+        )
+    return out
+
+
 def quorum_geometry(
     run: Run,
     network_csv: Path | None,
@@ -724,6 +848,10 @@ def summarise(
         # should be visible as two readings.
         "probe_rto": probe_availability(run),
         "performance_rto": performance(run, alignment),
+        # A second, independent axis from performance_rto: whether the write
+        # path itself came back, not whether aggregate throughput did. See
+        # write_latency_recovery's docstring for why the two can disagree.
+        "write_latency_recovery": write_latency_recovery(run, alignment),
         "quorum_geometry": quorum_geometry(run, network_csv, topology),
         "rpo": rpo(run),
     }

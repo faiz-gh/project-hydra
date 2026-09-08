@@ -1117,3 +1117,85 @@ def test_a_matched_utilisation_level_is_not_rounded_before_it_is_used(tmp_path):
     # The lowest level is the bottom of the comparable range, not a casualty of
     # rounding it below that bound.
     assert min(p["utilisation"] for p in out["points"]) == out["utilisation_range"][0]
+
+
+# --------------------------------------------------------------------------
+# write_latency_recovery: a second, independent recovery axis from
+# performance(). This workload is 80% reads served locally, so aggregate
+# throughput can fully recover after a fault that permanently changes the
+# write path's floor -- the point raised about the Azure round-trip. These pin
+# that the write operation's own latency is judged on its own terms.
+# --------------------------------------------------------------------------
+
+
+def test_write_latency_that_returns_to_baseline_is_reported_as_such(tmp_path):
+    rows = _rows([(10, 800, 1.0, 200, 40.0)], ticks=40, wall_offset=0.0)
+    # A brief latency spike during failover, then back to the 40 ms baseline --
+    # nothing structural, just the fault being noticed.
+    for row in rows:
+        if row["op"] == "update" and 10 < row["elapsed_s"] <= 14:
+            row["p50_ms"] = 120.0
+    events = dict(_EVENTS, t_end_utc="2026-09-02T00:00:45.000000Z")
+    run = load_run(
+        _write_run(tmp_path, "chaos_latency_ok", rows, phase="p4_chaos", events=events),
+        require_valid=False,
+    )
+    result = resilience.write_latency_recovery(run, resilience.align(run))
+    assert result["available"] is True
+    assert result["settled"] is True
+    assert result["classification"] == "returned_to_baseline"
+    assert result["ratio_to_baseline"] == pytest.approx(1.0, abs=0.05)
+
+
+def test_a_permanent_write_latency_shift_is_reported_even_though_throughput_recovers(tmp_path):
+    """The exact scenario a TPS-only view misses: quorum now needs a slower
+    member, so the write path is permanently ~2x, but reads dominate throughput
+    and it looks fully recovered on that axis alone."""
+    rows = _rows([(10, 800, 1.0, 200, 40.0)], ticks=40, wall_offset=0.0)
+    for row in rows:
+        if row["op"] == "update" and row["elapsed_s"] > 10:
+            row["p50_ms"] = 80.0  # settled at 2x baseline for the rest of the run
+    events = dict(_EVENTS, t_end_utc="2026-09-02T00:00:45.000000Z")
+    run = load_run(
+        _write_run(tmp_path, "chaos_latency_shift", rows, phase="p4_chaos", events=events),
+        require_valid=False,
+    )
+    perf = resilience.performance(run, resilience.align(run))
+    result = resilience.write_latency_recovery(run, resilience.align(run))
+
+    # Throughput was never touched in this fixture -- it looks fully recovered.
+    assert perf["defined"] is True
+    assert perf["rto_s"] == pytest.approx(0.0, abs=0.5)
+    # The write path did not come back, and this axis says so on its own terms.
+    assert result["settled"] is True
+    assert result["classification"] == "structural_latency_shift"
+    assert result["ratio_to_baseline"] == pytest.approx(2.0, abs=0.05)
+    assert "not a contradiction" not in result["claim"]  # that line lives in cli.py
+    assert "structural change" in result["claim"]
+
+
+def test_write_latency_still_changing_is_reported_as_unsettled(tmp_path):
+    rows = _rows([(10, 800, 1.0, 200, 40.0)], ticks=40, wall_offset=0.0)
+    for row in rows:
+        if row["op"] == "update" and row["elapsed_s"] > 10:
+            # Alternates far above and below baseline for the rest of the run --
+            # never settles, unlike a monotonic ramp, whose CV a short window can
+            # understate even while it is still trending.
+            row["p50_ms"] = 400.0 if int(row["elapsed_s"]) % 2 == 0 else 40.0
+    events = dict(_EVENTS, t_end_utc="2026-09-02T00:00:45.000000Z")
+    run = load_run(
+        _write_run(tmp_path, "chaos_latency_unsettled", rows, phase="p4_chaos", events=events),
+        require_valid=False,
+    )
+    result = resilience.write_latency_recovery(run, resilience.align(run))
+    assert result["settled"] is False
+    assert result["classification"] == "unsettled_within_run"
+
+
+def test_write_latency_recovery_reports_unavailable_without_a_fault(tmp_path):
+    rows = _rows([(10, 800, 1.0, 200, 40.0)], ticks=12, wall_offset=0.0)
+    run = load_run(
+        _write_run(tmp_path, "bench_no_fault", rows, phase="p3_cluster", events=None)
+    )
+    result = resilience.write_latency_recovery(run, resilience.align(run))
+    assert result["available"] is False
