@@ -60,7 +60,7 @@ cp -i cockroach-v26.3.0.linux-amd64/cockroach /usr/local/bin/
 # The nodes list is injected via the join_nodes variable.
 IFS=',' read -ra PEERS <<< "${join_nodes}"
 
-cat <<EOF > /etc/haproxy/haproxy.cfg
+cat <<'EOF'  > /etc/haproxy/haproxy.cfg
 global
     log /dev/log local0
     log /dev/log local1 notice
@@ -86,14 +86,14 @@ frontend db_front
 backend patroni_primary
     option httpchk GET /primary
     http-check expect status 200
-    # init-addr is not optional here. HAProxy resolves every `server`
+    # init-addr is not optional here. HAProxy resolves every server
     # hostname once at startup and refuses to start if any of them fails --
     # and at first boot these are Tailscale MagicDNS names that frequently do
     # not resolve yet, because this node joins the mesh in the same cloud-init
     # run. Observed 2026-09-08: the whole deployment came up with haproxy
-    # dead ("Start request repeated too quickly", `haproxy -c` failing), while
+    # dead ("Start request repeated too quickly", haproxy -c failing), while
     # the very same config validated cleanly minutes later once DNS had
-    # settled. `last,libc,none` lets it start with the address unresolved and
+    # settled. last,libc,none lets it start with the address unresolved and
     # pick the peer up on a later health check instead.
     default-server inter 3s fall 3 rise 2 on-marked-down shutdown-sessions init-addr last,libc,none
 EOF
@@ -138,5 +138,74 @@ if [ "$HAPROXY_UP" != "1" ]; then
     /usr/sbin/haproxy -f /etc/haproxy/haproxy.cfg -c >&2 || true
     exit 1
 fi
+
+# ==========================================
+# 4b. pgbouncer, in front of HAProxy
+# ==========================================
+# Without this the PostgreSQL arm of the experiment cannot be driven at all.
+# `cockroach workload` v26.3.0 -- the generator, and the same binary the
+# CockroachDB arm uses -- sends `allow_unsafe_internals` as a startup parameter
+# on every connection it opens. PostgreSQL rejects unknown startup parameters
+# outright, so both `workload init` and `workload run` die at connect with
+# `FATAL: unrecognized configuration parameter "allow_unsafe_internals"
+# (SQLSTATE 42704)`. Nothing on the tool suppresses it; the only related knob
+# is a CockroachDB *cluster* setting. The alternative was to drive the two arms
+# with two different generator builds, which is a confound in the one component
+# the comparison requires to be identical.
+#
+# pool_mode=session, so this is a passthrough rather than a semantic change: a
+# client connection maps to one server connection for its whole life, exactly
+# as a direct connection would. default_pool_size covers the largest
+# concurrency tier in profiles/ with room to spare, and stays under the
+# cluster's max_connections (500, set in bootstrap-patroni.tftpl).
+apt-get install -yq pgbouncer
+
+cat <<'EOF'  > /etc/pgbouncer/pgbouncer.ini
+[databases]
+* = host=127.0.0.1 port=5000 user=root password=rootpassword
+
+[pgbouncer]
+listen_addr = 127.0.0.1
+listen_port = 6432
+auth_type = trust
+auth_file = /etc/pgbouncer/userlist.txt
+logfile = /var/log/postgresql/pgbouncer.log
+pidfile = /var/run/postgresql/pgbouncer.pid
+pool_mode = session
+# The largest tier in profiles/ is 200 connections, so 600 clients and a pool
+# of 300 leave headroom without crowding the file-descriptor limit: pgbouncer
+# budgets roughly max_client_conn + pool + slack against a 1024 soft limit, and
+# 1000 clients would exceed it. The pool also stays well under the cluster's
+# own max_connections (500, from bootstrap-patroni.tftpl).
+max_client_conn = 600
+default_pool_size = 300
+# DISCARD ALL, the session-mode default, and not empty. Emptying it -- on the
+# theory that a passthrough should change nothing -- left prepared statements
+# on a server connection when it was handed to the next client, and the
+# generator, which prepares a fixed set of statements per connection, died with
+# prepared statement "scan" already exists (SQLSTATE 42P05) at C=64.
+server_reset_query = DISCARD ALL
+ignore_startup_parameters = allow_unsafe_internals,extra_float_digits,options,search_path
+EOF
+
+echo '"root" ""' > /etc/pgbouncer/userlist.txt
+chown -R postgres:postgres /etc/pgbouncer
+systemctl enable pgbouncer
+systemctl restart pgbouncer
+
+PGBOUNCER_UP=0
+for _ in $(seq 1 12); do
+    if ss -lnt 2>/dev/null | grep -q ':6432 '; then
+        PGBOUNCER_UP=1
+        break
+    fi
+    sleep 5
+done
+if [ "$PGBOUNCER_UP" != "1" ]; then
+    echo "FAILED: pgbouncer is not listening on :6432 after 60s." >&2
+    systemctl status pgbouncer --no-pager >&2 || true
+    exit 1
+fi
+
 
 echo "✅ Client node provisioned successfully."

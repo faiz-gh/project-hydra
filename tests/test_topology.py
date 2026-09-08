@@ -87,9 +87,9 @@ def test_cluster_target_generates_a_single_gateway_uri_for_cockroachdb():
     assert target.db_uri == "postgresql://root@crdb-gcp-1:26257/ycsb?sslmode=disable"
 
 
-def test_cluster_target_generates_single_haproxy_uri_for_postgresql():
-    """One host (the client node's HAProxy, which follows Patroni's leader) and
-    a password: Patroni's pg_hba is md5 for every host connection, so an
+def test_cluster_target_generates_a_single_local_uri_for_postgresql():
+    """One host (the client node's pgbouncer, which forwards to the HAProxy that
+    follows Patroni's leader) and a password: Patroni's pg_hba is md5 for every host connection, so an
     uncredentialed DSN is refused before the generator sends an operation."""
     from crdblab.config import Settings
     from crdblab.phases.bench import cluster_target
@@ -100,7 +100,7 @@ def test_cluster_target_generates_single_haproxy_uri_for_postgresql():
         pg_password="s3cret",
     )
     target = cluster_target(settings, database="ycsb", engine="postgresql")
-    assert target.db_uri == "postgresql://root:s3cret@127.0.0.1:5000/ycsb?sslmode=disable"
+    assert target.db_uri == "postgresql://root:s3cret@127.0.0.1:6432/ycsb?sslmode=disable"
 
 
 def test_cockroachdb_target_stays_uncredentialed():
@@ -122,7 +122,7 @@ def test_a_password_with_url_metacharacters_is_escaped():
 
     settings = Settings(topology=DEFAULT_TOPOLOGY, pg_password="p@ss/word")
     uri = cluster_target(settings, engine="postgresql").db_uri
-    assert uri == "postgresql://root:p%40ss%2Fword@127.0.0.1:5000/ycsb?sslmode=disable"
+    assert uri == "postgresql://root:p%40ss%2Fword@127.0.0.1:6432/ycsb?sslmode=disable"
 
 
 
@@ -134,10 +134,14 @@ def test_the_generator_gets_one_host_and_the_measurement_clients_get_all_five():
     goes through the client node's HAProxy. The RPO audit writer and the RTO
     probe must survive the fault they are measuring, so they use libpq's own
     multi-host resolution instead of depending on that one proxy."""
-    from crdblab.config import pg_direct_dsn, pg_haproxy_dsn
+    from crdblab.config import pg_direct_dsn, pg_generator_dsn
 
-    single = pg_haproxy_dsn("ycsb", "pw")
-    assert single.count("@") == 1 and "127.0.0.1:5000" in single
+    single = pg_generator_dsn("ycsb", "pw")
+    # pgbouncer, not HAProxy directly: `cockroach workload` sends
+    # allow_unsafe_internals as a startup parameter and PostgreSQL rejects
+    # unknown ones with a FATAL, so the generator cannot reach the cluster
+    # without something that drops it. pgbouncer forwards to HAProxy.
+    assert single.count("@") == 1 and "127.0.0.1:6432" in single
     assert "," not in single
 
     direct = pg_direct_dsn(DEFAULT_TOPOLOGY, "chaos_audit", "pw")
@@ -149,7 +153,7 @@ def test_the_generator_gets_one_host_and_the_measurement_clients_get_all_five():
 
 
 def test_dsn_passwords_are_escaped_in_both_builders():
-    from crdblab.config import pg_direct_dsn, pg_haproxy_dsn
+    from crdblab.config import pg_direct_dsn, pg_generator_dsn
 
-    assert "p%40ss" in pg_haproxy_dsn("ycsb", "p@ss")
+    assert "p%40ss" in pg_generator_dsn("ycsb", "p@ss")
     assert "p%40ss" in pg_direct_dsn(DEFAULT_TOPOLOGY, "ycsb", "p@ss")

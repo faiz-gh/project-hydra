@@ -450,6 +450,60 @@ testbed, not something touched by most code changes to `crdblab/`.
   branch already used for these two clients, and safe for the same reason
   (single connections, not `--concurrency`-many, so the serial-dial cost that
   rules multi-host out for the generator does not apply).
+- **`cockroach workload init` cannot run against PostgreSQL at all, so the
+  PostgreSQL working set is loaded by the generator itself.** Its first
+  statement is `CREATE DATABASE IF NOT EXISTS <db>` -- CockroachDB syntax that
+  PostgreSQL rejects with `syntax error at or near "NOT"` -- and nothing
+  suppresses it (`--data-loader NONE`, which only creates the schema, issues it
+  too). `--drop` is separately unusable (it asks the server to DROP DATABASE the
+  connection is inside) and `--families` is CockroachDB DDL. `run-experiment.sh`
+  therefore creates `usertable` with `psql` and then loads the rows by running
+  the **generator** insert-only (`--insert-freq=1 --read-freq=0 --update-freq=0
+  --insert-count=0 --insert-start=0 --max-ops=$INSERT_COUNT`). The last part is
+  the load-bearing one: YCSB keys are derived by the generator from the row
+  index (`user10092439283625390464`), so a hand-written loader would have to
+  reimplement that derivation, and a keyspace that differs from the one the
+  sweep addresses is D8 exactly -- every operation matches nothing and the run
+  reports its best-ever throughput. Letting the generator insert its own keys
+  makes the two keyspaces the same object. Verified on the testbed: a sweep over
+  a table loaded this way reports a row-match rate of 1.0000 (54,646/54,646 at
+  C=100). `--max-ops` overshoots by up to `--concurrency` rows because
+  operations in flight still complete (5,063 for a requested 5,000 at C=64);
+  those rows have indices at or above `--insert-count`, so the sweep never
+  addresses them, and the real count is printed rather than silently accepted.
+- **The generator reaches PostgreSQL only through pgbouncer.**
+  `cockroach workload` v26.3.0 sends `allow_unsafe_internals` as a pgwire
+  *startup parameter* on every connection; PostgreSQL rejects unknown startup
+  parameters, so both `init` and `run` died at connect with `FATAL:
+  unrecognized configuration parameter "allow_unsafe_internals" (SQLSTATE
+  42704)`. No flag on the tool suppresses it -- the only related knob is a
+  CockroachDB *cluster* setting -- and the alternative was two different
+  generator builds across the two arms, a confound in the one component the
+  comparison requires to be identical. `bootstrap-client.tftpl` installs
+  pgbouncer in front of HAProxy with
+  `ignore_startup_parameters = allow_unsafe_internals,...`; `config.pg_generator_dsn`
+  points at it (`127.0.0.1:6432`). Two details are load-bearing:
+  `pool_mode = session`, so it is a passthrough rather than a semantic change,
+  and **`server_reset_query = DISCARD ALL`** -- emptying it, on the theory that
+  a passthrough should change nothing, left prepared statements on a recycled
+  server connection and the generator died at C=64 with `prepared statement
+  "scan" already exists (SQLSTATE 42P05)`. The cost is disclosed rather than
+  hidden: the PostgreSQL path carries two local proxy hops (pgbouncer, HAProxy)
+  that the CockroachDB path does not, both on the client node's loopback ahead
+  of the wide-area link the measurement is about. `pg_direct_dsn`'s clients --
+  the RPO audit writer, the RTO probe, `psql` -- speak plain libpq and go
+  straight to the cluster, so they are unaffected.
+- **Never put a backtick inside an unquoted cloud-init heredoc.** The
+  bootstrap templates write their config files with `cat <<EOF > ...`, which is
+  subject to shell expansion, so prose comments containing backticked words ran
+  as commands: the client node's cloud-init reported
+  `line 63: last,libc,none: command not found`, printed HAProxy's usage text
+  (from a backticked `haproxy -c`), wrote a corrupted config, and failed
+  provisioning -- on a deployment whose five database nodes were perfect. The
+  same thing silently deleted three words from Patroni's config comments. All
+  three config heredocs are now quoted (`cat <<'EOF'`), which is safe because
+  none of them needs *shell* expansion: terraform's own `${...}` is substituted
+  when the template is rendered, before the shell ever sees the file.
 - **Patroni 3.x ignores `bootstrap.users`, so the `root` role has to be created
   by hand.** It creates only the `superuser` and `replication` roles named under
   `postgresql.authentication`. Observed on the 2026-09-08 deployment:

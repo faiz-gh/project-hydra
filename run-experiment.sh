@@ -250,16 +250,23 @@ fi
 # connection needs one. This is fatal rather than a warning because the
 # alternative is discovering it in the middle of the load step, after the
 # testbed checks have all passed.
-case "$ENGINE:$DB_URI" in
-  postgresql:*://*:*@*) ok "DB_URI carries a password" ;;
-  postgresql:*) die "engine is postgresql but DB_URI has no password.
-  Patroni's pg_hba requires md5 for every host connection, so loading and
-  'crdblab capture' would be refused. Expected the form
-    postgresql://root:<password>@127.0.0.1:5000/ycsb?sslmode=disable
-  with the root password from terraform/scripts/bootstrap-patroni.tftpl
-  (the measured phases read PG_PASSWORD from .env instead, defaulting to the
-  same value)." ;;
-esac
+if [ "$ENGINE" = "postgresql" ]; then
+  # Asked, not assumed. A DB_URI that merely *has* a password tells us nothing:
+  # the one that broke the 2026-09-08 run had one, and it was for a role whose
+  # password was something else. This is a warning rather than fatal because
+  # loading no longer depends on DB_URI (see the candidates above) -- only
+  # `crdblab capture` does, and a sweep should not be blocked by a tool it is
+  # not about to run.
+  if remote "$CL_USER" "$CL_HOST" \
+      "psql '$DB_URI' -tAc 'SELECT 1' >/dev/null 2>&1"; then
+    ok "DB_URI authenticates against the cluster"
+  else
+    warn "DB_URI does not authenticate; 'crdblab capture' will fail (this sweep will not)."
+    note "the roles created by bootstrap-patroni.tftpl are root/rootpassword and"
+    note "admin/adminpassword; the superuser is postgres/postgrespassword. Expected:"
+    note "  DB_URI=postgresql://root:rootpassword@127.0.0.1:5000/ycsb?sslmode=disable"
+  fi
+fi
 
 # The seed and row count are read from the profile the sweep will actually use.
 # Hardcoding them here would create a second source of truth for the one
@@ -414,7 +421,23 @@ step "Working set"
 # only applies to the CockroachDB path -- PostgreSQL's DB_URI already points
 # at the client node's local HAProxy (127.0.0.1:5000), which resolves the
 # live primary on its own.
-if [ "$DB_HOST" = "127.0.0.1" ]; then
+if [ "$ENGINE" = "postgresql" ]; then
+  # The credentials for loading come from the harness, not from DB_URI, and are
+  # therefore identical to the ones the sweep itself will use. Trusting DB_URI
+  # here put the load and the measured phases on two separately maintained
+  # copies of the same secret, which drifted the first time it mattered: a
+  # `.env` carrying the old example line (`postgres:postgres`) passed every
+  # check in this script -- including "DB_URI carries a password" -- and then
+  # failed 90 s later inside `workload init` with `password authentication
+  # failed for user "postgres"`, on a testbed that was entirely healthy.
+  # DB_URI is still what `crdblab capture` uses, which is why it is checked
+  # below rather than ignored.
+  DB_CANDIDATES=("$("$PY" - <<'PYEOF'
+from crdblab.config import Settings, pg_generator_dsn
+print(pg_generator_dsn("ycsb", Settings.from_env().pg_password))
+PYEOF
+  )") || die "could not build the PostgreSQL loading DSN"
+elif [ "$DB_HOST" = "127.0.0.1" ]; then
   DB_CANDIDATES=("$DB_URI")
 else
   read -r DB_USER DB_PATH DB_QUERY < <("$PY" - "$DB_URI" <<'PYEOF'
@@ -452,21 +475,75 @@ try_each_host() {  # try_each_host <description> <command-template>
   return 1
 }
 
-# `cockroach workload init ycsb` defaults to --families=true, which puts every
-# column in its own COLUMN FAMILY -- CockroachDB DDL that PostgreSQL rejects
-# outright, so the load fails before a single row is written. The flag changes
-# only the physical layout of the table, not the rows, the keyspace or the
-# seed, so passing it for PostgreSQL does not make the two engines' working
-# sets differ in anything the workload can observe.
-FAMILIES_FLAG=""
+# `cockroach workload init` cannot be used against PostgreSQL at all. Its first
+# statement is `CREATE DATABASE IF NOT EXISTS <db>`, which is CockroachDB
+# syntax -- PostgreSQL has no IF NOT EXISTS for CREATE DATABASE and fails with
+# `syntax error at or near "NOT"` -- and nothing suppresses it: `--data-loader
+# NONE`, which only creates the schema, issues it too. `--drop` is unusable for
+# a second, independent reason (it asks the server to DROP DATABASE the
+# connection is currently inside), and `--families` for a third (COLUMN FAMILY
+# is CockroachDB DDL).
+#
+# So for PostgreSQL the schema is created here and the rows are loaded by the
+# *generator itself*, running insert-only. That last part is the important one:
+# the keys are derived by the generator from the row index, so a hand-written
+# loader would have to reimplement that derivation, and a keyspace that differs
+# from the one the sweep addresses is D8 exactly -- every operation matches
+# nothing, and the run reports its best-ever throughput. Letting the generator
+# insert its own keys makes the two keyspaces the same object rather than two
+# implementations that agree today. Verified against this testbed: a sweep over
+# a table loaded this way reported a row-match rate of 1.0000.
+#
+# `--max-ops` stops the load at the requested count. It overshoots by up to
+# --concurrency rows, because operations already in flight still complete --
+# 5,063 rows for a requested 5,000 at C=64. Those extra rows have indices at or
+# above --insert-count, so the sweep never addresses them; the count is
+# reported below rather than silently accepted.
+LOAD_CONCURRENCY=64
+
+# The schema `cockroach workload init` would have created: one key column and
+# ten value columns, which is what the generator's prepared statements expect
+# (`SELECT field8 FROM usertable WHERE ycsb_key = $1`). No COLUMN FAMILY
+# clauses, which is the only thing --families=false would have changed.
+PG_USERTABLE_DDL="DROP TABLE IF EXISTS usertable;
+CREATE TABLE usertable (
+  ycsb_key VARCHAR(255) PRIMARY KEY,
+  field0 TEXT, field1 TEXT, field2 TEXT, field3 TEXT, field4 TEXT,
+  field5 TEXT, field6 TEXT, field7 TEXT, field8 TEXT, field9 TEXT
+);"
+
 if [ "$ENGINE" = "postgresql" ]; then
-  FAMILIES_FLAG="--families=false "
+  # DDL and row counting go straight to the primary: psql speaks plain libpq
+  # and needs neither pgbouncer nor HAProxy.
+  PG_ADMIN_DSN="$("$PY" - <<'PYEOF'
+from crdblab.config import Settings, pg_direct_dsn
+from crdblab.topology import DEFAULT_TOPOLOGY
+print(pg_direct_dsn(DEFAULT_TOPOLOGY, "ycsb", Settings.from_env().pg_password))
+PYEOF
+  )" || die "could not build the PostgreSQL admin DSN"
 fi
 
 load_data() {
+  if [ "$ENGINE" = "postgresql" ]; then
+    note "creating usertable (workload init cannot run against PostgreSQL)"
+    remote "$CL_USER" "$CL_HOST" \
+      "psql '$PG_ADMIN_DSN' -v ON_ERROR_STOP=1 -c \"$PG_USERTABLE_DDL\"" >/dev/null \
+      || die "could not create usertable"
+    note "loading $INSERT_COUNT rows @ seed $SEED with the generator, insert-only"
+    remote "$CL_USER" "$CL_HOST" \
+      "cockroach workload run ycsb --workload=CUSTOM \
+         --insert-freq=1 --read-freq=0 --update-freq=0 \
+         --request-distribution=uniform \
+         --seed=$SEED --insert-count=0 --insert-start=0 \
+         --concurrency=$LOAD_CONCURRENCY --max-ops=$INSERT_COUNT --duration=0 \
+         --display-every=30s '${DB_CANDIDATES[0]}'" \
+      || die "the insert-only load failed"
+    return
+  fi
+
   note "loading $INSERT_COUNT rows @ seed $SEED on database (~1-2 min)"
   try_each_host "workload init" \
-    "cockroach workload init ycsb --drop ${FAMILIES_FLAG}--seed=$SEED --insert-count=$INSERT_COUNT '$URI_PLACEHOLDER'" \
+    "cockroach workload init ycsb --drop --seed=$SEED --insert-count=$INSERT_COUNT '$URI_PLACEHOLDER'" \
     >/dev/null \
     || die "workload init failed against every candidate host: ${DB_CANDIDATES[*]}"
 }
@@ -480,8 +557,8 @@ count_rows() {
   # in the public schema of database `ycsb` on PostgreSQL, which the DSN
   # already selects.
   if [ "$ENGINE" = "postgresql" ]; then
-    try_each_host "row count" \
-      "psql '$URI_PLACEHOLDER' -tAc 'SELECT count(*) FROM usertable;' 2>/dev/null | tail -1" \
+    remote "$CL_USER" "$CL_HOST" \
+      "psql '$PG_ADMIN_DSN' -tAc 'SELECT count(*) FROM usertable;' 2>/dev/null | tail -1" \
       | tr -d ' \r'
   else
     try_each_host "row count" \

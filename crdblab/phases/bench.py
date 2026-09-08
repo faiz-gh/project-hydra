@@ -51,7 +51,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
 
-from ..config import Profile, Settings, pg_direct_dsn, pg_haproxy_dsn
+from ..config import Profile, Settings, pg_direct_dsn, pg_generator_dsn
 from ..core import preflight, ssh
 from ..core.recorder import (
     COLUMNS,
@@ -106,7 +106,7 @@ class Target:
         unnecessary.
         """
         if self.engine == "postgresql":
-            return pg_haproxy_dsn(self.database, self.password or "")
+            return pg_generator_dsn(self.database, self.password or "")
         gateway = next((n for n in self.nodes if n.gateway), None)
         host = gateway.host if gateway else "crdb-gcp-1"
         port = gateway.sql_port if gateway else 26257

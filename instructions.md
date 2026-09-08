@@ -253,6 +253,18 @@ DB_URI=postgresql://root@crdb-gcp-1:26257/ycsb?sslmode=disable
 CRDBLAB_RUNS_DIR=runs
 ```
 
+> **The PostgreSQL working set is loaded differently, and has to be.**
+> `cockroach workload init` cannot run against PostgreSQL at all — its first
+> statement is `CREATE DATABASE IF NOT EXISTS`, which is CockroachDB syntax —
+> so `run-experiment.sh` creates `usertable` with `psql` and then loads the rows
+> by running the *generator* insert-only, capped with `--max-ops`. That is not a
+> convenience: YCSB keys are derived by the generator from the row index, so a
+> hand-written loader would be a second implementation of that derivation, and a
+> keyspace that differs from the one the sweep addresses is D8 exactly. The
+> generator also reaches PostgreSQL only through pgbouncer, which strips the
+> CockroachDB-only startup parameter it sends; both are set up by
+> `bootstrap-client.tftpl`.
+
 > **Pre-flight runs on both engines.** The row-match probe (D8's detector) and
 > the write-latency floor check were CockroachDB-only until 2026-09-08; they now
 > run for PostgreSQL too — `pg_stat_user_tables`'s scan and fetched-row counters

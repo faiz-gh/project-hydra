@@ -72,7 +72,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
 
-from ..config import Profile, Settings, pg_direct_dsn, pg_haproxy_dsn
+from ..config import Profile, Settings, pg_direct_dsn, pg_generator_dsn
 from ..core import preflight, ssh
 from ..core.recorder import (
     AUDIT_COLUMNS,
@@ -842,7 +842,7 @@ def run(
         # independent measurements a shared single point of failure. libpq
         # resolves the primary for them instead, which is exactly what the
         # CockroachDB branch below does with its own multi-host DSN.
-        workload_uri = pg_haproxy_dsn(database, settings.pg_password)
+        workload_uri = pg_generator_dsn(database, settings.pg_password)
         audit_dsn = pg_direct_dsn(topo, audit_database, settings.pg_password)
     else:
         # A single connection, not one per cluster member: `cockroach workload

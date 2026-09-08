@@ -31,22 +31,43 @@ DEFAULT_PG_PASSWORD = "rootpassword"
 #: (26257), which is CockroachDB's and is what that engine's DSNs use.
 PG_SQL_PORT = 5432
 
-#: The client node's HAProxy, which fronts whichever node Patroni currently
-#: reports as primary (``bootstrap-client.tftpl``).
-PG_HAPROXY_HOSTPORT = "127.0.0.1:5000"
+#: The client node's pgbouncer, which forwards to the local HAProxy, which
+#: resolves to whichever node Patroni currently reports as primary (both are
+#: installed by ``bootstrap-client.tftpl``).
+PG_GENERATOR_HOSTPORT = "127.0.0.1:6432"
 
 
-def pg_haproxy_dsn(database: str, password: str) -> str:
-    """Connection string for the generator: one host, the local HAProxy.
+def pg_generator_dsn(database: str, password: str) -> str:
+    """Connection string for the generator: one host, the local pgbouncer.
 
-    The generator is ``cockroach workload run``, which must be given exactly
-    one URL -- more than one and it dials its ``--concurrency`` connections
-    serially, ~2.65 s each (see ``bench.py``'s module docstring). HAProxy is
-    what makes one URL sufficient here: it resolves to the current primary and
-    follows a failover, which is what a multi-host DSN would otherwise be for.
+    Two hops, each there for a reason the other cannot cover.
+
+    HAProxy is why *one* URL suffices. The generator is
+    ``cockroach workload run``, which must be given exactly one URL -- more
+    than one and it dials its ``--concurrency`` connections serially, ~2.65 s
+    each (see ``bench.py``'s module docstring) -- and HAProxy is what makes a
+    single URL follow a failover.
+
+    pgbouncer is why the generator can speak to PostgreSQL **at all**.
+    ``cockroach workload`` v26.3.0 sends ``allow_unsafe_internals`` as a
+    startup parameter on every connection it opens; PostgreSQL rejects unknown
+    startup parameters outright, so both ``workload init`` and ``workload run``
+    die at connect with ``FATAL: unrecognized configuration parameter
+    "allow_unsafe_internals" (SQLSTATE 42704)``. No flag on the tool suppresses
+    it -- the only related knob is a CockroachDB *cluster* setting -- so the
+    alternative was to drive the two arms of the comparison with two different
+    generator builds, which is a confound in the one component the design
+    requires to be identical. pgbouncer's ``ignore_startup_parameters`` drops
+    the parameter and passes everything else through; it runs in session
+    pooling mode, so it is a passthrough rather than a semantic change.
+
+    The cost is disclosed rather than hidden: the PostgreSQL path carries two
+    local proxy hops that the CockroachDB path does not have. Both are on the
+    client node's loopback, ahead of the wide-area link the measurement is
+    about.
     """
     return (
-        f"postgresql://root:{quote(password, safe='')}@{PG_HAPROXY_HOSTPORT}"
+        f"postgresql://root:{quote(password, safe='')}@{PG_GENERATOR_HOSTPORT}"
         f"/{database}?sslmode=disable"
     )
 

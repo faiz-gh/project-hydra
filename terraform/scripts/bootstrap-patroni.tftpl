@@ -79,7 +79,7 @@ systemctl restart etcd
 # Observed 2026-09-08: all five nodes reported cloud-init `status: done` and
 # printed "Patroni node provisioned successfully" with no database process
 # running anywhere on the testbed.
-cat <<EOF > /etc/patroni/config.yml
+cat <<'EOF'  > /etc/patroni/config.yml
 scope: postgres-cluster
 namespace: /db/
 name: ${hostname}
@@ -115,14 +115,14 @@ bootstrap:
     - host all all 0.0.0.0/0 md5
     - host all all ::0/0 md5
 
-  # NOTE: `bootstrap.users` is NOT what creates these. Patroni 3.x ignores the
-  # section entirely -- it creates only the `superuser` and `replication` roles
-  # named under `postgresql.authentication` below -- so the block is kept for
+  # NOTE: bootstrap.users is NOT what creates these. Patroni 3.x ignores the
+  # section entirely -- it creates only the superuser and replication roles
+  # named under postgresql.authentication below -- so the block is kept for
   # documentation of intent while the roles are created explicitly after
   # bootstrap (see "Create the harness roles" further down). Observed
-  # 2026-09-08 on a fresh five-node deployment: `pg_roles` contained exactly
-  # `postgres` and `replicator`, and every connection the harness makes, which
-  # is as `root`, failed with "password authentication failed for user root".
+  # 2026-09-08 on a fresh five-node deployment: pg_roles contained exactly
+  # postgres and replicator, and every connection the harness makes, which
+  # is as root, failed with "password authentication failed for user root".
   users:
     admin:
       password: adminpassword
