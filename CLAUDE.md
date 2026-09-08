@@ -17,6 +17,28 @@ The design goal throughout is **defensibility**: every figure must trace back
 to a known git revision, a declared profile (`profiles/*.yaml`), and the
 generator's retained raw output.
 
+**Status as of 2026-09-08 (update or delete this note once the PostgreSQL
+phase has actually been run — it will go stale the moment that happens):**
+the CockroachDB phase has been run end-to-end at thesis scale (C=100, full
+`net probe` → `bench` → `chaos run --mode recover` → `chaos run --mode dead`
+→ `validate` → `analyze` → `report figures`) with every fix in `git log`
+verified against that run, not just against the `smoke` profile. The
+PostgreSQL phase has **not been run at all** in this project's history yet.
+Testing it needs, in order: (1) `terraform apply -var="database_engine=postgresql"`
+in `terraform/` — this **replaces every cluster node**, it is not both engines
+running at once; (2) the manual command sequence in `instructions.md` §6,
+since `run-experiment.sh` never touches PostgreSQL (see its own entry below);
+(3) `crdblab analyze engine-comparison --crdb <run> --pg <run>` to compare.
+Two things are implemented but specifically **untested** because of this:
+`p4_chaos.py::restore_target`'s `engine == "postgresql"` branch
+(`systemctl start patroni`, polling the target's `:8008/health`) has no real
+Patroni cluster to have exercised it against, and `resolve_patroni_primary`
+likewise. Watch both closely on the first PostgreSQL `chaos run`. Separately,
+at the time of this note, this development machine could not reach the
+testbed at all (`ssh: Could not resolve hostname crdb-gcp-1`) — check
+`tailscale status` before assuming the cluster is reachable or run anything
+against it.
+
 **This project was rearchitected from a different design.** It originally
 compared the five-node CockroachDB cluster against a separate *unreplicated*
 single-node baseline to isolate replication cost, with the generator running
@@ -220,7 +242,7 @@ templates: `bootstrap-cockroachdb.tftpl` and `bootstrap-patroni.tftpl`
 binary — no server — on `CLIENT_NODE`). This is infrastructure for the live
 testbed, not something touched by most code changes to `crdblab/`.
 
-## Known gotchas (found and fixed this session — don't reintroduce)
+## Known gotchas (found and fixed — don't reintroduce)
 
 - **Never pass `cockroach workload run`/`workload init`/`cockroach sql --url`
   more than one connection string, in any form.** Given multiple positional
@@ -358,6 +380,11 @@ testbed, not something touched by most code changes to `crdblab/`.
   the result is reported as a range (`surviving_quorum_floor_range_ms`,
   `candidate_floors_ms`) rather than a single value pretending to predict
   which survivor CockroachDB's allocator will actually promote.
+  Both figures above are from the `smoke` profile (C=10); reproduced at
+  thesis scale (C=100) the same day with the same shape and closer numbers
+  than smoke's noise would suggest: write p50 236.4ms vs a 168.6ms baseline
+  (1.40x, `structural_latency_shift`) against a `quorum_geometry` range of
+  150.2-192.9ms (2.16-2.77x) -- still agreeing, still no contradiction.
 - **The chaos generator runs with `--tolerate-errors`; the bench sweep must
   not.** Without it `cockroach workload run` *exits* on its first failed
   statement, and during a chaos run the first failed statement is the fault.
@@ -445,6 +472,19 @@ testbed, not something touched by most code changes to `crdblab/`.
   node's `:8008/primary` live, immediately before scheduling the fault, and
   refuses outright (rather than guessing) if zero or more than one node
   answers 200.
+
+- **`bench.py`'s `generator_totals` is empty (`{}`) in every recorded manifest,
+  and this has never been investigated.** It's built from
+  `{s.op: s.values for s in samples if s.kind == SUMMARY}` (the generator's
+  final cumulative block) at `bench.py:335,383` — noticed twice in this
+  project's history, flagged both times, chased neither. Candidate causes
+  nobody has checked: the `SUMMARY` block may not survive
+  `--tolerate-errors` or the `script`-based TTY wrapper (`ssh.force_tty`), or
+  `WorkloadParser` may not be classifying it as `SUMMARY` for the generator
+  version in use (v26.3.0). Whoever looks at this next should start by
+  grepping a raw bench output file (`runs/*_bench_cluster/raw/*.txt`) for
+  whatever line the generator prints as its final cumulative summary and
+  checking whether `crdblab/core/workload.py` recognises it.
 
 ## Working with this codebase
 
