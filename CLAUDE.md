@@ -29,7 +29,14 @@ in `terraform/` — this **replaces every cluster node**, it is not both engines
 running at once; (2) either `./run-experiment.sh --engine postgresql` or the
 manual command sequence in `instructions.md` §6;
 (3) `crdblab analyze engine-comparison --crdb <run> --pg <run>` to compare.
-Two things are implemented but specifically **untested** because of this:
+The first attempt at (1) was made on 2026-09-08 and **the deployment did not
+come up**: `bootstrap-patroni.tftpl` wrote its config to
+`/etc/patroni/patroni.yml` while Ubuntu's packaged `patroni.service` reads only
+`/etc/patroni/config.yml`, so every node provisioned "successfully" with no
+database process running at all (see the gotcha below). The template is fixed;
+the fix has **not been through a `terraform apply` yet**, and the live testbed
+still has the config under the wrong name. Two things are implemented but
+specifically **untested** because of all this:
 `p4_chaos.py::restore_target`'s `engine == "postgresql"` branch
 (`systemctl start patroni`, polling the target's `:8008/health`) has no real
 Patroni cluster to have exercised it against, and `resolve_patroni_primary`
@@ -337,6 +344,37 @@ testbed, not something touched by most code changes to `crdblab/`.
   `*** THE FAULT DID NOT LAND ***` banner in `analyze resilience`. Old runs
   have no `fault_landed` key and correctly stay silent rather than
   false-alarming.
+- **Patroni's config must be at `/etc/patroni/config.yml`, and a skipped
+  systemd condition is not an error.** Ubuntu's packaged `patroni.service`
+  declares `ConditionPathExists=/etc/patroni/config.yml` and
+  `ExecStart=/usr/bin/patroni /etc/patroni/config.yml`.
+  `bootstrap-patroni.tftpl` wrote `/etc/patroni/patroni.yml`, so the condition
+  failed -- and a failed condition makes `systemctl start` **exit 0** while
+  starting nothing, which `set -e` cannot catch. Every node then finished
+  cloud-init with `status: done` and printed "✅ Patroni node provisioned
+  successfully" over a testbed with no database process anywhere: the only
+  visible traces were `journalctl -u patroni` reporting "Condition check
+  resulted in ... being skipped" and two `psql: connection refused` lines
+  buried in `/var/log/cloud-init-output.log`, both followed by a green
+  checkmark. The template now writes `config.yml`, `chmod 640
+  root:postgres` (it carries the superuser and replication passwords), and
+  **polls `:8008/health` before declaring success** rather than sleeping 20 s
+  -- a node that cannot answer its own REST API now fails provisioning, because
+  the alternative is that the failure surfaces later as a measurement result.
+  The primary's `CREATE DATABASE ycsb` likewise waits for `:8008/primary` to
+  answer 200 instead of assuming `PEERS[0]` won the election, and verifies the
+  database afterwards, since its `|| true` cannot tell "already exists" from
+  "never created".
+- **Every `ssh` inside a `while read ... done <<< "$LIST"` loop needs `-n`.**
+  ssh forwards its own stdin to the remote command, so it consumes the rest of
+  the here-string: the loop body runs once and every entry after the first is
+  silently skipped. `run-experiment.sh`'s Patroni health poll checked only
+  `crdb-gcp-1` and then reported "0 healthy member(s), expected 5" for the
+  whole cluster. `SSH_OPTS` now carries `-n`; nothing run through `remote()`
+  feeds anything on stdin. (The same run also printed `000000` for one node's
+  status: `curl -w '%{http_code}'` already prints `000` when it cannot connect,
+  so a `|| echo 000` fallback appends a second token. `patroni_code()` is the
+  single place that reads those endpoints now.)
 - **The chaos injection timer is anchored to the generator's first sample, not
   to the harness epoch.** `inject_at_s` means "seconds of measured steady
   state before the fault", and it cannot mean that if it counts from a

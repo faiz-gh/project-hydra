@@ -70,7 +70,16 @@ systemctl restart etcd
 # ==========================================
 # 5. Configure Patroni
 # ==========================================
-cat <<EOF > /etc/patroni/patroni.yml
+# /etc/patroni/config.yml, NOT patroni.yml. Ubuntu's packaged patroni.service
+# declares both `ConditionPathExists=/etc/patroni/config.yml` and
+# `ExecStart=/usr/bin/patroni /etc/patroni/config.yml`. A config written under
+# any other name means the condition fails, and a skipped condition is not an
+# error: `systemctl start patroni` exits 0, logs "Condition check resulted in
+# ... being skipped", and starts nothing. Under `set -e` that is invisible.
+# Observed 2026-09-08: all five nodes reported cloud-init `status: done` and
+# printed "Patroni node provisioned successfully" with no database process
+# running anywhere on the testbed.
+cat <<EOF > /etc/patroni/config.yml
 scope: postgres-cluster
 namespace: /db/
 name: ${hostname}
@@ -138,23 +147,67 @@ tags:
   nosync: false
 EOF
 
+# The config carries the superuser and replication passwords, and patroni runs
+# as `postgres`, so it is readable by that user and by nobody else.
+chown root:postgres /etc/patroni/config.yml
+chmod 640 /etc/patroni/config.yml
+
 systemctl stop postgresql
 systemctl disable postgresql
 systemctl enable patroni
 systemctl start patroni
 
-# Wait for Patroni to initialize
-echo "Waiting for Patroni to start and elect a leader..."
-sleep 20
+# Verify rather than sleep. `systemctl start` returning 0 says the unit was
+# reached, not that Patroni is running -- see the ConditionPathExists note
+# above -- so the only trustworthy signal is the REST API answering. Failing
+# here is the point: a node that reports success without a database is worse
+# than one that fails provisioning, because the failure then surfaces as a
+# measurement result rather than as an error.
+echo "Waiting for Patroni to start..."
+PATRONI_UP=0
+for _ in $(seq 1 60); do
+    if curl -sf -m 5 -o /dev/null http://127.0.0.1:8008/health; then
+        PATRONI_UP=1
+        break
+    fi
+    sleep 5
+done
+if [ "$PATRONI_UP" != "1" ]; then
+    echo "FAILED: patroni did not answer :8008/health within 300s." >&2
+    systemctl status patroni --no-pager >&2 || true
+    journalctl -u patroni -n 50 --no-pager >&2 || true
+    exit 1
+fi
 
 PRIMARY_NODE="$${PEERS[0]}"
 if [ "${hostname}" == "$PRIMARY_NODE" ]; then
+    # Wait to actually BE the primary rather than assuming it after a sleep.
+    # Nothing pins Patroni's leader -- it is an etcd election among all five
+    # nodes -- so PEERS[0] is where the databases are attempted, and if the
+    # election went elsewhere this node must not create them.
+    IS_PRIMARY=0
+    for _ in $(seq 1 36); do
+        if curl -sf -m 5 -o /dev/null http://127.0.0.1:8008/primary; then
+            IS_PRIMARY=1
+            break
+        fi
+        sleep 5
+    done
+    if [ "$IS_PRIMARY" != "1" ]; then
+        echo "FAILED: ${hostname} is not the patroni primary after 180s, so the" >&2
+        echo "  ycsb/bench databases were not created. Create them on whichever" >&2
+        echo "  node answers :8008/primary before benchmarking." >&2
+        exit 1
+    fi
+
     echo "Creating databases on the primary..."
-    # Ensure this node is the primary before writing
-    sleep 10
     export PGPASSWORD=rootpassword
     psql -h 127.0.0.1 -U root -d postgres -c "CREATE DATABASE bench;" || true
     psql -h 127.0.0.1 -U root -d postgres -c "CREATE DATABASE ycsb;" || true
+    # Verified, not assumed: `|| true` above tolerates "already exists", which
+    # is correct on a re-run and indistinguishable from a failure otherwise.
+    psql -h 127.0.0.1 -U root -d ycsb -c "SELECT 1;" >/dev/null \
+      || { echo "FAILED: database ycsb is not reachable after creation." >&2; exit 1; }
     echo "Databases created."
 fi
 

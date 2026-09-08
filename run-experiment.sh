@@ -133,14 +133,34 @@ mkdir -p "$LOG_DIR"
 LOG="$LOG_DIR/experiment-$(date -u +%Y%m%dT%H%M%SZ).log"
 exec > >(tee -a "$LOG") 2>&1
 
-SSH_OPTS=(-q -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+SSH_OPTS=(-q -n -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
           -o BatchMode=yes -o ConnectTimeout=20)
+# -n (stdin from /dev/null) is load-bearing, not tidiness. ssh reads its own
+# stdin and forwards it to the remote command, so an `ssh` inside a
+# `while read ... done <<< "$LIST"` loop consumes the rest of the list: the
+# loop runs exactly once and every node after the first is silently never
+# checked. Observed 2026-09-08, where the Patroni health poll examined only
+# crdb-gcp-1 and then reported "0 healthy member(s)" for all five. No command
+# run through remote() feeds anything on stdin.
 # StrictHostKeyChecking=no is deliberate and disclosed: the testbed is destroyed
 # and rebuilt repeatedly and addresses get reused, which otherwise produces
 # spurious host-key warnings. It is not a production posture.
 
 remote() {  # remote <user> <host> <command>
   ssh "${SSH_OPTS[@]}" "$1@$2" "$3"
+}
+
+# HTTP status from one node's Patroni REST endpoint, asked from the client node
+# so that a node unreachable from the workstation is not mistaken for a node
+# that is down. Prints exactly one token: curl already prints `000` when it
+# cannot connect, so the failure branch only has to cover ssh itself failing
+# and printing nothing. An earlier `|| echo 000` appended a second token to
+# curl's own, which is how a single unreachable node reported `000000`.
+patroni_code() {  # patroni_code <host> <endpoint>
+  local code
+  code="$(remote "$CL_USER" "$CL_HOST" \
+    "curl -s -m 5 -o /dev/null -w '%{http_code}' http://$1:8008/$2" 2>/dev/null)"
+  printf '%s' "${code:-000}"
 }
 
 started_at=$(date -u +%s)
@@ -323,21 +343,22 @@ PG_LIVE=0
 PG_PRIMARIES=""
 while read -r _u h; do
   [ -n "$h" ] || continue
-  code="$(remote "$CL_USER" "$CL_HOST" \
-    "curl -s -m 5 -o /dev/null -w '%{http_code}' http://$h:8008/health" 2>/dev/null || echo 000)"
+  code="$(patroni_code "$h" health)"
   if [ "$code" = "200" ]; then
     PG_LIVE=$((PG_LIVE + 1))
   else
     note "$h: patroni /health returned $code"
   fi
-  code="$(remote "$CL_USER" "$CL_HOST" \
-    "curl -s -m 5 -o /dev/null -w '%{http_code}' http://$h:8008/primary" 2>/dev/null || echo 000)"
-  [ "$code" = "200" ] && PG_PRIMARIES="$PG_PRIMARIES $h"
+  [ "$(patroni_code "$h" primary)" = "200" ] && PG_PRIMARIES="$PG_PRIMARIES $h"
 done <<< "$CLUSTER_NODES"
 
 [ "$PG_LIVE" = "5" ] || die "patroni reports $PG_LIVE healthy member(s), expected 5.
   If a previous 'dead' run left a node down, bring it back with
-  'sudo -n systemctl start patroni' on that node (see instructions.md)."
+  'sudo -n systemctl start patroni' on that node (see instructions.md).
+  If NO member is healthy on a freshly provisioned testbed, check that the
+  unit actually started -- 'systemctl status patroni' reporting
+  'Condition check resulted in ... being skipped' means the config is not at
+  /etc/patroni/config.yml, which is the only path the packaged unit reads."
 ok "5 patroni members healthy"
 
 # Nothing in bootstrap-patroni.tftpl pins the leader the way CockroachDB's
@@ -544,8 +565,7 @@ if [ "$RUN_CHAOS" -eq 1 ]; then
   step "Confirming every patroni member is back"
   while read -r u h; do
     [ -n "$h" ] || continue
-    code="$(remote "$CL_USER" "$CL_HOST" \
-      "curl -s -m 5 -o /dev/null -w '%{http_code}' http://$h:8008/health" 2>/dev/null || echo 000)"
+    code="$(patroni_code "$h" health)"
     [ "$code" = "200" ] && continue
     note "$h: /health returned $code, starting patroni"
     # Unlike CockroachDB (started by cloud-init with --background, no unit),
@@ -563,9 +583,7 @@ if [ "$RUN_CHAOS" -eq 1 ]; then
     PG_LIVE=0
     while read -r _u h; do
       [ -n "$h" ] || continue
-      code="$(remote "$CL_USER" "$CL_HOST" \
-        "curl -s -m 5 -o /dev/null -w '%{http_code}' http://$h:8008/health" 2>/dev/null || echo 000)"
-      [ "$code" = "200" ] && PG_LIVE=$((PG_LIVE + 1))
+      [ "$(patroni_code "$h" health)" = "200" ] && PG_LIVE=$((PG_LIVE + 1))
     done <<< "$CLUSTER_NODES"
     [ "$PG_LIVE" = "5" ] && break
   done
