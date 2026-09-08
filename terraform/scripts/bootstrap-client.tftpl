@@ -3,7 +3,19 @@ set -e
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -yq
-apt-get install -yq wget tar curl chrony haproxy postgresql-client
+apt-get install -yq wget tar curl chrony haproxy postgresql-client \
+  python3 python3-pip
+
+# psycopg (v3) is the RTO probe agent's only non-stdlib dependency. The probe
+# runs on this node rather than on the operator's workstation so its resolution
+# is bounded by the cost of a quorum write rather than by the operator's uplink
+# -- see crdblab/core/remote_probe.py for the measurements that motivated it.
+#
+# Installed with pip rather than apt on purpose: Ubuntu 22.04, which this image
+# is, ships no python3-psycopg package (only psycopg2, a different API the agent
+# does not use). The version constraint matches pyproject.toml's, so the agent
+# runs the same driver the harness does.
+pip3 install --no-cache-dir "psycopg[binary]>=3.1"
 
 # ==========================================
 # 1. Install & Configure Tailscale Mesh

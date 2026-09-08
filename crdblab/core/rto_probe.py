@@ -306,6 +306,7 @@ class RtoProbe:
         connect_timeout_s: float = DEFAULT_CONNECT_TIMEOUT_S,
         log_path: Path | None = None,
         epoch_monotonic: float | None = None,
+        emit: TextIO | None = None,
     ) -> None:
         if workers < 1:
             raise ValueError("the probe needs at least one worker")
@@ -321,6 +322,16 @@ class RtoProbe:
             time.monotonic() if epoch_monotonic is None else float(epoch_monotonic)
         )
         self.epoch_utc = utcnow_us()
+
+        #: When set, every attempt is also written to this stream as one JSON
+        #: object per line, as it completes. This is how the probe reports from
+        #: the client node: the harness reads the stream over SSH instead of
+        #: holding the attempts in a process on the operator's workstation.
+        #: Streaming rather than buffering means a probe that is killed -- or an
+        #: SSH session that drops -- still yields every observation it had
+        #: already made, which for an outage measurement is the interesting part.
+        self._emit = emit
+        self._emit_lock = threading.Lock()
 
         self._log = _EventLog(log_path)
         self._stop = threading.Event()
@@ -375,6 +386,14 @@ class RtoProbe:
     def _record(self, attempt: ProbeAttempt) -> None:
         with self._results_lock:
             self.attempts.append(attempt)
+        if self._emit is not None:
+            # Workers record concurrently, so the write is serialised: a torn
+            # line would be an unparseable observation on the reading side, and
+            # the reader cannot tell that apart from a probe that crashed.
+            line = json.dumps(attempt.to_row(), separators=(",", ":"))
+            with self._emit_lock:
+                self._emit.write(line + "\n")
+                self._emit.flush()
 
     def _note_latency(self, seconds: float) -> None:
         """Fold a served write into the estimate that spaces dispatches.
@@ -1168,3 +1187,125 @@ def attempts_from_rows(rows: Iterable[dict[str, Any]]) -> list[ProbeAttempt]:
             )
         )
     return out
+
+
+# --- running as the agent on the client node --------------------------------
+#
+# The probe used to run in the harness process on the operator's workstation.
+# Every canary write then carried a full workstation-to-cluster round trip --
+# 332 ms median on this testbed -- so a pool of eight workers achieved 21 writes
+# a second against the 500 it dispatched, and the resolution of the outage
+# measurement was 64 ms rather than the ~2 ms the profile asks for. Worse, the
+# figure was partly a measurement of the operator's own link: a hiccup at home
+# during the fault window is indistinguishable from one in the cluster.
+#
+# Running the same code on `crdb-client-1` removes both problems. It is the
+# *same code*: this module is copied to the client node and executed there, not
+# reimplemented for it. A second implementation of the probe would be a second
+# thing to keep in step with the analysis that reads its output, and divergence
+# between two copies of one measurement is the failure this project exists to
+# rule out.
+#
+# The agent reports on stdout as JSON lines and never on stderr, which carries
+# diagnostics only. Offsets it reports are on *its own* monotonic clock from
+# *its own* epoch; the harness converts them using the two epochs' UTC stamps
+# and records the NTP offset between the machines as the uncertainty on that
+# conversion. Both nodes run chrony and `preflight.check_clock_offset` asserts
+# the offset is small (0.01 ms measured, 250 ms limit) before the run proceeds,
+# so the conversion rests on a measurement rather than an assumption -- which is
+# the whole of D5.
+
+#: Marks the agent's final stdout line, which carries its epoch and summary
+#: rather than an attempt. Chosen not to collide with any PROBE_COLUMNS key.
+AGENT_RESULT_KEY = "__agent__"
+
+
+def _agent_main(argv: list[str] | None = None) -> int:
+    import argparse
+    import sys
+
+    parser = argparse.ArgumentParser(
+        prog="python3 -m crdblab.core.rto_probe",
+        description=(
+            "Run the high-frequency RTO probe here and report attempts as JSON "
+            "lines on stdout. Intended to be launched over SSH by "
+            "crdblab.phases.p4_chaos, not by hand."
+        ),
+    )
+    parser.add_argument("--dsn", required=True)
+    parser.add_argument("--table", default=DEFAULT_TABLE)
+    parser.add_argument("--interval-s", type=float, default=DEFAULT_INTERVAL_S)
+    parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
+    parser.add_argument(
+        "--statement-timeout-ms", type=int, default=DEFAULT_STATEMENT_TIMEOUT_MS
+    )
+    parser.add_argument(
+        "--connect-timeout-s", type=float, default=DEFAULT_CONNECT_TIMEOUT_S
+    )
+    parser.add_argument(
+        "--duration-s",
+        type=float,
+        required=True,
+        help=(
+            "hard upper bound on the probe's life. The harness stops the agent "
+            "by closing the SSH channel when the measurement ends; this bound "
+            "only guarantees an abandoned agent cannot outlive the run and keep "
+            "writing to the cluster."
+        ),
+    )
+    args = parser.parse_args(argv)
+
+    probe = RtoProbe(
+        args.dsn,
+        table=args.table,
+        interval_s=args.interval_s,
+        workers=args.workers,
+        statement_timeout_ms=args.statement_timeout_ms,
+        connect_timeout_s=args.connect_timeout_s,
+        emit=sys.stdout,
+    )
+    # The epoch is announced before any attempt is emitted, so the reader can
+    # convert every offset that follows without buffering the stream.
+    sys.stdout.write(
+        json.dumps(
+            {
+                AGENT_RESULT_KEY: "start",
+                "epoch_utc": probe.epoch_utc,
+                "table": probe.table,
+                "workers": probe.workers,
+                "interval_s": probe.interval_s,
+            },
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+    sys.stdout.flush()
+
+    deadline = time.monotonic() + args.duration_s
+    with probe:
+        if probe.error is None:
+            try:
+                while time.monotonic() < deadline:
+                    time.sleep(min(0.25, max(deadline - time.monotonic(), 0.0)))
+            except KeyboardInterrupt:
+                pass
+
+    sys.stdout.write(
+        json.dumps(
+            {
+                AGENT_RESULT_KEY: "stop",
+                "epoch_utc": probe.epoch_utc,
+                "error": probe.error,
+                "summary": probe.summary(),
+            },
+            separators=(",", ":"),
+            default=str,
+        )
+        + "\n"
+    )
+    sys.stdout.flush()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_agent_main())

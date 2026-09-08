@@ -242,6 +242,20 @@ def _run_tier(
         flush=True,
     )
 
+    # This tier's own origin, distinct from the sweep-wide ``t_zero``. Connection
+    # setup is a property of *this* tier -- the SSH session, the process start
+    # and the generator's own dialing -- so measuring it from the sweep epoch
+    # reports everything that has happened since the sweep began instead. On a
+    # 12-tier thesis sweep that grew by one tier's duration plus cooldown on
+    # every iteration (18.8s to 1042.5s, ~92s per step), firing the warning
+    # below on all twelve, against a true setup cost of 0.2-4.8s.
+    #
+    # ``t_zero`` stays the origin for ``wall_offset_s`` and
+    # ``generator_start_offset_s``: those exist to make ticks from different
+    # tiers orderable against each other and against the cooldowns between
+    # them, which needs one epoch for the whole sweep.
+    tier_start = time.monotonic()
+
     parser = WorkloadParser(strict=True)
     samples = []
     # Each sample is stamped with the harness's own clock as it is read, so the
@@ -325,7 +339,7 @@ def _run_tier(
             f"C={concurrency} rep={repetition}: only {kept} steady-state ticks, "
             f"expected about {expected}"
         )
-    setup_s = (started_at - t_zero) if started_at is not None else None
+    setup_s = (started_at - tier_start) if started_at is not None else None
     mean_tps = round(sum(throughputs) / len(throughputs), 1) if throughputs else None
     print(
         f"  tier {tier_index}/{tier_total} done: {kept} ticks kept, "
@@ -355,6 +369,11 @@ def _run_tier(
         "generator_start_offset_s": round(started_at - t_zero, 3)
         if started_at is not None
         else None,
+        # How long this tier spent getting the generator to its first sample,
+        # measured from the tier's own start. Distinct from the field above,
+        # which shares the sweep's epoch; conflating the two is what produced
+        # the runaway setup figures described at ``tier_start``.
+        "connection_setup_s": round(setup_s, 3) if setup_s is not None else None,
         "mean_total_tps": round(sum(throughputs) / len(throughputs), 2)
         if throughputs
         else None,

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
@@ -231,8 +232,28 @@ def check_leaseholder_placement(
     gateway: Node,
     database: str,
     expected_region: str,
+    settle_timeout_s: float = 0.0,
+    poll_interval_s: float = 10.0,
 ) -> None:
     """The workload's own ranges must be led from where the generator runs.
+
+    ``settle_timeout_s`` allows the placement a bounded window to *become*
+    correct before the check is failed, and defaults to 0 -- an immediate,
+    single reading -- so every existing caller behaves exactly as before. It is
+    not a loosening of the assertion: the condition that must hold is unchanged
+    and still has to hold before anything is measured. What it accommodates is
+    that lease placement is restored asynchronously by the replication queue,
+    so immediately after a chaos run the answer is legitimately "not yet"
+    rather than "no".
+
+    Phase III demonstrated this: partitioning ``gcp-1`` moved both ``ycsb``
+    leaseholders to Linode, and Phase IV -- which starts as soon as Phase III
+    returns -- read that placement and refused to measure. It was right to
+    refuse; ~75s of post-heal time was not enough for
+    ``lease_preferences`` to pull the leases back, and faulting a node that
+    holds no leases measures nothing. Polling turns a run that aborts into one
+    that waits for the cluster it just perturbed, and still aborts if the
+    cluster does not recover its declared placement.
 
     Scoped to ``database`` deliberately. A cluster-wide count is not a usable
     signal: system ranges are governed by their own zone configurations and are
@@ -246,6 +267,45 @@ def check_leaseholder_placement(
     This is D7's detector: an arbitrarily placed lease cost a factor of 12.3 in
     throughput and 110 in read latency, while the cluster reported full health.
     """
+    deadline = time.monotonic() + max(settle_timeout_s, 0.0)
+    waited_s = 0.0
+    started = time.monotonic()
+    while True:
+        passed, detail, observed = _read_leaseholder_placement(
+            gateway, database, expected_region
+        )
+        waited_s = time.monotonic() - started
+        if passed or time.monotonic() >= deadline:
+            break
+        print(
+            f"  waiting for {database} leaseholders to return to "
+            f"{expected_region!r}: {detail} "
+            f"({waited_s:.0f}s of {settle_timeout_s:.0f}s)",
+            flush=True,
+        )
+        time.sleep(min(poll_interval_s, max(deadline - time.monotonic(), 0.0)))
+
+    if settle_timeout_s > 0 and waited_s >= poll_interval_s:
+        detail = f"{detail} (after waiting {waited_s:.0f}s for placement to settle)"
+    report.add(
+        "leaseholder_placement",
+        passed,
+        detail,
+        database=database,
+        expected_region=expected_region,
+        waited_s=round(waited_s, 1),
+        **observed,
+    )
+
+
+def _read_leaseholder_placement(
+    gateway: Node, database: str, expected_region: str
+) -> tuple[bool, str, dict[str, Any]]:
+    """One reading of where ``database``'s leaseholders currently are.
+
+    Returns ``(passed, detail, observed)`` rather than writing to a report, so
+    the caller can take several readings and record only the last.
+    """
     query = (
         f"SELECT lease_holder_locality, count(*) FROM "
         f"[SHOW RANGES FROM DATABASE {database} WITH DETAILS] "
@@ -258,14 +318,14 @@ def check_leaseholder_placement(
         timeout=60,
     )
     if result.returncode != 0:
-        report.add(
-            "leaseholder_placement",
+        return (
             False,
-            f"could not read leaseholders for database {database!r}: "
-            f"{result.stderr.strip() or result.stdout.strip()}",
-            database=database,
+            (
+                f"could not read leaseholders for database {database!r}: "
+                f"{result.stderr.strip() or result.stdout.strip()}"
+            ),
+            {},
         )
-        return
 
     distribution: dict[str, int] = {}
     for line in result.stdout.strip().splitlines()[1:]:
@@ -277,24 +337,21 @@ def check_leaseholder_placement(
             distribution[locality] = int(count)
 
     if not distribution:
-        report.add(
-            "leaseholder_placement",
+        return (
             False,
             f"database {database!r} has no ranges; has the working set been loaded?",
-            database=database,
+            {},
         )
-        return
 
     total = sum(distribution.values())
     local = sum(n for loc, n in distribution.items() if expected_region in loc)
-    report.add(
-        "leaseholder_placement",
+    return (
         local == total,
-        f"{local}/{total} {database} leaseholders in {expected_region!r}"
-        + ("" if local == total else f"; distribution {distribution}"),
-        database=database,
-        expected_region=expected_region,
-        distribution=distribution,
+        (
+            f"{local}/{total} {database} leaseholders in {expected_region!r}"
+            + ("" if local == total else f"; distribution {distribution}")
+        ),
+        {"distribution": distribution},
     )
 
 

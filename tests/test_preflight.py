@@ -181,3 +181,76 @@ def test_an_unmeasured_rate_is_null_in_the_manifest_not_zero_or_nan():
     rate = probe.finish(PreflightReport(), corroborated=True)
     assert rate is None
     assert json.loads(json.dumps({"row_match_rate": rate})) == {"row_match_rate": None}
+
+
+# --------------------------------------------------------------------------
+# Leaseholder placement is asserted before every chaos run, but a chaos run may
+# follow another one: Phase III's partition moved both ycsb leaseholders to
+# Linode, and Phase IV -- which starts as soon as Phase III returns -- read that
+# and refused to measure. It was right to refuse. The settle window lets the
+# cluster finish converging first without weakening what must be true.
+# --------------------------------------------------------------------------
+
+from unittest.mock import patch
+
+import pytest
+
+from crdblab.core.preflight import PreflightReport, check_leaseholder_placement
+from crdblab.core.ssh import RemoteResult
+
+_GATEWAY = CLIENT_NODE
+
+
+def _reading(locality: str, count: int = 2) -> RemoteResult:
+    return RemoteResult(
+        0, f'lease_holder_locality,count\n"{locality}",{count}\n', ""
+    )
+
+
+_LOCAL = _reading("cloud=gcp,region=us-east1")
+_ELSEWHERE = _reading("cloud=linode,region=us-east")
+
+
+def test_correct_placement_passes_without_waiting():
+    report = PreflightReport()
+    with patch("crdblab.core.ssh.run", return_value=_LOCAL) as run:
+        check_leaseholder_placement(report, _GATEWAY, "ycsb", "us-east1")
+    assert report.ok
+    assert run.call_count == 1
+
+
+def test_the_default_is_a_single_reading_so_existing_callers_are_unchanged():
+    """bench and net probe must still fail fast; only chaos waits."""
+    report = PreflightReport()
+    with patch("crdblab.core.ssh.run", return_value=_ELSEWHERE) as run:
+        check_leaseholder_placement(report, _GATEWAY, "ycsb", "us-east1")
+    assert not report.ok
+    assert run.call_count == 1
+
+
+def test_placement_that_converges_within_the_window_passes():
+    """The assertion still has to hold -- it is just given time to become true."""
+    report = PreflightReport()
+    readings = [_ELSEWHERE, _ELSEWHERE, _LOCAL]
+    with patch("crdblab.core.ssh.run", side_effect=readings):
+        with patch("time.sleep"):
+            check_leaseholder_placement(
+                report, _GATEWAY, "ycsb", "us-east1",
+                settle_timeout_s=60, poll_interval_s=0.01,
+            )
+    assert report.ok
+
+
+def test_placement_that_never_converges_still_fails():
+    """Waiting is not the same as accepting; a cluster that does not recover
+    its declared placement must not be measured."""
+    report = PreflightReport()
+    with patch("crdblab.core.ssh.run", return_value=_ELSEWHERE):
+        with patch("time.sleep"):
+            check_leaseholder_placement(
+                report, _GATEWAY, "ycsb", "us-east1",
+                settle_timeout_s=0.05, poll_interval_s=0.01,
+            )
+    assert not report.ok
+    check = report.checks[-1]
+    assert "cloud=linode" in check.detail

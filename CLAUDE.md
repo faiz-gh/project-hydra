@@ -307,6 +307,49 @@ testbed, not something touched by most code changes to `crdblab/`.
   the run reports that the fault was never injected instead of hanging.
   `events.json` carries both `at_offset_s` (from the epoch, unchanged) and
   the new `at_steady_state_offset_s`.
+- **The RTO probe runs on `crdb-client-1`, not in the harness process.**
+  Where it runs is part of the measurement. From the operator's workstation a
+  canary write cost 332 ms median over Tailscale, so eight workers achieved
+  21.4 writes/s against the 500/s the profile dispatched and the probe resolved
+  only 64 ms -- `probe_interval_s` was never the binding constraint, the
+  operator's uplink was -- and a hiccup on that uplink during the fault window
+  was indistinguishable from a cluster outage. From the client node the same
+  code costs 123 ms and achieves 58.8/s, resolving 21 ms; what remains is the
+  cluster's own cross-region quorum cost (~69 ms floor), not the operator's
+  link. `crdblab/core/remote_probe.py` copies `rto_probe.py` + `recorder.py`
+  (both stdlib-only) to `/tmp/crdblab-probe-agent` every run and executes
+  `python3 -m crdblab.core.rto_probe` there; the agent streams one JSON object
+  per attempt on stdout. **It is the same module, not a reimplementation** --
+  a second copy of the probe would be a second thing to keep in step with the
+  analysis that reads it. The agent's offsets are on *its* monotonic clock, and
+  are rebased onto the run's by the difference between the two epochs' UTC
+  stamps; that is legitimate only because both nodes run chrony and
+  `preflight.check_clock_offset` asserts the client's offset (0.01 ms measured,
+  250 ms limit) before the run -- the skew actually applied is recorded in
+  `events.json` as `probe.epoch_skew_s`. `psycopg` (v3) must be present on the
+  client node: Ubuntu 22.04 has no `python3-psycopg` package, so
+  `bootstrap-client.tftpl` pip-installs it, and `check_agent_prerequisites`
+  fails pre-flight rather than letting a missing driver look like a total
+  outage from the first sample onward.
+- **Leaseholder placement gets a settle window before a chaos run, not before
+  a bench run.** `check_leaseholder_placement` takes `settle_timeout_s`
+  (default 0 = one reading, so bench and `net probe` still fail fast); only the
+  chaos phases pass one, from `chaos.leaseholder_settle_s` (default 300s).
+  This is not a loosening -- the condition that must hold is unchanged and
+  still gates the run. It exists because a chaos run can follow another chaos
+  run: Phase III's partition moved both `ycsb` leaseholders to Linode and
+  Phase IV, which starts as soon as Phase III returns, read that and aborted.
+  ~75 s of post-heal time was not enough for `lease_preferences` to pull them
+  back; they did return on their own given longer.
+- **`bench.py`'s per-tier setup time is measured from `tier_start`, not
+  `t_zero`.** `t_zero` is the sweep-wide epoch and must stay that way --
+  `wall_offset_s` and `generator_start_offset_s` exist to make ticks from
+  different tiers orderable against each other. Measuring *connection setup*
+  from it instead reported everything since the sweep began, growing by one
+  tier's duration plus cooldown each iteration (18.8s to 1042.5s across 12
+  tiers, ~92 s per step) and firing the >10 s warning on every tier, against a
+  true setup cost of 0.2-4.8 s. The per-tier figure is also recorded as
+  `connection_setup_s`.
 - **Patroni's leader is not pinned to any node.** CockroachDB's
   `lease_preferences` deliberately biases the leaseholder onto `gcp-1`
   (asserted by `preflight.check_leaseholder_placement`), but nothing in

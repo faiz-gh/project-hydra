@@ -100,6 +100,15 @@ class ChaosSpec:
     target: str = "gcp-1"
     recovery_threshold: float = 0.80
     recovery_hold_s: int = 10
+    #: How long pre-flight may wait for ``ycsb``'s leaseholders to return to the
+    #: gateway's region before refusing to measure. A chaos run that follows
+    #: another chaos run starts against a cluster whose lease placement is still
+    #: being restored by the replication queue: Phase III's partition moved both
+    #: leaseholders to Linode and Phase IV, starting immediately afterwards,
+    #: read that and aborted. The assertion is unchanged -- placement must be
+    #: correct before anything is measured -- this only lets the cluster finish
+    #: converging first. CockroachDB only; nothing pins Patroni's leader.
+    leaseholder_settle_s: int = 300
     #: Cadence of the RPO audit writer, which writes one sequence at a time on
     #: one connection. It bounds the resolution of the availability RTO derived
     #: from ``audit.csv`` at the cost of a quorum write (~69 ms here), not at this

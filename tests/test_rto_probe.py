@@ -956,3 +956,108 @@ def test_in_flight_fraction_never_exceeds_one(tmp_path):
         result = measure_rto(attempts, fault_offset_s=0.0)
         if result["outage"] is not None:
             assert 0.0 <= result["in_flight_fraction"] <= 1.0
+
+
+# --------------------------------------------------------------------------
+# The probe runs on the client node, so its offsets arrive on a different
+# machine's clock and have to be rebased onto the run's. Getting that wrong
+# displaces every observation relative to the fault time by an interval nobody
+# measured, which is D5 -- so the conversion is pinned here.
+# --------------------------------------------------------------------------
+
+from crdblab.core.remote_probe import AGENT_FILES, RemoteRtoProbe
+from crdblab.topology import CLIENT_NODE
+
+
+def _remote_probe(**kw):
+    from pathlib import Path
+
+    defaults = dict(
+        package_root=Path("/nonexistent"),
+        duration_s=10.0,
+        epoch_monotonic=1000.0,
+        epoch_utc="2026-09-08T02:00:00.000000Z",
+    )
+    defaults.update(kw)
+    return RemoteRtoProbe(CLIENT_NODE, "postgresql://root@h:26257/bench", **defaults)
+
+
+def test_agent_offsets_are_rebased_onto_the_runs_clock():
+    """An agent offset is placed by the gap between the two epochs."""
+    probe = _remote_probe()
+    # The agent started 8.5 s after the harness took its epoch.
+    probe._on_start({"epoch_utc": "2026-09-08T02:00:08.500000Z"})
+    assert probe.epoch_skew_s == pytest.approx(8.5)
+
+    probe._on_attempt(
+        {
+            "seq_id": 1,
+            "dispatch_offset_s": 2.0,
+            "complete_offset_s": 2.25,
+            "outcome": "ok",
+            "worker": 0,
+        }
+    )
+    (attempt,) = probe.attempts
+    # 2.0 s on the agent's clock is 10.5 s on the run's.
+    assert attempt.dispatch_offset_s == pytest.approx(10.5)
+    assert attempt.complete_offset_s == pytest.approx(10.75)
+    # The interval between the two is a property of the write, not of either
+    # clock, so it must survive the conversion untouched.
+    assert attempt.duration_ms == pytest.approx(250.0)
+
+
+def test_attempts_arriving_before_the_epoch_are_dropped_not_guessed():
+    """Without the epoch line there is no origin, and inventing one is the bug."""
+    probe = _remote_probe()
+    probe._on_attempt(
+        {
+            "seq_id": 1,
+            "dispatch_offset_s": 2.0,
+            "complete_offset_s": 2.25,
+            "outcome": "ok",
+            "worker": 0,
+        }
+    )
+    assert probe.attempts == []
+
+
+def test_an_unparseable_agent_epoch_is_an_error_not_a_zero_skew():
+    probe = _remote_probe()
+    probe._on_start({"epoch_utc": "not-a-timestamp"})
+    assert probe.epoch_skew_s is None
+    assert probe.error and "epoch" in probe.error
+
+
+def test_malformed_attempt_lines_do_not_abort_the_run():
+    """A probe that could kill the measurement it observes is a new failure mode."""
+    probe = _remote_probe()
+    probe._on_start({"epoch_utc": "2026-09-08T02:00:00.000000Z"})
+    probe._on_attempt({"seq_id": "not-an-int", "outcome": "ok"})
+    probe._on_attempt({})
+    assert probe.attempts == []
+
+
+def test_summary_records_where_the_probe_ran_and_the_skew_it_applied():
+    """Both are part of the measurement and must reach the run directory."""
+    probe = _remote_probe()
+    probe._on_start({"epoch_utc": "2026-09-08T02:00:03.250000Z"})
+    summary = probe.summary()
+    assert summary["ran_on"] == CLIENT_NODE.host
+    assert summary["epoch_skew_s"] == pytest.approx(3.25)
+    assert "preflight.check_clock_offset" in summary["note_clock"]
+
+
+def test_the_agent_ships_only_stdlib_only_modules():
+    """The agent's dependency surface is psycopg plus the standard library.
+
+    Adding a module here that imports pandas (or anything else the cluster nodes
+    do not have) would turn a probe failure into a run failure, discovered
+    mid-measurement.
+    """
+    assert set(AGENT_FILES) == {
+        "crdblab/__init__.py",
+        "crdblab/core/__init__.py",
+        "crdblab/core/recorder.py",
+        "crdblab/core/rto_probe.py",
+    }

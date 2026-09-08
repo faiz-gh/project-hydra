@@ -50,7 +50,12 @@ tenth of a second, and the audit writer's own docstring says so.
 :class:`crdblab.core.rto_probe.RtoProbe` runs alongside both, on its own threads,
 its own connections and its own table, holding several canary writes in flight so
 that the interval between observations is the write cost *divided by* the pool
-size. It is additive in every direction: the RPO series is untouched and paced
+size. It runs on the *client node* rather than in this process
+(:class:`crdblab.core.remote_probe.RemoteRtoProbe`): measured from the operator's
+workstation a canary write cost 332 ms and the pool achieved 21 writes a second,
+so the probe resolved 64 ms; from ``crdb-client-1`` the same code costs 123 ms
+and achieves 59 a second, resolving 21 ms, and what remains is the cluster's own
+cross-region quorum cost rather than the operator's uplink. It is additive in every direction: the RPO series is untouched and paced
 exactly as its recorded runs were, ``audit.csv`` still carries the availability
 figure derived from it, and a probe that fails is recorded as a failed probe
 rather than as a failed run.
@@ -63,6 +68,7 @@ import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Iterator
 
 from ..config import Profile, Settings
@@ -76,8 +82,10 @@ from ..core.recorder import (
     RunDirectory,
     new_run_id,
     utcnow,
+    utcnow_us,
 )
-from ..core.rto_probe import CREATE_TABLE_SQL, RtoProbe
+from ..core.remote_probe import RemoteRtoProbe, check_agent_prerequisites
+from ..core.rto_probe import CREATE_TABLE_SQL
 from ..core.workload import PERIODIC, Sample, WorkloadParser, group_timed_ticks
 from ..topology import CLIENT_NODE, Node, Topology
 
@@ -85,6 +93,24 @@ from ..topology import CLIENT_NODE, Node, Topology
 #: node's overlay network for a period and then restores it, which exercises the
 #: heal path rather than only the detection path.
 MODES = ("dead", "recover")
+
+#: Root of this checkout, from which the probe agent's source files are copied
+#: to the client node. Derived from this module's location so the agent is
+#: always the revision the manifest records, never whatever happens to be
+#: installed on the remote host.
+PACKAGE_ROOT = Path(__file__).resolve().parents[2]
+
+#: The probe agent's dead-man switch, added to `chaos.duration_s`.
+#:
+#: It is NOT how long the probe is meant to run. The harness stops the agent by
+#: closing the SSH channel when the measurement ends, and that is the normal
+#: path; this bound only guarantees that an agent whose harness died cannot keep
+#: writing to the cluster indefinitely. It is therefore generous rather than
+#: tight: the probe starts at the run's epoch but the generator does not reach
+#: steady state until it has finished connecting, which has taken as long as
+#: 268 s on this topology, so a bound close to `duration_s` would kill the probe
+#: before the workload it is observing had finished.
+PROBE_OVERRUN_S = 600.0
 
 #: Every fault payload is privileged, and on most of this testbed the SSH user
 #: is *not* root: ``crdb-gcp-1`` and the Azure nodes are reached as ``ubuntu``
@@ -581,8 +607,26 @@ def run(
     report = preflight.PreflightReport()
     preflight.check_clock_offset(report, [gateway, fault_target])
     check_fault_authorisation(report, fault_target, mode, engine)
+    if chaos.probe_enabled:
+        # The clock check above already covers `gateway` (the client node), which
+        # is what makes the agent's offsets convertible; this one asserts the
+        # node can actually run the agent. Both are pre-flight because a probe
+        # that fails at its first write looks like a total outage from the first
+        # sample onward -- a flattering failure, and the kind this gate exists
+        # to catch before it reaches a figure.
+        ok, detail = check_agent_prerequisites(gateway)
+        report.add("probe_agent_ready", ok, detail, node=gateway.name)
     if engine == "cockroachdb":
-        preflight.check_leaseholder_placement(report, topo.gateway, database, topo.gateway.region)
+        preflight.check_leaseholder_placement(
+            report,
+            topo.gateway,
+            database,
+            topo.gateway.region,
+            # Only the chaos phases pass a settle window: they are the only ones
+            # that can run against a cluster still recovering from a fault the
+            # harness itself injected moments earlier.
+            settle_timeout_s=chaos.leaseholder_settle_s,
+        )
     else:
         report.add(
             "patroni_primary_resolved",
@@ -789,17 +833,31 @@ def run(
     # metrics.csv's wall_offset_s. Letting it take its own zero would put a fourth
     # clock in the run directory whose offset to the others nobody measured --
     # which is D5 exactly, and is why the epoch is a parameter and not a default.
+    #
+    # The UTC stamp is taken in the same breath as the monotonic one because the
+    # probe now runs on the client node: a monotonic clock is meaningless across
+    # machines, so the pair is what lets the agent's offsets be rebased onto this
+    # run's timeline. Any delay between these two calls would be a systematic
+    # error in that conversion, so they are adjacent and nothing sits between.
     t_zero = time.monotonic()
+    t_zero_utc = utcnow_us()
     probe = (
-        RtoProbe(
+        RemoteRtoProbe(
+            gateway,
             audit_dsn,
+            package_root=PACKAGE_ROOT,
+            # A dead-man switch, not the intended lifetime: the probe is stopped
+            # by the harness when the measurement ends. Generous on purpose --
+            # see PROBE_OVERRUN_S.
+            duration_s=chaos.duration_s + PROBE_OVERRUN_S,
             table=chaos.probe_table,
             interval_s=chaos.probe_interval_s,
             workers=chaos.probe_workers,
             statement_timeout_ms=chaos.probe_statement_timeout_ms,
             connect_timeout_s=chaos.probe_connect_timeout_s,
-            log_path=run_dir.probe_log,
             epoch_monotonic=t_zero,
+            epoch_utc=t_zero_utc,
+            log_path=run_dir.probe_log,
         )
         if chaos.probe_enabled
         else None
@@ -807,8 +865,12 @@ def run(
 
     with _optional(probe):
         with AuditWriter(audit_dsn, chaos.audit_interval_s) as audit:
-            events["t_start_utc"] = utcnow()
-            manifest.clock_epoch_utc = events["t_start_utc"]
+            # The same instant `t_zero` was taken at, not a fresh one: this is
+            # the origin the probe agent's offsets were rebased onto, and a
+            # second, later stamp here would silently shift every figure drawn
+            # against it.
+            events["t_start_utc"] = t_zero_utc
+            manifest.clock_epoch_utc = t_zero_utc
             timer_thread = threading.Thread(target=timer, args=(t_zero,), daemon=True)
             timer_thread.start()
 
