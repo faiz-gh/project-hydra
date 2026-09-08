@@ -704,6 +704,14 @@ def summarise(
         "mode": (run.events or {}).get("mode"),
         "target": (run.events or {}).get("target"),
         "clock_alignment": alignment.to_dict(),
+        # Whether the injection command actually succeeded, as opposed to
+        # whether a run directory exists. A refused fault (`landed is False`)
+        # still yields a complete, internally consistent run whose every figure
+        # describes an undisturbed cluster, so this has to be carried all the
+        # way out to the report rather than left in events.json. `None` means
+        # the transport died mid-injection, which for a `dead` fault is evidence
+        # it landed, and for older runs simply means it was not recorded.
+        "fault_landed": (run.events or {}).get("fault_landed"),
         "fault": fault_offsets(run, alignment),
         "availability_rto": availability(run),
         # The same quantity at a finer resolution, from an independent client.

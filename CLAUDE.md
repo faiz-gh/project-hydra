@@ -269,6 +269,44 @@ testbed, not something touched by most code changes to `crdblab/`.
   keeping: `run-experiment.sh` sets `export PYTHONUNBUFFERED=1`, and the hot
   per-tier/per-tick prints in `bench.py`/`p4_chaos.py` additionally pass
   `flush=True` directly.
+- **Every chaos payload needs `sudo -n`; the SSH user is not root.**
+  `crdb-gcp-1` and both Azure nodes are reached as `ubuntu` (only the Linode
+  nodes are `root` — see `topology.py`), while `cockroach`/`patroni` run as
+  root and `tailscale down` needs the daemon socket. Unprefixed,
+  `killall -9 cockroach` returns `Operation not permitted` and rc=1, and the
+  target serves uninterrupted for the whole run. This is not hypothetical:
+  the 2026-09-07 and 2026-09-08 `dead` runs both recorded
+  `"injected": {"detail": "rc=1"}` and their target's `cockroach` pid was
+  unchanged afterwards — yet they produced complete run directories that
+  passed `validate` and reported "no write interruption detectable", which
+  reads as an excellent resilience result and is a measurement of an
+  undisturbed cluster. `recover` is worse: its payload is backgrounded
+  (`nohup … &`), so its exit status only reports that the shell forked and a
+  denied `tailscale down` is *structurally* invisible in rc. Three defences
+  now exist and all three are worth keeping: `preflight.check_fault_authorisation`
+  runs a harmless same-privilege probe (`killall -0` / `tailscale status`)
+  **before** the measurement and refuses the run if the fault would not land;
+  `inject_fault` records `landed`/`stderr` rather than a bare `rc=N`; and a
+  `landed is False` run is stamped with a manifest note and a
+  `*** THE FAULT DID NOT LAND ***` banner in `analyze resilience`. Old runs
+  have no `fault_landed` key and correctly stay silent rather than
+  false-alarming.
+- **The chaos injection timer is anchored to the generator's first sample, not
+  to the harness epoch.** `inject_at_s` means "seconds of measured steady
+  state before the fault", and it cannot mean that if it counts from a
+  `t_zero` taken before `cockroach workload run` has finished
+  `creating load generator`. That setup phase ranged from 0.2s to **4m28s**
+  across recorded runs (it scales with concurrency and with the client→target
+  link), so a 60s `inject_at_s` fired *before the first sample existed*: no
+  pre-fault intervals, `baseline_tps` 0.0, recovery floor 0, and
+  `performance_rto_s` null. That is what the 2026-09-07 (268s setup) and
+  2026-09-08 (65s setup) chaos runs recorded. This does **not** reintroduce
+  D4 — the offset is still timed on the monotonic clock and never by counting
+  samples; only the *origin* moved from "harness started" to "generator
+  started emitting". The wait is bounded by `chaos.duration_s`, after which
+  the run reports that the fault was never injected instead of hanging.
+  `events.json` carries both `at_offset_s` (from the epoch, unchanged) and
+  the new `at_steady_state_offset_s`.
 - **Patroni's leader is not pinned to any node.** CockroachDB's
   `lease_preferences` deliberately biases the leaseholder onto `gcp-1`
   (asserted by `preflight.check_leaseholder_placement`), but nothing in

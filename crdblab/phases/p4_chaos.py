@@ -86,11 +86,53 @@ from ..topology import CLIENT_NODE, Node, Topology
 #: heal path rather than only the detection path.
 MODES = ("dead", "recover")
 
+#: Every fault payload is privileged, and on most of this testbed the SSH user
+#: is *not* root: ``crdb-gcp-1`` and the Azure nodes are reached as ``ubuntu``
+#: while ``cockroach``/``patroni`` run as root and ``tailscale down`` needs the
+#: daemon socket. Without this prefix ``killall -9 cockroach`` returns
+#: ``Operation not permitted`` (rc=1) and ``tailscale down`` returns
+#: ``Access denied`` -- in both cases the node under test carries on serving and
+#: the run silently measures a fault that never happened. That is exactly what
+#: the 2026-09-07/08 chaos runs recorded (``"detail": "rc=1"``, and the target's
+#: ``cockroach`` pid unchanged across the whole run). ``-n`` keeps it
+#: non-interactive: if passwordless sudo is not available we want a hard,
+#: immediate failure rather than a hung prompt eating the injection window.
+SUDO = "sudo -n"
+
+
 def get_payload(mode: str, engine: str) -> str:
     if mode == "dead":
-        return "killall -9 patroni postgres" if engine == "postgresql" else "killall -9 cockroach"
+        procs = "patroni postgres" if engine == "postgresql" else "cockroach"
+        return f"{SUDO} killall -9 {procs}"
     elif mode == "recover":
-        return "nohup bash -c 'tailscale down && sleep 45 && tailscale up' >/dev/null 2>&1 &"
+        # The partition has to outlive the SSH connection that delivered it --
+        # `tailscale down` severs the overlay this very session is riding on --
+        # so the heal half must be detached. `setsid` + `nohup` keep it alive
+        # once sshd tears the session down.
+        return (
+            f"{SUDO} nohup setsid bash -c "
+            f"'tailscale down && sleep 45 && tailscale up' >/dev/null 2>&1 &"
+        )
+    raise ValueError(f"Unknown mode: {mode}")
+
+
+def preflight_payload(mode: str, engine: str) -> str:
+    """A privilege probe with the same authorisation requirements as the fault.
+
+    ``recover``'s real payload is backgrounded, so its exit status reports only
+    that the shell forked -- it is *structurally* incapable of telling us the
+    fault landed (this is why a denied ``tailscale down`` went unnoticed for
+    three runs). The only way to know the injection will be permitted is to ask
+    before the measurement starts, with a command that needs the same rights but
+    changes nothing. ``killall -0`` signals nothing and still returns
+    ``Operation not permitted`` when it may not signal; ``tailscale status``
+    needs the same daemon access ``tailscale down`` does.
+    """
+    if mode == "dead":
+        procs = "patroni postgres" if engine == "postgresql" else "cockroach"
+        return f"{SUDO} killall -0 {procs}"
+    elif mode == "recover":
+        return f"{SUDO} tailscale status --json >/dev/null"
     raise ValueError(f"Unknown mode: {mode}")
 
 
@@ -278,6 +320,66 @@ class AuditWriter:
         )
 
 
+def check_fault_authorisation(
+    report: preflight.PreflightReport,
+    node: Node,
+    mode: str,
+    engine: str,
+) -> None:
+    """The fault must be *permitted* before the run is worth starting.
+
+    This is a pre-flight check in the strict sense the README means: it asks
+    "was the system fit to be measured?" rather than "what did we measure?" A
+    chaos run whose injection is denied still produces a full run directory --
+    metrics, audit, probe, an RTO of "no interruption detectable" -- and every
+    one of those numbers is a measurement of an undisturbed cluster. It reads as
+    a flatteringly good resilience result, which is the project's most dangerous
+    failure mode, so it has to be caught before the measurement, not after.
+
+    The probe changes nothing on the target: ``killall -0`` sends no signal and
+    ``tailscale status`` only reads. Both fail the same way the real payload
+    would if the SSH user cannot act as root.
+    """
+    probe = preflight_payload(mode, engine)
+    try:
+        result = ssh.run(node, probe, timeout=preflight.CONTROL_TIMEOUT_S)
+    except Exception as exc:  # noqa: BLE001
+        report.add(
+            "fault_authorisation",
+            False,
+            f"{node.name}: could not verify the {mode!r} fault would be "
+            f"permitted ({type(exc).__name__})",
+            node=node.name,
+            mode=mode,
+            probe=probe,
+        )
+        return
+
+    stderr = (result.stderr or "").strip()
+    passed = result.returncode == 0
+    if passed:
+        detail = f"{node.name}: {mode!r} fault is permitted as {node.user}"
+    else:
+        detail = (
+            f"{node.name}: the {mode!r} fault would NOT land -- {probe!r} exited "
+            f"{result.returncode}"
+            + (f" ({stderr.splitlines()[0]})" if stderr else "")
+            + f". The SSH user is {node.user!r} and the target process runs as "
+            "root; without passwordless sudo the injection is silently refused "
+            "and the run measures an undisturbed cluster"
+        )
+    report.add(
+        "fault_authorisation",
+        passed,
+        detail,
+        node=node.name,
+        mode=mode,
+        probe=probe,
+        returncode=result.returncode,
+        stderr=stderr,
+    )
+
+
 def inject_fault(node: Node, mode: str, engine: str) -> dict[str, Any]:
     """Apply the fault and return when it was applied.
 
@@ -288,9 +390,18 @@ def inject_fault(node: Node, mode: str, engine: str) -> dict[str, Any]:
     """
     at_utc = utcnow()
     at_monotonic = time.monotonic()
+    #: ``None`` means "the transport died, which for a ``dead`` fault is
+    #: evidence of success"; ``True``/``False`` mean the command actually
+    #: reported an exit status and we know which.
+    landed: bool | None = None
+    stderr = ""
     try:
         result = ssh.run(node, get_payload(mode, engine), timeout=10)
         detail = f"rc={result.returncode}"
+        stderr = (result.stderr or "").strip()
+        landed = result.returncode == 0
+        if stderr:
+            detail = f"{detail}: {stderr.splitlines()[0]}"
     except Exception as exc:  # noqa: BLE001
         detail = f"transport error after dispatch: {type(exc).__name__}"
     return {
@@ -300,6 +411,8 @@ def inject_fault(node: Node, mode: str, engine: str) -> dict[str, Any]:
         "at_utc": at_utc,
         "at_monotonic": at_monotonic,
         "detail": detail,
+        "landed": landed,
+        "stderr": stderr,
     }
 
 
@@ -467,6 +580,7 @@ def run(
 
     report = preflight.PreflightReport()
     preflight.check_clock_offset(report, [gateway, fault_target])
+    check_fault_authorisation(report, fault_target, mode, engine)
     if engine == "cockroachdb":
         preflight.check_leaseholder_placement(report, topo.gateway, database, topo.gateway.region)
     else:
@@ -580,20 +694,82 @@ def run(
     first_error_at: float | None = None
 
     def timer(t_zero: float) -> None:
-        """Inject at a wall-clock offset, independent of the sample stream (D4)."""
-        deadline = t_zero + chaos.inject_at_s
+        """Inject ``inject_at_s`` wall-clock seconds into *steady state*.
+
+        The offset is still measured on a monotonic clock and never by counting
+        samples -- that is D4, and it stays. What changed is only the *origin*.
+        It used to be ``t_zero``, the moment the harness started; but ``t_zero``
+        precedes the generator's connection-setup phase, and
+        ``cockroach workload run`` spends anywhere from 0.2 s to 4m28s in
+        ``creating load generator`` on this topology depending on how far the
+        target is from the client node. When setup outruns ``inject_at_s`` the
+        fault fires before the first sample exists, so there are no pre-fault
+        intervals, ``baseline_tps`` is 0, the recovery floor is 0 and
+        ``performance_rto_s`` comes back ``null`` -- which is exactly what the
+        2026-09-07 and 2026-09-08 chaos runs recorded (setup 65 s and 268 s
+        against a 60 s ``inject_at_s``).
+
+        Anchoring to the first observed sample makes ``inject_at_s`` mean what
+        the profile says it means: seconds of measured steady state before the
+        fault. Counting samples would be D4; waiting for the stream to *begin*
+        and then timing on the monotonic clock is not -- the schedule still
+        cannot be distorted by the generator's line rate, only by when it
+        started emitting at all, which is the thing we actually want to be
+        relative to.
+        """
+        # Bounded so a generator that never produces a sample fails the run
+        # loudly instead of hanging until the workload's own duration expires
+        # with no fault injected at all.
+        setup_budget_s = chaos.duration_s
+        if not first_sample_seen.wait(timeout=setup_budget_s):
+            print(
+                f"  ERROR: the generator produced no sample within "
+                f"{setup_budget_s:.0f}s; the fault was NOT injected and this run "
+                "measures nothing",
+                flush=True,
+            )
+            injected.update(
+                {
+                    "target": fault_target.name,
+                    "host": fault_target.host,
+                    "mode": mode,
+                    "at_utc": None,
+                    "at_monotonic": None,
+                    "detail": "not injected: generator never reached steady state",
+                    "landed": False,
+                    "stderr": "",
+                }
+            )
+            return
+        if stop_timer.is_set():
+            return
+
+        origin = steady_state_at[0]
+        deadline = origin + chaos.inject_at_s
         while (remaining := deadline - time.monotonic()) > 0:
             if stop_timer.wait(min(remaining, 0.25)):
                 return
         injected.update(inject_fault(fault_target, mode, engine))
         injected["at_offset_s"] = round(injected["at_monotonic"] - t_zero, 3)
+        # Offset from the generator's first sample, i.e. how much steady state
+        # actually preceded the fault. This is the number `inject_at_s` promises
+        # and the one `baseline_tps` is computed over.
+        injected["at_steady_state_offset_s"] = round(
+            injected["at_monotonic"] - origin, 3
+        )
         print(
             f"  [{injected['at_offset_s']:6.1f}s] fault injected on {fault_target.host} "
-            f"({mode}); {injected['detail']}",
+            f"({mode}); {injected['detail']} "
+            f"({injected['at_steady_state_offset_s']:.1f}s into steady state)",
             flush=True,
         )
 
     stop_timer = threading.Event()
+    #: Set the instant the generator's first interval arrives; the injection
+    #: timer's origin. A one-element list because the timer thread reads it and
+    #: the parser loop writes it.
+    first_sample_seen = threading.Event()
+    steady_state_at: list[float] = [0.0]
     parser = WorkloadParser(strict=True)
     samples: list[Sample] = []
     #: elapsed_s -> harness-clock offset at which that interval was observed.
@@ -647,6 +823,11 @@ def run(
 
                     for arrived, tick in group_timed_ticks(feed()):
                         offset = arrived - t_zero
+                        if not first_sample_seen.is_set():
+                            # Steady state has begun; the injection timer starts
+                            # counting from here, not from the harness's epoch.
+                            steady_state_at[0] = arrived
+                            first_sample_seen.set()
                         observed_at[tick.elapsed_s] = offset
                         series.append((offset, tick.total_tps))
                         if tick.errors_cum > 0 and first_error_at is None:
@@ -660,6 +841,10 @@ def run(
                             )
 
             stop_timer.set()
+            # Also release the timer if it is still blocked waiting for a first
+            # sample that is never going to arrive, so the join below cannot
+            # hang for the whole setup budget.
+            first_sample_seen.set()
             timer_thread.join(timeout=5)
 
     audit_result = audit.collect(audit_dsn)
@@ -675,7 +860,7 @@ def run(
 
     avail = (
         availability_rto(audit.attempts, injected["at_monotonic"])
-        if injected
+        if injected.get("at_monotonic") is not None
         else {"availability_rto_s": None, "detail": "fault was never injected"}
     )
 
@@ -732,8 +917,30 @@ def run(
             "figures from this run are not measurements of recovery from steady state"
         )
 
+    if injected.get("landed") is False:
+        # The fault reported a clean non-zero exit: the command ran and refused.
+        # Unlike a transport error (which for `dead` is evidence the fault
+        # landed), this is positive proof it did not, so every resilience figure
+        # below describes an undisturbed cluster. Recorded on the manifest so a
+        # run like this cannot be mistaken for a good one after the fact -- the
+        # 2026-09-08 `dead` run recorded `rc=1` and was otherwise
+        # indistinguishable from a successful measurement.
+        print(
+            f"  ERROR: the {mode!r} fault on {fault_target.host} did not land "
+            f"({injected['detail']}). Every RTO/RPO figure in this run describes "
+            "an UNDISTURBED cluster and must not be quoted as a resilience "
+            "result.",
+            flush=True,
+        )
+        manifest.note(
+            f"FAULT DID NOT LAND: {injected['detail']}. The target kept serving "
+            "throughout; RTO/RPO figures from this run measure an undisturbed "
+            "cluster and are not resilience results"
+        )
+
     events.update(
         {
+            "fault_landed": injected.get("landed"),
             "clock": clock,
             "injected": injected,
             "availability": avail,

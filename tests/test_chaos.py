@@ -190,3 +190,92 @@ def test_two_primaries_is_a_split_brain_and_refuses_rather_than_picking_one():
     with patch("urllib.request.urlopen", side_effect=fake):
         with pytest.raises(ValueError, match="split-brain"):
             resolve_patroni_primary(_TOPO)
+
+
+# --------------------------------------------------------------------------
+# Fault injection has to actually land.
+#
+# The 2026-09-08 chaos runs are the reason these exist. `crdb-gcp-1` is reached
+# over SSH as `ubuntu` while `cockroach` runs as root, so `killall -9 cockroach`
+# returned `Operation not permitted` (rc=1) and the target served uninterrupted
+# for the whole run -- its pid was unchanged afterwards. The harness recorded
+# `"detail": "rc=1"` and produced a complete run directory that passed
+# `validate` and reported "no write interruption detectable", which reads as an
+# excellent resilience result and is in fact a measurement of nothing.
+# `recover` was worse: its payload is backgrounded, so a denied
+# `tailscale down` cannot even be seen in the exit status.
+# --------------------------------------------------------------------------
+
+from crdblab.core import preflight as _preflight
+from crdblab.core.ssh import RemoteResult
+from crdblab.phases.p4_chaos import (
+    check_fault_authorisation,
+    get_payload,
+    inject_fault,
+    preflight_payload,
+)
+
+_TARGET = Node("gcp-1", "crdb-gcp-1", "ubuntu", "gcp", "us-east1", "cloud=gcp,region=us-east1")
+
+
+@pytest.mark.parametrize("mode", ["dead", "recover"])
+@pytest.mark.parametrize("engine", ["cockroachdb", "postgresql"])
+def test_every_fault_payload_is_privileged(mode, engine):
+    """A payload without sudo is silently refused on any non-root SSH user."""
+    assert get_payload(mode, engine).startswith("sudo -n ")
+
+
+def test_dead_payload_kills_the_right_process_per_engine():
+    assert "cockroach" in get_payload("dead", "cockroachdb")
+    assert "patroni postgres" in get_payload("dead", "postgresql")
+
+
+@pytest.mark.parametrize("mode", ["dead", "recover"])
+def test_the_authorisation_probe_is_privileged_and_harmless(mode):
+    """It must need the same rights as the fault while changing nothing."""
+    probe = preflight_payload(mode, "cockroachdb")
+    assert probe.startswith("sudo -n ")
+    # -9 would kill; -0 only asks whether we are allowed to signal.
+    assert "-9" not in probe
+    assert "tailscale down" not in probe
+
+
+def test_a_refused_injection_is_recorded_as_not_landed():
+    denied = RemoteResult(1, "", "cockroach(2553): Operation not permitted")
+    with patch("crdblab.core.ssh.run", return_value=denied):
+        result = inject_fault(_TARGET, "dead", "cockroachdb")
+    assert result["landed"] is False
+    # The reason has to survive into events.json; "rc=1" alone was what made the
+    # original failure unreadable after the fact.
+    assert "Operation not permitted" in result["detail"]
+
+
+def test_a_successful_injection_is_recorded_as_landed():
+    with patch("crdblab.core.ssh.run", return_value=RemoteResult(0, "", "")):
+        result = inject_fault(_TARGET, "dead", "cockroachdb")
+    assert result["landed"] is True
+
+
+def test_a_transport_error_is_not_treated_as_a_refusal():
+    """For a `dead` fault, losing the connection is evidence the fault landed."""
+    with patch("crdblab.core.ssh.run", side_effect=OSError("connection reset")):
+        result = inject_fault(_TARGET, "dead", "cockroachdb")
+    assert result["landed"] is None
+    assert result["landed"] is not False
+
+
+def test_preflight_fails_when_the_fault_would_not_be_permitted():
+    denied = RemoteResult(1, "", "cockroach(2553): Operation not permitted")
+    report = _preflight.PreflightReport()
+    with patch("crdblab.core.ssh.run", return_value=denied):
+        check_fault_authorisation(report, _TARGET, "dead", "cockroachdb")
+    assert not report.ok
+    with pytest.raises(_preflight.PreflightError):
+        report.raise_if_failed()
+
+
+def test_preflight_passes_when_the_fault_would_be_permitted():
+    report = _preflight.PreflightReport()
+    with patch("crdblab.core.ssh.run", return_value=RemoteResult(0, "", "")):
+        check_fault_authorisation(report, _TARGET, "recover", "cockroachdb")
+    assert report.ok

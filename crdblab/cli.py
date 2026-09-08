@@ -500,6 +500,15 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
             return 0
 
         print(f"{run.run_id}  (mode {summary['mode']}, target {summary['target']})")
+        if summary.get("fault_landed") is False:
+            print(
+                "\n*** THE FAULT DID NOT LAND ***\n"
+                f"  the {summary['mode']!r} injection on {summary['target']} was "
+                "refused by the target; it kept serving for the whole run.\n"
+                "  Every figure below therefore describes an undisturbed cluster "
+                "and is not a resilience result.\n"
+                "  See events.json -> injected.detail, and the manifest note."
+            )
         clock = summary["clock_alignment"]
         print(f"\nclock alignment: {clock['method']}")
         print(f"  {clock['detail']}")
