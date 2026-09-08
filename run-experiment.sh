@@ -15,10 +15,17 @@
 #   ./run-experiment.sh --smoke             # harness self-test, ~8 min
 #   ./run-experiment.sh --skip-load         # working set already loaded
 #   ./run-experiment.sh --no-chaos          # phases I-II only, no fault injection
+#   ./run-experiment.sh --engine postgresql # measure the PostgreSQL/Patroni deployment
+#
+# --engine names the engine that is *currently deployed* on the testbed (i.e.
+# whatever `terraform apply -var="database_engine=..."` last stood up). It does
+# not deploy anything: a redeploy replaces every cluster node, so pointing this
+# at an engine that is not actually running just fails the pre-flight checks.
 #
 set -euo pipefail
 
 PROFILE="thesis-extended"
+ENGINE="cockroachdb"
 SKIP_LOAD=0
 RUN_CHAOS=1
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -53,7 +60,7 @@ die()   { printf '\n%sFAILED:%s %s\n' "$R" "$N" "$*" >&2
           exit 1; }
 
 usage() {
-  sed -n '3,18p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '3,24p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
   exit 0
 }
 HAS_ARGS=0
@@ -64,6 +71,7 @@ fi
 while [ $# -gt 0 ]; do
   case "$1" in
     --profile)   PROFILE="${2:?--profile needs a value}"; shift 2 ;;
+    --engine)    ENGINE="${2:?--engine needs a value}"; shift 2 ;;
     --smoke)     PROFILE="smoke"; shift ;;
     --skip-load) SKIP_LOAD=1; shift ;;
     --no-chaos)  RUN_CHAOS=0; shift ;;
@@ -85,6 +93,15 @@ if [ "$HAS_ARGS" -eq 0 ] && [ -t 0 ]; then
     *) PROFILE="thesis-extended" ;;
   esac
 
+  printf "\nWhich engine is currently deployed on the testbed?\n"
+  printf "  1) cockroachdb (default)\n"
+  printf "  2) postgresql  (Patroni HA)\n"
+  read -p "Choice [1-2, default=1]: " engine_choice
+  case "$engine_choice" in
+    2) ENGINE="postgresql" ;;
+    *) ENGINE="cockroachdb" ;;
+  esac
+
   read -p "Skip data load? (y/N): " skip_choice
   if [[ "$skip_choice" =~ ^[Yy] ]]; then
     SKIP_LOAD=1
@@ -96,6 +113,18 @@ if [ "$HAS_ARGS" -eq 0 ] && [ -t 0 ]; then
   fi
   printf "\n"
 fi
+
+case "$ENGINE" in
+  cockroachdb|postgresql) ;;
+  *) die "unknown engine: $ENGINE (expected 'cockroachdb' or 'postgresql')" ;;
+esac
+
+# --engine is a TOP-LEVEL crdblab flag and argparse rejects it after the
+# subcommand name, so it is spliced in before the subcommand rather than
+# appended (see CLAUDE.md / crdblab/cli.py). Only `bench` and `chaos run` read
+# it; `net probe`, `validate`, `analyze` and `report figures` do not, so it is
+# not passed to them.
+ENGINE_ARGS=(--engine "$ENGINE")
 
 mkdir -p "$LOG_DIR"
 LOG="$LOG_DIR/experiment-$(date -u +%Y%m%dT%H%M%SZ).log"
@@ -114,7 +143,7 @@ remote() {  # remote <user> <host> <command>
 started_at=$(date -u +%s)
 
 printf '%scrdblab — full experiment%s\n' "$B" "$N"
-note "profile $PROFILE   log $LOG"
+note "profile $PROFILE   engine $ENGINE   log $LOG"
 
 # --- 1. the workstation -----------------------------------------------------
 
@@ -163,11 +192,35 @@ PYEOF
 ) || die "could not resolve topology from crdblab.topology"
 ok "gateway $GW_USER@$GW_HOST ($GW_REGION)   client $CL_USER@$CL_HOST"
 
+# Every cluster member, gateway first, as "user host" pairs. Resolved once here
+# because both the PostgreSQL health check (below) and the dead-mode restore
+# backstop need to address nodes other than the gateway, and the SSH user
+# differs per provider (root on Linode, ubuntu on GCP and Azure) -- pairing them
+# at the source is what stops a `ssh $SOME_USER@$OTHER_HOST` mismatch.
+CLUSTER_NODES="$("$PY" - <<'NODEEOF'
+from crdblab.topology import DEFAULT_TOPOLOGY as t
+ordered = [t.gateway] + [n for n in t.nodes if not n.gateway]
+for n in ordered:
+    print(n.user, n.host)
+NODEEOF
+)" || die "could not resolve the cluster node list"
+
 # The gateway is declared in crdblab/topology.py, but DB_URI is hand-written in
 # .env and nothing else reconciles the two. For PostgreSQL, this will usually point
 # to 127.0.0.1 (local HAProxy), while for CockroachDB it will point to the cluster gateway.
 DB_HOST="$(printf '%s' "$DB_URI" | sed -E 's|^[a-z]+://||; s|^[^@/]*@||; s|[:/?].*$||')"
 ok "DB_URI names host $DB_HOST"
+
+# Not fatal: DB_URI feeds loading and `crdblab capture` only, never a measured
+# phase. But for PostgreSQL the only endpoint that follows Patroni's leader is
+# the client node's local HAProxy, and a URI pinned at one cluster member will
+# start failing writes the moment the leader moves -- which a chaos run makes
+# it do on purpose.
+if [ "$ENGINE" = "postgresql" ] && [ "$DB_HOST" != "127.0.0.1" ]; then
+  warn "engine is postgresql but DB_URI names $DB_HOST, not 127.0.0.1 (the client node's HAProxy)."
+  note "loading and 'crdblab capture' will not follow a Patroni failover; expected"
+  note "postgresql://root@127.0.0.1:5000/ycsb?sslmode=disable (see instructions.md section 6)."
+fi
 
 # The seed and row count are read from the profile the sweep will actually use.
 # Hardcoding them here would create a second source of truth for the one
@@ -207,6 +260,8 @@ step "Checking the testbed"
 remote "$GW_USER" "$GW_HOST" true || die "cannot ssh to the gateway $GW_HOST"
 remote "$CL_USER" "$CL_HOST" true || die "cannot ssh to the client $CL_HOST"
 ok "ssh to gateway and client"
+
+if [ "$ENGINE" = "cockroachdb" ]; then
 
 LIVE=$(remote "$GW_USER" "$GW_HOST" \
   "cockroach node status --insecure --host=$GW_HOST:26257 --format=csv 2>/dev/null | tail -n +2 | wc -l" \
@@ -250,6 +305,58 @@ case "$LEASE" in
   lease preference, so leaseholders may sit outside the fast triangle.
   Re-run 'terraform apply' or apply the zone configuration by hand (D7)." ;;
 esac
+
+else
+
+# PostgreSQL/Patroni. `cockroach node status` and `SHOW ZONE CONFIGURATION`
+# do not exist here, and the CockroachDB-specific pre-flight checks
+# (leaseholder placement, server-config capture) are skipped inside the harness
+# too (bench.py). The equivalent question -- "are all five members up, and is
+# exactly one of them primary?" -- is answered by Patroni's own REST API on
+# :8008, which is also what p4_chaos.resolve_patroni_primary() consults
+# immediately before scheduling a fault. Asked from the client node so that a
+# node unreachable from the workstation is not mistaken for a node that is down.
+PG_LIVE=0
+PG_PRIMARIES=""
+while read -r _u h; do
+  [ -n "$h" ] || continue
+  code="$(remote "$CL_USER" "$CL_HOST" \
+    "curl -s -m 5 -o /dev/null -w '%{http_code}' http://$h:8008/health" 2>/dev/null || echo 000)"
+  if [ "$code" = "200" ]; then
+    PG_LIVE=$((PG_LIVE + 1))
+  else
+    note "$h: patroni /health returned $code"
+  fi
+  code="$(remote "$CL_USER" "$CL_HOST" \
+    "curl -s -m 5 -o /dev/null -w '%{http_code}' http://$h:8008/primary" 2>/dev/null || echo 000)"
+  [ "$code" = "200" ] && PG_PRIMARIES="$PG_PRIMARIES $h"
+done <<< "$CLUSTER_NODES"
+
+[ "$PG_LIVE" = "5" ] || die "patroni reports $PG_LIVE healthy member(s), expected 5.
+  If a previous 'dead' run left a node down, bring it back with
+  'sudo -n systemctl start patroni' on that node (see instructions.md)."
+ok "5 patroni members healthy"
+
+# Nothing in bootstrap-patroni.tftpl pins the leader the way CockroachDB's
+# lease_preferences biases the leaseholder onto gcp-1, so which node is primary
+# is not knowable in advance and is deliberately not asserted to be any
+# particular one. What must hold is that there is exactly one: zero means no
+# leader has been elected and every write fails, more than one means the REST
+# answers disagree and the fault target cannot be resolved -- the same condition
+# resolve_patroni_primary() refuses to guess through.
+PG_PRIMARY_COUNT="$(printf '%s' "$PG_PRIMARIES" | wc -w | tr -d ' ')"
+case "$PG_PRIMARY_COUNT" in
+  1) ok "patroni primary:$PG_PRIMARIES" ;;
+  0) die "no patroni member answers 200 on :8008/primary -- no leader has been elected.
+  Check 'patronictl list' and etcd on the cluster nodes; every write fails in
+  this state, and 'crdblab chaos run' would have no fault target to resolve." ;;
+  *) die "$PG_PRIMARY_COUNT patroni members answer 200 on :8008/primary:$PG_PRIMARIES
+  That is a split brain as far as this harness can tell. Resolve it before
+  measuring -- p4_chaos.resolve_patroni_primary() refuses to guess between them,
+  and a benchmark taken across two primaries is not a measurement of anything." ;;
+esac
+
+fi
 
 # --- 4. working set ---------------------------------------------------------
 
@@ -314,9 +421,22 @@ load_data() {
 }
 
 count_rows() {
-  try_each_host "row count" \
-    "cockroach sql --url '$URI_PLACEHOLDER' --format=csv -e 'SELECT count(*) FROM ycsb.usertable;' 2>/dev/null | tail -1" \
-    | tr -d ' \r'
+  # `cockroach sql` is a CockroachDB client; it is not a general postgres
+  # client and does not speak to a Patroni cluster. psql is installed on the
+  # client node by bootstrap-client.tftpl for exactly this reason, and is what
+  # p4_chaos.py already uses to create the RPO audit table on PostgreSQL. The
+  # table is `ycsb.usertable` on CockroachDB (database.table) and `usertable`
+  # in the public schema of database `ycsb` on PostgreSQL, which the DSN
+  # already selects.
+  if [ "$ENGINE" = "postgresql" ]; then
+    try_each_host "row count" \
+      "psql '$URI_PLACEHOLDER' -tAc 'SELECT count(*) FROM usertable;' 2>/dev/null | tail -1" \
+      | tr -d ' \r'
+  else
+    try_each_host "row count" \
+      "cockroach sql --url '$URI_PLACEHOLDER' --format=csv -e 'SELECT count(*) FROM ycsb.usertable;' 2>/dev/null | tail -1" \
+      | tr -d ' \r'
+  fi
 }
 
 if [ "$SKIP_LOAD" -eq 1 ]; then
@@ -344,69 +464,113 @@ phase() {  # phase <label> <crdblab args...>
 }
 
 phase "Phase I — network substrate"        net probe    --profile "$PROFILE"
-phase "Phase II — benchmark, five-node cluster" bench --profile "$PROFILE"
+phase "Phase II — benchmark, five-node cluster" "${ENGINE_ARGS[@]}" bench --profile "$PROFILE"
 
 if [ "$RUN_CHAOS" -eq 1 ]; then
-  phase "Phase III — heal-able partition"  chaos run --mode recover --profile "$PROFILE"
+  phase "Phase III — heal-able partition"  "${ENGINE_ARGS[@]}" chaos run --mode recover --profile "$PROFILE"
 
   # `dead` runs last because it leaves the target down. The harness does not
   # restore it: the fault is real, and restarting is an operator action.
-  phase "Phase IV — process kill"          chaos run --mode dead    --profile "$PROFILE"
+  phase "Phase IV — process kill"          "${ENGINE_ARGS[@]}" chaos run --mode dead    --profile "$PROFILE"
 
   # The chaos phase now restores the target itself, immediately after it has
   # finished deriving every artefact, and records the restart in events.json.
   # This block stays as a backstop for the case where the phase could not do it
   # -- it aborted, or the operator ran `crdblab chaos run` by hand from an older
   # revision -- and is a no-op when the node is already back.
-  step "Confirming $CT_HOST is back"
-  # CockroachDB is started by cloud-init with --background, not as a systemd
-  # unit, so there is no service to start and a reboot would not bring it back.
-  # The memory flags are NOT optional: omitting them takes the 128 MiB default
-  # and silently reintroduces the block-cache asymmetry of D9.
-  #
-  # The three redirections on the REMOTE side of the command are what stop this
-  # step from hanging, and they are not the same thing as the local
-  # `>/dev/null 2>&1` after it. `--background` forks cockroach and returns, but
-  # the forked process inherits the remote shell's stdout and stderr -- which are
-  # the SSH channel itself. ssh does not close a session while any process still
-  # holds those pipes open, so it waits for the *database* to exit: the restore
-  # blocks until the connection eventually times out, and a sweep that has
-  # already finished measuring appears to hang for tens of minutes at the last
-  # step. Observed on 2026-09-05, where it added ~50 minutes to a 75-minute run.
-  # Redirecting the remote fds detaches the daemon from the channel so ssh can
-  # return immediately. Local redirection cannot do this; it only discards what
-  # the client prints.
-  # `sudo -n` is required, not defensive: /var/lib/cockroach is root-owned and
-  # $CT_USER is `ubuntu` on the GCP and Azure nodes, so an unprivileged
-  # `cockroach start` cannot open the store. Same omission that made
-  # `killall -9 cockroach` a silent no-op before 081437c.
-  remote "$CT_USER" "$CT_HOST" "TS_IP=\$(tailscale ip -4); sudo -n cockroach start --insecure \
-      --store=/var/lib/cockroach \
-      --listen-addr=\$TS_IP:26257 --advertise-addr=\$TS_IP:26257 \
-      --locality=$CT_LOCALITY \
-      --cache=0.25 --max-sql-memory=0.25 \
-      --join=$JOIN_HOST:26257 --background </dev/null >/dev/null 2>&1" >/dev/null 2>&1 || true
+  if [ "$ENGINE" = "cockroachdb" ]; then
 
-  # Now that the restore returns promptly, the poll has to do its own waiting.
-  # It previously inherited the hang as an accidental grace period: six
-  # back-to-back status calls take about ten seconds, which is less than a node
-  # needs to rejoin and be marked live, so without a sleep this would report "has
-  # not rejoined" on a node that was merely still starting.
+    step "Confirming $CT_HOST is back"
+    # CockroachDB is started by cloud-init with --background, not as a systemd
+    # unit, so there is no service to start and a reboot would not bring it back.
+    # The memory flags are NOT optional: omitting them takes the 128 MiB default
+    # and silently reintroduces the block-cache asymmetry of D9.
+    #
+    # The three redirections on the REMOTE side of the command are what stop this
+    # step from hanging, and they are not the same thing as the local
+    # `>/dev/null 2>&1` after it. `--background` forks cockroach and returns, but
+    # the forked process inherits the remote shell's stdout and stderr -- which are
+    # the SSH channel itself. ssh does not close a session while any process still
+    # holds those pipes open, so it waits for the *database* to exit: the restore
+    # blocks until the connection eventually times out, and a sweep that has
+    # already finished measuring appears to hang for tens of minutes at the last
+    # step. Observed on 2026-09-05, where it added ~50 minutes to a 75-minute run.
+    # Redirecting the remote fds detaches the daemon from the channel so ssh can
+    # return immediately. Local redirection cannot do this; it only discards what
+    # the client prints.
+    # `sudo -n` is required, not defensive: /var/lib/cockroach is root-owned and
+    # $CT_USER is `ubuntu` on the GCP and Azure nodes, so an unprivileged
+    # `cockroach start` cannot open the store. Same omission that made
+    # `killall -9 cockroach` a silent no-op before 081437c.
+    remote "$CT_USER" "$CT_HOST" "TS_IP=\$(tailscale ip -4); sudo -n cockroach start --insecure \
+        --store=/var/lib/cockroach \
+        --listen-addr=\$TS_IP:26257 --advertise-addr=\$TS_IP:26257 \
+        --locality=$CT_LOCALITY \
+        --cache=0.25 --max-sql-memory=0.25 \
+        --join=$JOIN_HOST:26257 --background </dev/null >/dev/null 2>&1" >/dev/null 2>&1 || true
+
+    # Now that the restore returns promptly, the poll has to do its own waiting.
+    # It previously inherited the hang as an accidental grace period: six
+    # back-to-back status calls take about ten seconds, which is less than a node
+    # needs to rejoin and be marked live, so without a sleep this would report "has
+    # not rejoined" on a node that was merely still starting.
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+      sleep 5
+      # Asked of a SURVIVOR, never of $GW_HOST. The gateway is the chaos target
+      # on this testbed, so polling it asks the node that was just killed whether
+      # it is alive: the query fails, `wc -l` returns 0, and the step reported
+      # "has not rejoined (0 live)" on every dead-mode run regardless of the
+      # truth. Observed 2026-09-08.
+      LIVE=$(remote "$JOIN_USER" "$JOIN_HOST" \
+        "cockroach node status --insecure --host=$JOIN_HOST:26257 --format=csv 2>/dev/null | tail -n +2 | wc -l" \
+        | tr -d ' ' || echo 0)
+      [ "$LIVE" = "5" ] && break
+    done
+    [ "$LIVE" = "5" ] \
+      && ok "$CT_HOST rejoined; 5 nodes live" \
+      || warn "$CT_HOST has not rejoined ($LIVE live). Restart it before measuring again."
+
+  else
+
+  # PostgreSQL/Patroni. The chaos target is NOT $CT_HOST here: nothing pins
+  # Patroni's leader, so p4_chaos.resolve_patroni_primary() picks whichever node
+  # actually answered as primary immediately before the fault, and that node is
+  # only recorded in the run's events.json. This backstop therefore sweeps every
+  # member rather than one named node -- which is also what makes it a no-op
+  # when the phase already restored the target itself.
+  step "Confirming every patroni member is back"
+  while read -r u h; do
+    [ -n "$h" ] || continue
+    code="$(remote "$CL_USER" "$CL_HOST" \
+      "curl -s -m 5 -o /dev/null -w '%{http_code}' http://$h:8008/health" 2>/dev/null || echo 000)"
+    [ "$code" = "200" ] && continue
+    note "$h: /health returned $code, starting patroni"
+    # Unlike CockroachDB (started by cloud-init with --background, no unit),
+    # Patroni is a systemd service on these nodes, so there is a unit to start
+    # and no daemon to detach from the SSH channel. `sudo -n` is still
+    # required: the SSH user is `ubuntu` on the GCP and Azure nodes and the
+    # unit is root-owned -- the same omission that made `killall -9 cockroach`
+    # a silent no-op before 081437c. This is the identical payload
+    # p4_chaos.restore_target() uses for this engine.
+    remote "$u" "$h" "sudo -n systemctl start patroni" >/dev/null 2>&1 || true
+  done <<< "$CLUSTER_NODES"
+
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
     sleep 5
-    # Asked of a SURVIVOR, never of $GW_HOST. The gateway is the chaos target
-    # on this testbed, so polling it asks the node that was just killed whether
-    # it is alive: the query fails, `wc -l` returns 0, and the step reported
-    # "has not rejoined (0 live)" on every dead-mode run regardless of the
-    # truth. Observed 2026-09-08.
-    LIVE=$(remote "$JOIN_USER" "$JOIN_HOST" \
-      "cockroach node status --insecure --host=$JOIN_HOST:26257 --format=csv 2>/dev/null | tail -n +2 | wc -l" \
-      | tr -d ' ' || echo 0)
-    [ "$LIVE" = "5" ] && break
+    PG_LIVE=0
+    while read -r _u h; do
+      [ -n "$h" ] || continue
+      code="$(remote "$CL_USER" "$CL_HOST" \
+        "curl -s -m 5 -o /dev/null -w '%{http_code}' http://$h:8008/health" 2>/dev/null || echo 000)"
+      [ "$code" = "200" ] && PG_LIVE=$((PG_LIVE + 1))
+    done <<< "$CLUSTER_NODES"
+    [ "$PG_LIVE" = "5" ] && break
   done
-  [ "$LIVE" = "5" ] \
-    && ok "$CT_HOST rejoined; 5 nodes live" \
-    || warn "$CT_HOST has not rejoined ($LIVE live). Restart it before measuring again."
+  [ "$PG_LIVE" = "5" ] \
+    && ok "all 5 patroni members healthy" \
+    || warn "$PG_LIVE/5 patroni members healthy. Restart the rest before measuring again."
+
+  fi
 fi
 
 # --- 6. validate ------------------------------------------------------------

@@ -29,13 +29,29 @@ continuing with a testbed that is not fit to be measured.
 ./run-experiment.sh --smoke        # ~8 min end-to-end harness self-test
 ./run-experiment.sh --skip-load    # working set already loaded
 ./run-experiment.sh --no-chaos     # network substrate and benchmark only
+./run-experiment.sh --engine postgresql   # the deployed engine is PostgreSQL/Patroni
 ```
 
-`run-experiment.sh` does not itself take an `--engine` flag; it always drives
-`crdblab bench` with the default engine, CockroachDB. To measure the
-PostgreSQL/Patroni side of the comparison, invoke `crdblab` directly with
-`--engine postgresql` per §6, "Benchmark" — the top-level flag has to precede
-the subcommand.
+Run with no arguments on a terminal, it asks for the profile, the engine, and
+whether to load data and run chaos, instead of taking them as flags.
+
+`--engine {cockroachdb,postgresql}` (default `cockroachdb`) tells the script
+**which engine is currently deployed** — it does not deploy or switch anything.
+Changing engines is `terraform apply -var="database_engine=..."` (§2), which
+replaces every cluster node; pointing `--engine` at an engine that is not
+actually running just fails the checks below. One invocation measures one
+engine, so the comparison is two invocations (one per deployment) followed by
+`crdblab analyze engine-comparison --crdb <run> --pg <run>` by hand (§6).
+
+The flag also changes what the script checks and repairs around the phases,
+since several of those steps are CockroachDB-specific: with
+`--engine postgresql` the five-live-nodes and `lease_preferences` checks are
+replaced by a poll of every member's Patroni REST API on `:8008/health` plus an
+assertion that exactly one member answers `:8008/primary`; the row count is
+taken with `psql` rather than `cockroach sql --url`; and the post-`dead`
+restore sweeps every member with `sudo -n systemctl start patroni` instead of
+restarting `chaos.target`, because Patroni's leader is not pinned and the node
+that was actually killed is resolved at fault time (§6, "Chaos").
 
 The rest of this document explains what each step does and how to run them by
 hand, which is what you want when something fails or when you are changing the
@@ -550,8 +566,10 @@ exactly what differs, before reaching for the flag — the flag downgrades the
 refusal to a recorded warning rather than fixing the underlying mismatch.
 
 `run-experiment.sh` does not run `analyze engine-comparison` itself: it
-benchmarks one engine per invocation (§ "The short version"), so run it once
-per engine and then invoke `engine-comparison` by hand with both run ids.
+measures one engine per invocation (§ "The short version"), so run it once per
+deployment — `./run-experiment.sh` for CockroachDB, `./run-experiment.sh
+--engine postgresql` after the redeploy — and then invoke `engine-comparison`
+by hand with both run ids.
 
 `engine-comparison` prints the same-concurrency delta under a **NOT A RESULT**
 banner. That is intentional: refuting the intuitive comparison is more useful

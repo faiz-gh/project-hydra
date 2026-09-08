@@ -26,8 +26,8 @@ verified against that run, not just against the `smoke` profile. The
 PostgreSQL phase has **not been run at all** in this project's history yet.
 Testing it needs, in order: (1) `terraform apply -var="database_engine=postgresql"`
 in `terraform/` — this **replaces every cluster node**, it is not both engines
-running at once; (2) the manual command sequence in `instructions.md` §6,
-since `run-experiment.sh` never touches PostgreSQL (see its own entry below);
+running at once; (2) either `./run-experiment.sh --engine postgresql` or the
+manual command sequence in `instructions.md` §6;
 (3) `crdblab analyze engine-comparison --crdb <run> --pg <run>` to compare.
 Two things are implemented but specifically **untested** because of this:
 `p4_chaos.py::restore_target`'s `engine == "postgresql"` branch
@@ -107,6 +107,7 @@ There is no build step; this is a pure-Python CLI package (`crdblab = "crdblab.c
 ```bash
 ./run-experiment.sh              # full sweep (~75 min) against a live testbed
 ./run-experiment.sh --smoke      # harness self-test (~8 min)
+./run-experiment.sh --engine postgresql   # the deployed engine is PostgreSQL/Patroni
 ```
 
 This drives `terraform` (provisioning), then the CLI phases in order:
@@ -114,9 +115,25 @@ This drives `terraform` (provisioning), then the CLI phases in order:
 → `crdblab analyze ...` → `crdblab report figures`. The ordering is
 load-bearing (each phase consumes artefacts the previous one produced), not
 conventional — see `instructions.md` §6 before reordering anything.
-`run-experiment.sh` only ever benchmarks the default engine (CockroachDB) —
-it takes no `--engine` flag; to measure PostgreSQL you invoke `crdblab
---engine postgresql bench ...`/`chaos run ...` by hand per `instructions.md`.
+`run-experiment.sh` takes `--engine {cockroachdb,postgresql}` (default
+`cockroachdb`, also asked for by its interactive prompt when it is run with no
+arguments on a TTY). It **names the engine already deployed** on the testbed —
+it does not deploy anything, since switching engines is a `terraform apply
+-var="database_engine=..."` that replaces every cluster node. One invocation
+measures one engine; run it once per engine and then compare with `crdblab
+analyze engine-comparison --crdb <run> --pg <run>`, which the script never runs
+itself. The flag is spliced in *before* the subcommand (`crdblab --engine ...
+bench`) because it is top-level, and only `bench` and `chaos run` are given it.
+It also branches the script's own pre-flight and repair steps, which are
+otherwise CockroachDB-only: node-liveness and `lease_preferences` become a poll
+of every member's Patroni REST API (`:8008/health`, plus an assertion that
+exactly one answers `:8008/primary` — nothing pins Patroni's leader, so *which*
+node is not asserted); the row count switches from `cockroach sql --url` to
+`psql`, which cannot be skipped because `cockroach sql` is not a general
+postgres client; and the dead-mode restore backstop becomes `sudo -n systemctl
+start patroni` swept across every member rather than aimed at `chaos.target`,
+because for PostgreSQL the fault target is resolved live and is only recorded in
+the run's `events.json`.
 It also `export PYTHONUNBUFFERED=1`s before running anything, and `load_data`/
 `count_rows` inside it build their own list of single-host candidate URIs from
 `crdblab/topology.py` rather than trusting `DB_URI`'s host segment verbatim —
