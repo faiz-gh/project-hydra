@@ -29,6 +29,12 @@ chaos:
   target: gcp-1
   recovery_threshold: 0.80
 
+  # The self-test only has to prove the post-fault path runs; it is not
+  # resolving a recovery, so it does not pay for the thesis profile's 60s of
+  # post-fault observation. Left explicit rather than inherited so that this
+  # run staying short is a decision, not an accident of the default.
+  min_post_fault_s: 20
+
   # The probe runs in the self-test too, and deliberately so: it opens
   # connections and issues DDL against the cluster, and a smoke test that skipped
   # it would not be exercising the path the real run takes. Two workers rather

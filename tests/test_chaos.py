@@ -279,3 +279,96 @@ def test_preflight_passes_when_the_fault_would_be_permitted():
     with patch("crdblab.core.ssh.run", return_value=RemoteResult(0, "", "")):
         check_fault_authorisation(report, _TARGET, "recover", "cockroachdb")
     assert report.ok
+
+
+# --------------------------------------------------------------------------
+# The post-fault series is the measurement, so the run has to outlive the
+# fault. Two separate things guarantee it, and the 2026-09-08 thesis run shows
+# why both are needed: the generator was given 120s of post-fault time and used
+# 7.1s of it, because `cockroach workload run` exits on its first failed
+# statement and the fault is a failed statement.
+# --------------------------------------------------------------------------
+
+from crdblab.config import ChaosSpec
+from crdblab.phases.p4_chaos import generator_duration_s, restore_target
+
+
+def test_a_profile_that_already_observes_long_enough_is_left_alone():
+    chaos = ChaosSpec(duration_s=180, inject_at_s=60, min_post_fault_s=60)
+    assert generator_duration_s(chaos) == 180
+
+
+def test_a_run_too_short_to_observe_the_recovery_is_extended():
+    """inject_at_s is measured from the first sample, so duration_s alone
+    cannot guarantee anything about what follows the fault."""
+    chaos = ChaosSpec(duration_s=100, inject_at_s=90, min_post_fault_s=60)
+    assert generator_duration_s(chaos) == 150
+
+
+def test_the_window_is_never_shortened():
+    chaos = ChaosSpec(duration_s=600, inject_at_s=60, min_post_fault_s=60)
+    assert generator_duration_s(chaos) == 600
+
+
+# --------------------------------------------------------------------------
+# Restoring the dead target. Two mistakes this pins, both real: an
+# unprivileged `cockroach start` cannot open the root-owned store, and asking
+# the fault target whether it is alive always answers "no".
+# --------------------------------------------------------------------------
+
+_FIVE = Topology(nodes=tuple(
+    Node(f"n{i}", f"host{i}", "ubuntu", "gcp", "us-east1", "cloud=gcp,region=us-east1")
+    for i in range(5)
+))
+
+
+def _restore_with(target_name="n0", engine="cockroachdb", live="5"):
+    calls = []
+
+    def fake_run(node, cmd, timeout=None):
+        calls.append((node.name, cmd))
+        return RemoteResult(0, live if "node status" in cmd else "", "")
+
+    with patch("crdblab.core.ssh.run", side_effect=fake_run):
+        with patch("time.sleep"):
+            result = restore_target(
+                _FIVE.get(target_name), _FIVE, engine, timeout_s=1, poll_interval_s=0.01
+            )
+    return result, calls
+
+
+def test_the_restart_is_privileged():
+    """/var/lib/cockroach is root-owned and the SSH user is not root."""
+    _, calls = _restore_with()
+    start = next(cmd for name, cmd in calls if "cockroach start" in cmd)
+    assert "sudo -n cockroach start" in start
+
+
+def test_the_restored_node_does_not_try_to_rejoin_via_itself():
+    _, calls = _restore_with(target_name="n0")
+    start = next(cmd for name, cmd in calls if "cockroach start" in cmd)
+    join = start.split("--join=")[1].split()[0]
+    assert "host0:" not in join
+    assert "host1:" in join
+
+
+def test_liveness_is_read_from_a_survivor_not_from_the_fault_target():
+    """Polling the killed node always answers 0 live, which is what made
+    run-experiment.sh warn on every successful dead-mode run."""
+    result, calls = _restore_with(target_name="n0")
+    status_nodes = {name for name, cmd in calls if "node status" in cmd}
+    assert status_nodes and "n0" not in status_nodes
+    assert result["witness"] != "n0"
+    assert result["rejoined"] is True
+
+
+def test_a_node_that_never_comes_back_is_reported_as_not_rejoined():
+    result, _ = _restore_with(live="4")
+    assert result["rejoined"] is False
+    assert result["nodes_live"] == 4
+
+
+def test_postgresql_restarts_patroni_rather_than_cockroach():
+    _, calls = _restore_with(engine="postgresql")
+    assert any("systemctl start patroni" in cmd for _, cmd in calls)
+    assert not any("cockroach start" in cmd for _, cmd in calls)

@@ -348,7 +348,12 @@ if [ "$RUN_CHAOS" -eq 1 ]; then
   # restore it: the fault is real, and restarting is an operator action.
   phase "Phase IV — process kill"          chaos run --mode dead    --profile "$PROFILE"
 
-  step "Restoring $CT_HOST"
+  # The chaos phase now restores the target itself, immediately after it has
+  # finished deriving every artefact, and records the restart in events.json.
+  # This block stays as a backstop for the case where the phase could not do it
+  # -- it aborted, or the operator ran `crdblab chaos run` by hand from an older
+  # revision -- and is a no-op when the node is already back.
+  step "Confirming $CT_HOST is back"
   # CockroachDB is started by cloud-init with --background, not as a systemd
   # unit, so there is no service to start and a reboot would not bring it back.
   # The memory flags are NOT optional: omitting them takes the 128 MiB default
@@ -366,7 +371,11 @@ if [ "$RUN_CHAOS" -eq 1 ]; then
   # Redirecting the remote fds detaches the daemon from the channel so ssh can
   # return immediately. Local redirection cannot do this; it only discards what
   # the client prints.
-  remote "$CT_USER" "$CT_HOST" "TS_IP=\$(tailscale ip -4); cockroach start --insecure \
+  # `sudo -n` is required, not defensive: /var/lib/cockroach is root-owned and
+  # $CT_USER is `ubuntu` on the GCP and Azure nodes, so an unprivileged
+  # `cockroach start` cannot open the store. Same omission that made
+  # `killall -9 cockroach` a silent no-op before 081437c.
+  remote "$CT_USER" "$CT_HOST" "TS_IP=\$(tailscale ip -4); sudo -n cockroach start --insecure \
       --store=/var/lib/cockroach \
       --listen-addr=\$TS_IP:26257 --advertise-addr=\$TS_IP:26257 \
       --locality=$CT_LOCALITY \
@@ -380,8 +389,13 @@ if [ "$RUN_CHAOS" -eq 1 ]; then
   # not rejoined" on a node that was merely still starting.
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
     sleep 5
-    LIVE=$(remote "$GW_USER" "$GW_HOST" \
-      "cockroach node status --insecure --host=$GW_HOST:26257 --format=csv 2>/dev/null | tail -n +2 | wc -l" \
+    # Asked of a SURVIVOR, never of $GW_HOST. The gateway is the chaos target
+    # on this testbed, so polling it asks the node that was just killed whether
+    # it is alive: the query fails, `wc -l` returns 0, and the step reported
+    # "has not rejoined (0 live)" on every dead-mode run regardless of the
+    # truth. Observed 2026-09-08.
+    LIVE=$(remote "$CT_USER" "$JOIN_HOST" \
+      "cockroach node status --insecure --host=$JOIN_HOST:26257 --format=csv 2>/dev/null | tail -n +2 | wc -l" \
       | tr -d ' ' || echo 0)
     [ "$LIVE" = "5" ] && break
   done

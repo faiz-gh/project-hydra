@@ -100,6 +100,14 @@ class ChaosSpec:
     target: str = "gcp-1"
     recovery_threshold: float = 0.80
     recovery_hold_s: int = 10
+    #: The generator must keep sampling for at least this long *after* the
+    #: fault. ``duration_s`` alone cannot guarantee it: ``inject_at_s`` is
+    #: measured from the generator's first sample, so a profile that moved the
+    #: injection later without lengthening the run would silently shrink the
+    #: post-fault series -- and the post-fault series is the measurement. The
+    #: run is extended to ``inject_at_s + min_post_fault_s`` when
+    #: ``duration_s`` is shorter than that; it is never shortened.
+    min_post_fault_s: int = 60
     #: How long pre-flight may wait for ``ycsb``'s leaseholders to return to the
     #: gateway's region before refusing to measure. A chaos run that follows
     #: another chaos run starts against a cluster whose lease placement is still

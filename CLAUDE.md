@@ -307,6 +307,40 @@ testbed, not something touched by most code changes to `crdblab/`.
   the run reports that the fault was never injected instead of hanging.
   `events.json` carries both `at_offset_s` (from the epoch, unchanged) and
   the new `at_steady_state_offset_s`.
+- **The chaos generator runs with `--tolerate-errors`; the bench sweep must
+  not.** Without it `cockroach workload run` *exits* on its first failed
+  statement, and during a chaos run the first failed statement is the fault.
+  The 2026-09-08 `dead` run aborted 8 s after injection with
+  `result is ambiguous ... connection refused (SQLSTATE 40003)`, leaving three
+  zero-throughput samples and then nothing: 7.1 s of post-fault series out of
+  the 120 s the profile allowed. Recovery is unobservable when the observer
+  dies with the cluster, so `t_recovered_offset_s` and `performance_rto_s`
+  could never be anything but null, and the figures looked like a permanent
+  collapse. Do **not** add the flag to `bench.py` -- nothing is supposed to
+  fault during a benchmark, so there an error must fail the run loudly instead
+  of being absorbed into a throughput average.
+- **The generator's run length is `generator_duration_s(chaos)`, not
+  `chaos.duration_s`.** `inject_at_s` is measured from the generator's first
+  sample, so `duration_s` alone guarantees nothing about how much series
+  follows the fault; the run is extended to
+  `inject_at_s + min_post_fault_s` (default 60 s) when it would otherwise be
+  shorter, and never shortened. `smoke` sets `min_post_fault_s: 20`
+  explicitly, so the self-test staying short is a decision rather than an
+  accident of the default.
+- **`dead` mode now restarts the target itself, after the measurement.** This
+  reverses the earlier "the fault is real, and restarting is an operator
+  action" stance, at the user's request: the node stayed down, the cluster
+  declared it dead, and the testbed was left unfit for the next run.
+  `restore_target()` is called only after every artefact is derived, and
+  records the restart in `events.json` under `restore`, so a reader can always
+  separate what was measured from what was repaired. `recover` mode never
+  comes through it -- its payload heals itself after 45 s, and restarting a
+  node that was never stopped would be a second fault. Two details are
+  load-bearing: the restart needs `sudo -n` (the store is root-owned while the
+  SSH user is `ubuntu`), and liveness must be polled from a **survivor** --
+  `run-experiment.sh` asked `cockroach node status` of `$GW_HOST`, which *is*
+  the chaos target on this testbed, so it reported "has not rejoined (0 live)"
+  after every dead-mode run whether or not the node was back.
 - **The RTO probe runs on `crdb-client-1`, not in the harness process.**
   Where it runs is part of the measurement. From the operator's workstation a
   canary write cost 332 ms median over Tailscale, so eight workers achieved

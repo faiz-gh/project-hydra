@@ -406,6 +406,134 @@ def check_fault_authorisation(
     )
 
 
+def generator_duration_s(chaos: Any) -> int:
+    """How long the generator must run to leave a usable post-fault series.
+
+    ``duration_s`` alone does not guarantee one. ``inject_at_s`` is measured
+    from the generator's *first sample*, not from the harness epoch, so a
+    profile that moves the injection later without lengthening the run silently
+    shrinks the interval the run exists to observe -- and if it shrinks to
+    nothing there is no recovery to find, only a collapse.
+
+    Extended, never shortened: a profile asking for longer than the minimum
+    keeps what it asked for.
+    """
+    return max(chaos.duration_s, chaos.inject_at_s + chaos.min_post_fault_s)
+
+
+def restore_target(
+    node: Node,
+    topo: Topology,
+    engine: str,
+    timeout_s: float = 120.0,
+    poll_interval_s: float = 5.0,
+) -> dict[str, Any]:
+    """Bring the ``dead`` fault target back and confirm it rejoined.
+
+    Called only after every observation is collected and written. That ordering
+    is the whole safety argument: restarting the node is a change to the system
+    under test, so it must not be able to move any number in the run directory.
+    It is reported as its own event rather than folded into the fault's, because
+    "the node came back" is not part of the measurement -- the run measured what
+    happened while it was down.
+
+    ``recover`` mode does not come through here: its payload heals itself after
+    45 s, and restarting a node that was never stopped would be a second fault.
+
+    Two things this has to get right, both learned the hard way on 2026-09-08:
+
+    * **It needs ``sudo``.** ``/var/lib/cockroach`` is root-owned and the SSH
+      user on the GCP and Azure nodes is ``ubuntu``, so an unprivileged
+      ``cockroach start`` cannot open the store -- the same mistake that made
+      ``killall -9 cockroach`` a no-op for three runs.
+    * **Liveness must be read from a survivor.** ``run-experiment.sh`` polled
+      ``cockroach node status`` on the gateway, which for ``chaos.target:
+      gcp-1`` *is* the node that was just killed, so it always reported "0
+      live" and always warned that the node had not rejoined -- even when it
+      had.
+
+    The remote redirections are not decoration either. ``--background`` forks
+    and returns, but the forked process inherits the SSH channel's stdout and
+    stderr, and ssh will not close a session while any process holds those
+    pipes -- so without ``</dev/null >/dev/null 2>&1`` on the *remote* side the
+    call blocks until the database exits. That cost a completed sweep ~50
+    minutes on 2026-09-05.
+    """
+    survivors = [n for n in topo.nodes if n.name != node.name]
+    if not survivors:
+        return {"attempted": False, "detail": "no surviving node to rejoin or query"}
+    witness = survivors[0]
+    join = ",".join(f"{n.host}:{n.sql_port}" for n in survivors)
+
+    if engine == "postgresql":
+        payload = "sudo -n systemctl start patroni"
+    else:
+        payload = (
+            "TS_IP=$(tailscale ip -4); sudo -n cockroach start --insecure "
+            "--store=/var/lib/cockroach "
+            "--listen-addr=$TS_IP:26257 --advertise-addr=$TS_IP:26257 "
+            f"--locality={node.locality} "
+            # Not optional: the default cache is 128 MiB, and starting the
+            # restored node with different memory limits than its peers
+            # reintroduces the block-cache asymmetry of D9 on the next run.
+            "--cache=0.25 --max-sql-memory=0.25 "
+            f"--join={join} --background </dev/null >/dev/null 2>&1"
+        )
+
+    started = time.monotonic()
+    try:
+        result = ssh.run(node, payload, timeout=60)
+        launched = result.returncode == 0
+        detail = f"rc={result.returncode}"
+        stderr = (result.stderr or "").strip()
+        if stderr:
+            detail = f"{detail}: {stderr.splitlines()[0]}"
+    except Exception as exc:  # noqa: BLE001
+        launched = False
+        detail = f"{type(exc).__name__}: {exc}"
+
+    expected = len(topo.nodes)
+    live = 0
+    while time.monotonic() - started < timeout_s:
+        time.sleep(poll_interval_s)
+        try:
+            status = ssh.run(
+                witness,
+                f"cockroach node status --insecure --host={witness.host}:{witness.sql_port} "
+                "--format=csv 2>/dev/null | tail -n +2 | wc -l"
+                if engine != "postgresql"
+                else f"curl -s -o /dev/null -w '%{{http_code}}' http://{node.host}:8008/health",
+                timeout=60,
+            )
+            if engine == "postgresql":
+                live = expected if status.stdout.strip() == "200" else 0
+            else:
+                live = int((status.stdout or "0").strip() or 0)
+        except Exception:  # noqa: BLE001
+            live = 0
+        if live >= expected:
+            break
+
+    rejoined = live >= expected
+    waited = round(time.monotonic() - started, 1)
+    print(
+        f"  restore {node.host}: {'rejoined' if rejoined else 'DID NOT REJOIN'} "
+        f"({live}/{expected} live after {waited:.0f}s); {detail}",
+        flush=True,
+    )
+    return {
+        "attempted": True,
+        "launched": launched,
+        "rejoined": rejoined,
+        "nodes_live": live,
+        "nodes_expected": expected,
+        "waited_s": waited,
+        "witness": witness.name,
+        "detail": detail,
+        "at_utc": utcnow(),
+    }
+
+
 def inject_fault(node: Node, mode: str, engine: str) -> dict[str, Any]:
     """Apply the fault and return when it was applied.
 
@@ -721,13 +849,32 @@ def run(
         f"dispatch into {audit_database}.{chaos.probe_table}"
     )
 
+    run_duration_s = generator_duration_s(chaos)
+    if run_duration_s > chaos.duration_s:
+        manifest.note(
+            f"generator run extended from {chaos.duration_s}s to {run_duration_s}s "
+            f"to keep {chaos.min_post_fault_s}s of observation after a fault at "
+            f"{chaos.inject_at_s}s"
+        )
+
     generator = (
         f"cockroach workload run {spec.generator} "
         f"--workload={spec.ycsb_workload} --seed={spec.seed} "
         f"--insert-count={spec.insert_count} "
         f"--request-distribution={spec.request_distribution} "
         f"--read-freq={spec.read_freq} --update-freq={spec.update_freq} "
-        f"--concurrency={chaos.concurrency} --duration={chaos.duration_s}s "
+        f"--concurrency={chaos.concurrency} --duration={run_duration_s}s "
+        # Without this the generator EXITS on its first failed statement, which
+        # during a chaos run is the fault itself: the 2026-09-08 `dead` run
+        # aborted 8s after injection with "result is ambiguous ... connection
+        # refused (SQLSTATE 40003)", leaving three zero-throughput samples and
+        # then nothing. Recovery is unobservable if the observer dies with the
+        # cluster, so `performance_rto_s` could never be anything but null.
+        #
+        # Deliberately NOT set on the bench sweep. Nothing is supposed to fault
+        # during a benchmark, so there an error must fail the run loudly rather
+        # than be absorbed into a throughput average.
+        f"--tolerate-errors "
         f"--display-every={spec.display_every_s}s '{workload_uri}'"
     )
     manifest.generator_command = generator
@@ -764,7 +911,7 @@ def run(
         # Bounded so a generator that never produces a sample fails the run
         # loudly instead of hanging until the workload's own duration expires
         # with no fault injected at all.
-        setup_budget_s = chaos.duration_s
+        setup_budget_s = run_duration_s
         if not first_sample_seen.wait(timeout=setup_budget_s):
             print(
                 f"  ERROR: the generator produced no sample within "
@@ -823,7 +970,7 @@ def run(
     raw_path = run_dir.raw(f"chaos_{mode}.txt")
 
     print(
-        f"  running {chaos.duration_s}s at C={chaos.concurrency}, injecting at "
+        f"  running {run_duration_s}s at C={chaos.concurrency}, injecting at "
         f"{chaos.inject_at_s}s",
         flush=True,
     )
@@ -849,7 +996,7 @@ def run(
             # A dead-man switch, not the intended lifetime: the probe is stopped
             # by the harness when the measurement ends. Generous on purpose --
             # see PROBE_OVERRUN_S.
-            duration_s=chaos.duration_s + PROBE_OVERRUN_S,
+            duration_s=run_duration_s + PROBE_OVERRUN_S,
             table=chaos.probe_table,
             interval_s=chaos.probe_interval_s,
             workers=chaos.probe_workers,
@@ -1057,6 +1204,30 @@ def run(
                     "gateway_rss_bytes": "",
                 }
             )
+
+    # Everything above is the measurement; everything below changes the system
+    # again. `dead` leaves the target down by design -- the fault is real -- but
+    # leaving it down also leaves the testbed unfit for the next run, and the
+    # operator had to remember to restart it by hand. Done here, after every
+    # artefact is derived and with the restart recorded as its own event, so a
+    # reader can always tell what was measured from what was repaired.
+    if mode == "dead" and injected.get("landed") is not False:
+        print(f"  restoring {fault_target.host} after the measurement", flush=True)
+        events["restore"] = restore_target(fault_target, topo, engine)
+        if not events["restore"].get("rejoined"):
+            manifest.note(
+                f"{fault_target.host} did not rejoin after the run "
+                f"({events['restore'].get('detail')}); restart it before measuring again"
+            )
+    else:
+        events["restore"] = {
+            "attempted": False,
+            "detail": (
+                "recover mode heals its own fault after 45s"
+                if mode == "recover"
+                else "the fault did not land, so there is nothing to restore"
+            ),
+        }
 
     manifest.finished_utc = utcnow()
     manifest.validation = {"preflight": report.to_dict()}
