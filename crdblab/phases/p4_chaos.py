@@ -71,9 +71,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
-from urllib.parse import quote
 
-from ..config import Profile, Settings
+from ..config import Profile, Settings, pg_direct_dsn, pg_haproxy_dsn
 from ..core import preflight, ssh
 from ..core.recorder import (
     AUDIT_COLUMNS,
@@ -811,9 +810,18 @@ def run(
         # audit writer, probe agent -- is refused without a password. All three
         # go through the client node's HAProxy on :5000, which is the only
         # endpoint that follows the leader through a failover.
-        creds = f"root:{quote(settings.pg_password, safe='')}"
-        workload_uri = f"postgresql://{creds}@127.0.0.1:5000/{database}?sslmode=disable"
-        audit_dsn = f"postgresql://{creds}@127.0.0.1:5000/{audit_database}?sslmode=disable"
+        # The generator goes through HAProxy because it must be given exactly
+        # one URL; the audit writer and the RTO probe do not, and must not --
+        # they are the two clients whose whole job is to observe the cluster
+        # through the fault, and routing them through one proxy on the client
+        # node would make a hiccup there indistinguishable from an outage,
+        # drop their in-flight connections at every failover
+        # (`on-marked-down shutdown-sessions`), and give two deliberately
+        # independent measurements a shared single point of failure. libpq
+        # resolves the primary for them instead, which is exactly what the
+        # CockroachDB branch below does with its own multi-host DSN.
+        workload_uri = pg_haproxy_dsn(database, settings.pg_password)
+        audit_dsn = pg_direct_dsn(topo, audit_database, settings.pg_password)
     else:
         # A single connection, not one per cluster member: `cockroach workload
         # run`, given more than one URL, dials its --concurrency connections
@@ -880,14 +888,22 @@ def run(
         ],
         ssh_options=list(ssh.SSH_OPTIONS),
     )
-    server = {}
+    # Capture server configuration for BOTH engines. It was CockroachDB-only,
+    # which left every PostgreSQL run with no `server:` or `host:` note -- and
+    # those two notes are exactly what `validation.check_run_comparability`
+    # reads. The cross-engine comparison, the one thing this project exists to
+    # produce, was therefore always drawn between a run whose machine was
+    # recorded and one whose machine was not. The server's flags and version
+    # are *expected* to differ across engines; the hardware is not, and it is
+    # the half that D9 and the unexplained 22% shift of 2026-09-02 turned on.
+    server = preflight.capture_server_config(topo.gateway, engine=engine)
+    manifest.server_version = server.get("version")
     if engine == "cockroachdb":
-        server = preflight.capture_server_config(topo.gateway)
         manifest.cockroach_version = server.get("version")
-        manifest.note(f"server: {server.get('start_command', '')}")
-        manifest.note(f"host: {preflight.format_hardware(server.get('hardware', {}))}")
     else:
-        manifest.note(f"engine: postgresql (patroni HA)")
+        manifest.note("engine: postgresql (patroni HA)")
+    manifest.note(f"server: {server.get('start_command', '')}")
+    manifest.note(f"host: {preflight.format_hardware(server.get('hardware', {}))}")
     payload = get_payload(mode, engine)
     manifest.note(f"fault scheduled for {profile.chaos.inject_at_s}s: {payload}")
     manifest.note(

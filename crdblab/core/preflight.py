@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import time
 from dataclasses import dataclass, field
 from typing import Any, Iterable
@@ -106,8 +107,46 @@ class PreflightReport:
 
 # --- server configuration -------------------------------------------------
 
-def capture_server_config(node: Node) -> dict[str, Any]:
-    """Record how CockroachDB was actually started on ``node``.
+#: How to read the server's own argv and version, per engine. The hardware
+#: block below is identical for both and is the half that matters most for
+#: comparability: a cross-engine comparison is *supposed* to differ in server
+#: version and flags, but it is not supposed to differ in the machine.
+_SERVER_PROBES = {
+    "cockroachdb": (
+        "pgrep -a cockroach | head -1",
+        "cockroach version --build-tag 2>/dev/null",
+    ),
+    # The postmaster is found by the path Patroni launches it with, because
+    # the process is named `postgres` and so is every backend it forks --
+    # `pgrep -a postgres | head -1` can return a backend's argv instead of the
+    # server's. The `[p]` is not a typo and not decoration: `pgrep -f` searches
+    # full command lines, including the one carrying this very probe, so the
+    # plain pattern matches the ssh command itself and reports it as the server
+    # (observed on crdb-gcp-1: `start_command` came back as this shell's own
+    # `bash -c pgrep ...`). A bracket class matches the postmaster and not the
+    # literal text of the pattern.
+    #
+    # The version comes from the binary rather than from a SQL
+    # `SHOW server_version`, so capturing it needs no credentials and works on
+    # a node that is not currently the primary.
+    "postgresql": (
+        "pgrep -a -f bin/[p]ostgres | head -1",
+        # The `[p]` is repeated here for the same reason, and this is where it
+        # was actually needed: the whole probe -- argv, version and hardware --
+        # travels as one command line, so the literal `bin/postgres` inside
+        # *this* glob was what `pgrep -f` kept matching, even after the pattern
+        # above was bracketed. As a shell glob `[p]ostgres` still expands to the
+        # same binary.
+        (
+            "for b in /usr/lib/postgresql/*/bin/[p]ostgres; do $b --version; done "
+            "2>/dev/null | tail -1"
+        ),
+    ),
+}
+
+
+def capture_server_config(node: Node, engine: str = "cockroachdb") -> dict[str, Any]:
+    """Record how the database server was actually started on ``node``.
 
     The run manifest previously described the client side in full -- profile,
     generator command, topology -- and the server side not at all. That gap hid a
@@ -142,10 +181,11 @@ def capture_server_config(node: Node) -> dict[str, Any]:
     not move: the flags can match exactly while the caches differ, which is D9
     reappearing in a form the flag comparison alone cannot see.
     """
+    argv_cmd, version_cmd = _SERVER_PROBES.get(engine, _SERVER_PROBES["cockroachdb"])
     result = ssh.run(
         node,
-        "pgrep -a cockroach | head -1; echo '---'; "
-        "cockroach version --build-tag 2>/dev/null; echo '---'; "
+        f"{argv_cmd}; echo '---'; "
+        f"{version_cmd}; echo '---'; "
         "nproc; grep -m1 '^model name' /proc/cpuinfo | cut -d: -f2-; "
         "grep '^MemTotal' /proc/meminfo",
         timeout=CONTROL_TIMEOUT_S,
@@ -154,6 +194,7 @@ def capture_server_config(node: Node) -> dict[str, Any]:
     version, _, hardware = rest.partition("---")
     return {
         "host": node.host,
+        "engine": engine,
         "start_command": argv.strip(),
         "version": version.strip() or None,
         "hardware": parse_hardware(hardware),
@@ -565,6 +606,168 @@ class RowMatchProbe:
             window=window,
         )
         return rate
+
+
+#: PostgreSQL's equivalent of the statement-statistics view CockroachDB
+#: exposes. ``pg_stat_user_tables`` counts, per table and per node, how many
+#: scans ran against it and how many live rows those scans actually fetched --
+#: which is exactly the ratio D8 destroys. A workload whose seed does not match
+#: the loaded keyspace still scans on every operation and fetches nothing, so
+#: the rate goes to zero while throughput goes *up*.
+#:
+#: An UPDATE's index scan increments ``idx_scan``/``idx_tup_fetch`` like a read
+#: does, so both operation types are covered without counting either twice --
+#: ``n_tup_upd`` is deliberately not added in, since the row it reports was
+#: already counted when the update found it.
+_PG_STATS_QUERY = (
+    "SELECT coalesce(seq_scan, 0) + coalesce(idx_scan, 0), "
+    "coalesce(seq_tup_read, 0) + coalesce(idx_tup_fetch, 0) "
+    "FROM pg_stat_user_tables WHERE relname = '{table}'"
+)
+
+
+@dataclass
+class PostgresRowMatchProbe:
+    """D8's detector for PostgreSQL, with :class:`RowMatchProbe`'s semantics.
+
+    Until this existed the check was CockroachDB-only, so the single most
+    dangerous failure this project has on record -- a workload that addresses an
+    empty keyspace, reports roughly twenty times the throughput at a
+    twenty-fifth of the latency, and looks like an excellent result -- had no
+    detector at all on the PostgreSQL side of the comparison. A defect that
+    fails flatteringly needs its detector on both arms or the comparison is
+    exactly as trustworthy as the arm without one.
+
+    Counters are differenced across the tier rather than read absolutely, for
+    the same reason as the CockroachDB probe. Unlike CockroachDB's, they are not
+    flushed on a timer, so the "post-flush partial" recovery that probe needs
+    has no counterpart here; a reset means the server restarted, which is not
+    something to silently absorb during a benchmark.
+
+    The statistics are per-node and only the primary serves this workload, so
+    the DSN must be one that resolves to the primary -- ``pg_direct_dsn``'s
+    ``target_session_attrs=read-write`` -- rather than to whichever replica a
+    round-robin happened to pick.
+    """
+
+    exec_node: Node
+    dsn: str
+    table: str
+    password: str = ""
+    _before: tuple[float, float] | None = field(default=None, init=False, repr=False)
+
+    def _sample(self) -> tuple[float, float]:
+        query = _PG_STATS_QUERY.format(table=self.table)
+        result = ssh.run(
+            self.exec_node,
+            f"PGPASSWORD={shlex.quote(self.password)} "
+            f"psql {shlex.quote(self.dsn)} -tAF, -c {shlex.quote(query)}",
+            timeout=60,
+        )
+        if result.returncode != 0:
+            raise PreflightError(
+                "could not read pg_stat_user_tables, so the row-match rate cannot "
+                "be asserted and this run must not be trusted (D8): "
+                f"{result.stderr.strip() or result.stdout.strip()}"
+            )
+        lines = [line for line in result.stdout.strip().splitlines() if line.strip()]
+        if not lines:
+            # No row at all means the table does not exist in this database --
+            # the working set was never loaded, or was loaded somewhere else.
+            raise PreflightError(
+                f"pg_stat_user_tables has no row for {self.table!r}: the table does "
+                "not exist on the primary, so the workload cannot have touched it (D8)"
+            )
+        scans, rows = lines[-1].split(",")
+        return float(scans), float(rows)
+
+    def start(self) -> None:
+        self._before = self._sample()
+
+    def finish(
+        self, report: PreflightReport, corroborated: bool = False
+    ) -> float | None:
+        """Assert the row-match rate for the tier just measured.
+
+        ``corroborated`` is accepted for interface parity with
+        :class:`RowMatchProbe` and is consulted for the same purpose: when the
+        counters went backwards there is no evidence left to assert on, and an
+        independent detector -- the write median clearing the quorum floor -- is
+        the only thing that can speak for the tier.
+        """
+        if self._before is None:
+            raise PreflightError("PostgresRowMatchProbe.finish called before start")
+        s0, r0 = self._before
+        s1, r1 = self._sample()
+        scans = s1 - s0
+        matched = r1 - r0
+
+        if scans < 0 or matched < 0:
+            detail = (
+                f"pg_stat_user_tables counters for {self.table!r} went backwards "
+                "during the tier, which means the server restarted or the "
+                "statistics were reset"
+            )
+            if corroborated:
+                report.add(
+                    "row_match", True,
+                    detail + "; the write median cleared the quorum floor, which "
+                    "independently shows the operations reached data",
+                    table=self.table, window="reset; corroborated by quorum floor",
+                )
+                return None
+            report.add(
+                "row_match", False,
+                detail + " and no independent detector covers this tier, so it "
+                "cannot be shown that the workload touched data (D8)",
+                table=self.table, window="reset; uncorroborated",
+            )
+            return 0.0
+
+        if scans <= 0:
+            report.add(
+                "row_match", False,
+                f"no scans of {self.table!r} were recorded during the window; "
+                "the workload may not have run at all",
+                table=self.table,
+            )
+            return 0.0
+
+        rate = matched / scans
+        report.add(
+            "row_match",
+            rate >= MIN_ROW_MATCH_RATE,
+            f"{matched:.0f}/{scans:.0f} scans fetched a row "
+            f"(rate {rate:.4f}, minimum {MIN_ROW_MATCH_RATE})"
+            + ("" if rate >= MIN_ROW_MATCH_RATE else "; check that the generator "
+               "seed and insert-count match the values the table was loaded with"),
+            table=self.table,
+            executions=scans,
+            matched=matched,
+            match_rate=round(rate, 6),
+            window="interval",
+        )
+        return rate
+
+
+def row_match_probe(
+    engine: str,
+    *,
+    gateway: Node,
+    table: str,
+    exec_node: Node | None = None,
+    dsn: str | None = None,
+    password: str = "",
+):
+    """The D8 detector for ``engine``. Both arms of the comparison have one."""
+    if engine == "postgresql":
+        if exec_node is None or dsn is None:
+            raise PreflightError(
+                "a PostgreSQL row-match probe needs a client node to run from and a "
+                "DSN that resolves to the primary"
+            )
+        return PostgresRowMatchProbe(exec_node, dsn, table, password)
+    return RowMatchProbe(gateway, table)
 
 
 # --- write latency floor (D8) ---------------------------------------------

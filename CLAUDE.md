@@ -386,22 +386,49 @@ testbed, not something touched by most code changes to `crdblab/`.
   it for the same reason, and Patroni has no equivalent to assert (its leader
   is an unbiased etcd election, which is why `chaos run` resolves the primary
   live).
-- **Known gaps on the PostgreSQL path, not yet closed** (they weaken checks
-  rather than break runs, and all three want a real Patroni cluster to develop
-  against): `preflight.capture_server_config` is skipped wholesale for
-  PostgreSQL, so a pg run's manifest records no hardware fingerprint and
-  `validation.check_run_comparability` degrades the D9 asymmetry gate to a
-  warning for every cross-engine comparison -- the hardware half (`nproc`,
-  `/proc/meminfo`) is not CockroachDB-specific and could be captured for both.
-  `preflight.RowMatchProbe` and `check_write_latency_floor` are likewise
-  CockroachDB-only, so the D8 detector -- a workload addressing an empty
-  keyspace, which fails *flatteringly* -- does not exist on the PostgreSQL
-  side. And for PostgreSQL the RPO audit writer and the RTO probe both dial the
-  client node's single HAProxy, so the two deliberately independent
-  measurements now share one component; HAProxy's `on-marked-down
-  shutdown-sessions` also drops their in-flight connections at failover, which
-  is arguably the right thing to measure but is a behaviour with no CockroachDB
-  counterpart.
+- **The pre-flight gates now run on both arms of the comparison, and the
+  comparison itself no longer refuses to run.** Four related fixes, 2026-09-08:
+  (1) `preflight.capture_server_config(node, engine=...)` captures the server's
+  argv, version and *hardware* for PostgreSQL too. It was CockroachDB-only, so
+  every pg run lacked the `server:` and `host:` manifest notes that
+  `validation.check_run_comparability` reads -- meaning the cross-engine
+  result, the whole point of the project, was always drawn between a run whose
+  machine was recorded and one whose was not. The flags and version are
+  *expected* to differ across engines; the machine is not, and it is what D9
+  and the unexplained 22% shift of 2026-09-02 turned on. The PostgreSQL probe
+  bracket-classes the binary path (`bin/[p]ostgres`) in **both** the `pgrep`
+  pattern and the version glob, because `pgrep -f` searches full command lines
+  and the whole probe travels as one: unbracketed, the capture came back naming
+  this harness's own `bash -c pgrep ...` as the server. (2) `Manifest` gained
+  `server_version`, set for both engines; `cockroach_version` is still set for
+  CockroachDB so runs recorded before it stay readable. (3)
+  `check_run_comparability` compares versions **within** an engine only. Across
+  engines a version difference is the variable under study, and treating it as
+  an error made `analyze engine-comparison` refuse every comparison it exists to
+  produce (`different server versions (v26.3.0 vs None)`); it is now reported as
+  a warning naming both builds. (4) `preflight.PostgresRowMatchProbe` +
+  `row_match_probe(engine, ...)` give D8 a detector on the PostgreSQL side,
+  differencing `pg_stat_user_tables`'s scan and fetched-row counters across each
+  tier -- a workload addressing an empty keyspace still scans on every
+  operation and fetches nothing, so the rate goes to zero while throughput goes
+  *up*. `bench.py` now runs the probe **and** `check_write_latency_floor` for
+  both engines: Patroni's `synchronous_standby_names: ANY 2 (*)` waits for two
+  standby acks, the same geometry as a 3-of-5 Raft quorum, so Phase I's floor
+  bounds both. `n_tup_upd` is deliberately not added to the fetched-row count --
+  an UPDATE's index scan already counted the row it found.
+- **The generator goes through HAProxy; the measurement clients must not.**
+  `config.pg_haproxy_dsn` (one host, `127.0.0.1:5000`) is for
+  `cockroach workload run`, which has to be given exactly one URL.
+  `config.pg_direct_dsn` (every node at 5432, `target_session_attrs=read-write`)
+  is for the RPO audit writer and the RTO probe. Both went through HAProxy
+  before, which made two deliberately independent measurements share one
+  component on the client node: a hiccup there would be indistinguishable from
+  a cluster outage, and `on-marked-down shutdown-sessions` drops their
+  in-flight connections at every failover. libpq resolves the primary for them
+  instead -- the direct counterpart of the multi-host DSN the CockroachDB
+  branch already used for these two clients, and safe for the same reason
+  (single connections, not `--concurrency`-many, so the serial-dial cost that
+  rules multi-host out for the generator does not apply).
 - **Patroni's config must be at `/etc/patroni/config.yml`, and a skipped
   systemd condition is not an error.** Ubuntu's packaged `patroni.service`
   declares `ConditionPathExists=/etc/patroni/config.yml` and

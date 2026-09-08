@@ -128,3 +128,70 @@ def test_error_counter_must_not_decrease_within_a_tier():
 def test_a_sound_run_passes_every_check():
     report = validate(HETEROGENEOUS)
     assert report.ok, [f.message for f in report.findings if f.severity == "error"]
+
+
+# --- cross-engine comparability --------------------------------------------
+
+def _manifest(engine, version, cpus=2, mem=4007004):
+    return {
+        "engine": engine,
+        "server_version": version,
+        "profile": {"workload": {}},
+        "notes": [
+            " server: some server start command",
+            f" host: cpus={cpus} mem_total_kb={mem} cpu_model=Intel(R) Xeon(R) CPU @ 2.80GHz",
+        ],
+    }
+
+
+def test_two_engines_differing_in_version_is_the_comparison_not_a_confound():
+    """This refused every CockroachDB vs PostgreSQL comparison the project
+    exists to produce -- "ran against different server versions (v26.3.0 vs
+    None)" -- because the version check did not know the engines were meant to
+    differ. It is reported, since which build was measured is part of the
+    claim, but it is not grounds for refusal."""
+    from crdblab.analysis.validation import check_run_comparability
+
+    findings = check_run_comparability(
+        _manifest("cockroachdb", "v26.3.0"),
+        _manifest("postgresql", "postgres (PostgreSQL) 16.15"),
+        "crdb", "pg",
+    )
+    assert [f for f in findings if f.severity == "error"] == []
+    assert any("different engines" in f.message for f in findings)
+
+
+def test_two_runs_of_the_same_engine_still_must_match_versions():
+    from crdblab.analysis.validation import check_run_comparability
+
+    findings = check_run_comparability(
+        _manifest("cockroachdb", "v26.3.0"),
+        _manifest("cockroachdb", "v25.1.0"),
+        "a", "b",
+    )
+    assert any(f.severity == "error" and "server versions" in f.message for f in findings)
+
+
+def test_a_legacy_run_records_its_version_only_as_cockroach_version():
+    """Runs written before `server_version` existed carry it in the old field;
+    reading both keeps an old CockroachDB run comparable with a new one."""
+    from crdblab.analysis.validation import check_run_comparability
+
+    old = _manifest("cockroachdb", None)
+    old["cockroach_version"] = "v26.3.0"
+    findings = check_run_comparability(old, _manifest("cockroachdb", "v26.3.0"), "old", "new")
+    assert [f for f in findings if f.severity == "error"] == []
+
+
+def test_unlike_machines_are_still_refused_across_engines():
+    """The point of capturing hardware for PostgreSQL too: this comparison used
+    to pass unexamined, because a run with no `host:` note could not be checked
+    against one that had it."""
+    from crdblab.analysis.validation import check_run_comparability
+
+    findings = check_run_comparability(
+        _manifest("cockroachdb", "v26.3.0", cpus=2),
+        _manifest("postgresql", "16.15", cpus=8),
+        "crdb", "pg",
+    )
+    assert any(f.severity == "error" and "hardware" in f.message.lower() for f in findings)

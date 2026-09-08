@@ -237,6 +237,12 @@ class Manifest:
     #: ``events.json``. Recorded so that the two files are known to share an
     #: origin rather than assumed to.
     clock_epoch_utc: str | None = None
+    #: The version of whatever server was measured, for either engine. Set
+    #: alongside ``cockroach_version`` rather than replacing it: every run
+    #: recorded before this field existed carries the version only there, and
+    #: rewriting history to move it would break the comparability check for
+    #: exactly the runs it was written to protect.
+    server_version: str | None = None
     cockroach_version: str | None = None
     generator_command: str | None = None
     ssh_options: list[str] = field(default_factory=list)

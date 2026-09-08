@@ -12,6 +12,7 @@ import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import yaml
 
@@ -25,6 +26,54 @@ DEFAULT_RUNS_DIR = PROJECT_ROOT / "runs"
 #: here rather than inline in each DSN so the harness and the provisioning
 #: template have exactly one thing to agree on.
 DEFAULT_PG_PASSWORD = "rootpassword"
+
+#: PostgreSQL's own port on each cluster node. Distinct from ``Node.sql_port``
+#: (26257), which is CockroachDB's and is what that engine's DSNs use.
+PG_SQL_PORT = 5432
+
+#: The client node's HAProxy, which fronts whichever node Patroni currently
+#: reports as primary (``bootstrap-client.tftpl``).
+PG_HAPROXY_HOSTPORT = "127.0.0.1:5000"
+
+
+def pg_haproxy_dsn(database: str, password: str) -> str:
+    """Connection string for the generator: one host, the local HAProxy.
+
+    The generator is ``cockroach workload run``, which must be given exactly
+    one URL -- more than one and it dials its ``--concurrency`` connections
+    serially, ~2.65 s each (see ``bench.py``'s module docstring). HAProxy is
+    what makes one URL sufficient here: it resolves to the current primary and
+    follows a failover, which is what a multi-host DSN would otherwise be for.
+    """
+    return (
+        f"postgresql://root:{quote(password, safe='')}@{PG_HAPROXY_HOSTPORT}"
+        f"/{database}?sslmode=disable"
+    )
+
+
+def pg_direct_dsn(topology: Topology, database: str, password: str) -> str:
+    """Connection string for measurement clients: every node, primary selected.
+
+    Deliberately *not* through HAProxy. The RPO audit writer and the RTO probe
+    exist to observe the cluster through a fault, and routing both through one
+    proxy on the client node makes them observations of the proxy as much as of
+    the cluster: a hiccup there is indistinguishable from an outage, its
+    ``on-marked-down shutdown-sessions`` drops their in-flight connections at
+    every failover, and two measurements the design keeps independent would
+    share a single point of failure. libpq's own multi-host support does the
+    same job in the client: it tries each host and, with
+    ``target_session_attrs=read-write``, keeps the one that is not in recovery
+    -- i.e. the primary. This is the direct counterpart of the multi-host DSN
+    the CockroachDB branch already uses for these two clients, and it is safe
+    for the same reason: these are single connections (or a small worker pool),
+    not ``--concurrency``-many, so the serial-dial cost that rules multi-host
+    out for the generator does not apply.
+    """
+    hosts = ",".join(f"{node.host}:{PG_SQL_PORT}" for node in topology.nodes)
+    return (
+        f"postgresql://root:{quote(password, safe='')}@{hosts}/{database}"
+        "?sslmode=disable&target_session_attrs=read-write"
+    )
 DEFAULT_ENV_FILE = PROJECT_ROOT / ".env"
 
 

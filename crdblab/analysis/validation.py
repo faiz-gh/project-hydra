@@ -502,13 +502,39 @@ def check_run_comparability(
                     )
                 )
 
-    if a.get("cockroach_version") != b.get("cockroach_version"):
+    # `server_version` for runs recorded after it existed; `cockroach_version`
+    # for every run before that, where it was the only place a version was
+    # written. Reading both means an old CockroachDB run stays comparable with
+    # a new one.
+    va = a.get("server_version") or a.get("cockroach_version")
+    vb = b.get("server_version") or b.get("cockroach_version")
+    ea = a.get("engine") or "cockroachdb"
+    eb = b.get("engine") or "cockroachdb"
+    if ea != eb:
+        # Two engines have different version strings by definition -- that is
+        # the variable under study, not a confound -- and treating it as an
+        # error made `analyze engine-comparison` refuse *every* CockroachDB vs
+        # PostgreSQL comparison it was written to produce: "ran against
+        # different server versions (v26.3.0 vs None)". The versions are still
+        # reported, because which build of each engine was measured is part of
+        # the claim; they are simply not grounds for refusal here.
+        findings.append(
+            Finding(
+                "run_comparability",
+                "warning",
+                f"{label_a} and {label_b} are different engines "
+                f"({ea} {va} vs {eb} {vb}), which is the comparison being made; "
+                "record both versions alongside any result drawn from it",
+                {"engines": [ea, eb], "server_versions": [va, vb]},
+            )
+        )
+    elif va != vb:
         findings.append(
             Finding(
                 "run_comparability",
                 "error",
                 f"{label_a} and {label_b} ran against different server versions "
-                f"({a.get('cockroach_version')} vs {b.get('cockroach_version')})",
+                f"({va} vs {vb})",
                 {},
             )
         )

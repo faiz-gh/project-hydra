@@ -50,9 +50,8 @@ import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
-from urllib.parse import quote
 
-from ..config import Profile, Settings
+from ..config import Profile, Settings, pg_direct_dsn, pg_haproxy_dsn
 from ..core import preflight, ssh
 from ..core.recorder import (
     COLUMNS,
@@ -107,10 +106,7 @@ class Target:
         unnecessary.
         """
         if self.engine == "postgresql":
-            return (
-                f"postgresql://root:{quote(self.password or '', safe='')}"
-                f"@127.0.0.1:5000/{self.database}?sslmode=disable"
-            )
+            return pg_haproxy_dsn(self.database, self.password or "")
         gateway = next((n for n in self.nodes if n.gateway), None)
         host = gateway.host if gateway else "crdb-gcp-1"
         port = gateway.sql_port if gateway else 26257
@@ -457,22 +453,46 @@ def run(
     manifest.note(f"target={target.name} database={target.database} voters={target.voters}")
     manifest.note(f"tier order: {plan}")
 
-    # Capture server configuration
-    server = {}
+    # Capture server configuration for BOTH engines. It was CockroachDB-only,
+    # which left every PostgreSQL run with no `server:` or `host:` note -- and
+    # those two notes are exactly what `validation.check_run_comparability`
+    # reads. The cross-engine comparison, the one thing this project exists to
+    # produce, was therefore always drawn between a run whose machine was
+    # recorded and one whose machine was not. The server's flags and version
+    # are *expected* to differ across engines; the hardware is not, and it is
+    # the half that D9 and the unexplained 22% shift of 2026-09-02 turned on.
+    server = preflight.capture_server_config(settings.topology.gateway, engine=target.engine)
+    manifest.server_version = server.get("version")
     if target.engine == "cockroachdb":
-        server = preflight.capture_server_config(settings.topology.gateway)
         manifest.cockroach_version = server.get("version")
-        manifest.note(f"server: {server.get('start_command', '')}")
-        manifest.note(f"host: {preflight.format_hardware(server.get('hardware', {}))}")
     else:
-        manifest.note(f"engine: postgresql (patroni HA)")
+        manifest.note("engine: postgresql (patroni HA)")
+    manifest.note(f"server: {server.get('start_command', '')}")
+    manifest.note(f"host: {preflight.format_hardware(server.get('hardware', {}))}")
 
     tiers: list[dict[str, Any]] = []
     with HostSampler(target.metrics_url) as sampler:
         with MetricsWriter(run_dir.metrics_csv, COLUMNS) as writer:
             for index, (concurrency, repetition) in enumerate(plan):
-                probe = preflight.RowMatchProbe(settings.topology.gateway, "usertable")
-                if not skip_checks and target.engine == "cockroachdb":
+                # Both engines, since 2026-09-08. These two checks are the only
+                # detectors of D8 -- a workload addressing an empty keyspace,
+                # which reports ~20x the throughput at ~1/25th the latency and
+                # reads as the best result the testbed has produced -- and while
+                # they were CockroachDB-only, the PostgreSQL arm of the
+                # comparison had none. The floor applies to Patroni for the same
+                # reason it applies to CockroachDB: `synchronous_standby_names:
+                # ANY 2 (*)` makes a commit wait for two standby acks, the same
+                # geometry as a 3-of-5 Raft quorum, so Phase I's floor bounds
+                # both engines' writes.
+                probe = preflight.row_match_probe(
+                    target.engine,
+                    gateway=settings.topology.gateway,
+                    table="usertable",
+                    exec_node=target.exec_node,
+                    dsn=pg_direct_dsn(settings.topology, target.database, settings.pg_password),
+                    password=settings.pg_password,
+                )
+                if not skip_checks:
                     probe.start()
 
                 raw_path = run_dir.raw(f"c{concurrency}_rep{repetition}.txt")
@@ -482,7 +502,7 @@ def run(
                     tier_index=index + 1, tier_total=len(plan),
                 )
 
-                if not skip_checks and target.engine == "cockroachdb":
+                if not skip_checks:
                     floor_ok = False
                     if quorum_floor is not None:
                         write_p50 = tier["mean_p50_ms"].get("update")

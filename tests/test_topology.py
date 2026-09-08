@@ -124,3 +124,32 @@ def test_a_password_with_url_metacharacters_is_escaped():
     uri = cluster_target(settings, engine="postgresql").db_uri
     assert uri == "postgresql://root:p%40ss%2Fword@127.0.0.1:5000/ycsb?sslmode=disable"
 
+
+
+# --- PostgreSQL connection strings ------------------------------------------
+
+def test_the_generator_gets_one_host_and_the_measurement_clients_get_all_five():
+    """Two different jobs. `cockroach workload run` must be given exactly one
+    URL (more than one and it dials its connections serially), so the generator
+    goes through the client node's HAProxy. The RPO audit writer and the RTO
+    probe must survive the fault they are measuring, so they use libpq's own
+    multi-host resolution instead of depending on that one proxy."""
+    from crdblab.config import pg_direct_dsn, pg_haproxy_dsn
+
+    single = pg_haproxy_dsn("ycsb", "pw")
+    assert single.count("@") == 1 and "127.0.0.1:5000" in single
+    assert "," not in single
+
+    direct = pg_direct_dsn(DEFAULT_TOPOLOGY, "chaos_audit", "pw")
+    assert direct.count(":5432") == len(DEFAULT_TOPOLOGY.nodes)
+    assert "127.0.0.1" not in direct
+    # Without this libpq would happily settle on a replica, where the audit
+    # writer's INSERTs cannot run at all.
+    assert "target_session_attrs=read-write" in direct
+
+
+def test_dsn_passwords_are_escaped_in_both_builders():
+    from crdblab.config import pg_direct_dsn, pg_haproxy_dsn
+
+    assert "p%40ss" in pg_haproxy_dsn("ycsb", "p@ss")
+    assert "p%40ss" in pg_direct_dsn(DEFAULT_TOPOLOGY, "ycsb", "p@ss")

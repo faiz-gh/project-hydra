@@ -254,3 +254,120 @@ def test_placement_that_never_converges_still_fails():
     assert not report.ok
     check = report.checks[-1]
     assert "cloud=linode" in check.detail
+
+
+# --- the PostgreSQL arm of the pre-flight gates -----------------------------
+#
+# These exist because until 2026-09-08 all of the above ran on the CockroachDB
+# arm only, which meant the engine comparison was exactly as trustworthy as the
+# arm that had no detector.
+
+def test_the_postgresql_server_probe_cannot_match_its_own_command_line():
+    """`pgrep -f` searches full command lines, including the one carrying the
+    probe. Both occurrences of the binary's path are bracketed, because the
+    whole probe -- argv, version and hardware -- travels as one command line
+    and the version glob was what kept matching: against crdb-gcp-1 the capture
+    came back reporting this shell's own `bash -c pgrep ...` as the server."""
+    from crdblab.core.preflight import _SERVER_PROBES
+
+    argv_cmd, version_cmd = _SERVER_PROBES["postgresql"]
+    joined = f"{argv_cmd}; {version_cmd}"
+    assert "bin/postgres" not in joined
+    assert "[p]ostgres" in argv_cmd and "[p]ostgres" in version_cmd
+
+
+def test_hardware_is_captured_for_both_engines():
+    """The half of the capture that must not differ between the engines. The
+    server's flags and version are expected to differ -- that is the comparison
+    -- but a cross-engine result drawn across unlike machines is D9 again."""
+    from crdblab.core.preflight import _SERVER_PROBES
+
+    assert set(_SERVER_PROBES) == {"cockroachdb", "postgresql"}
+
+
+def _pg_probe(samples):
+    """A PostgresRowMatchProbe whose counter reads are scripted, not sshed."""
+    from crdblab.core.preflight import PostgresRowMatchProbe
+    from crdblab.topology import CLIENT_NODE
+
+    probe = PostgresRowMatchProbe(CLIENT_NODE, "postgresql://x", "usertable", "pw")
+    it = iter(samples)
+    probe._sample = lambda: next(it)
+    return probe
+
+
+def test_pg_row_match_passes_when_every_scan_fetches_a_row():
+    from crdblab.core.preflight import PreflightReport
+
+    report = PreflightReport()
+    probe = _pg_probe([(100.0, 100.0), (1100.0, 1100.0)])
+    probe.start()
+    assert probe.finish(report) == 1.0
+    assert report.ok
+
+
+def test_pg_row_match_catches_a_workload_touching_nothing():
+    """D8's signature on PostgreSQL: the scans happen, no rows come back, and
+    throughput goes *up* because an operation that matches nothing does no
+    work."""
+    from crdblab.core.preflight import PreflightReport
+
+    report = PreflightReport()
+    probe = _pg_probe([(100.0, 100.0), (1100.0, 100.0)])
+    probe.start()
+    assert probe.finish(report) == 0.0
+    assert not report.ok
+
+
+def test_pg_row_match_reports_a_workload_that_never_ran():
+    from crdblab.core.preflight import PreflightReport
+
+    report = PreflightReport()
+    probe = _pg_probe([(100.0, 100.0), (100.0, 100.0)])
+    probe.start()
+    assert probe.finish(report) == 0.0
+    assert not report.ok
+
+
+def test_pg_row_match_treats_a_counter_reset_as_evidence_lost_not_as_a_pass():
+    """pg_stat counters going backwards means the server restarted mid-tier.
+    Without an independent detector there is nothing left to assert on."""
+    from crdblab.core.preflight import PreflightReport
+
+    report = PreflightReport()
+    probe = _pg_probe([(1000.0, 1000.0), (5.0, 5.0)])
+    probe.start()
+    assert probe.finish(report) == 0.0
+    assert not report.ok
+
+    report = PreflightReport()
+    probe = _pg_probe([(1000.0, 1000.0), (5.0, 5.0)])
+    probe.start()
+    # The write median cleared the quorum floor, which independently shows the
+    # operations reached data; the rate itself is unmeasured, hence None.
+    assert probe.finish(report, corroborated=True) is None
+    assert report.ok
+
+
+def test_row_match_probe_factory_picks_the_detector_per_engine():
+    from crdblab.core.preflight import (
+        PostgresRowMatchProbe,
+        PreflightError,
+        RowMatchProbe,
+        row_match_probe,
+    )
+    from crdblab.topology import CLIENT_NODE, DEFAULT_TOPOLOGY
+
+    gw = DEFAULT_TOPOLOGY.gateway
+    assert isinstance(row_match_probe("cockroachdb", gateway=gw, table="usertable"), RowMatchProbe)
+    assert isinstance(
+        row_match_probe(
+            "postgresql", gateway=gw, table="usertable",
+            exec_node=CLIENT_NODE, dsn="postgresql://x", password="pw",
+        ),
+        PostgresRowMatchProbe,
+    )
+    # A PostgreSQL probe with nowhere to run and nothing to connect to must
+    # refuse rather than quietly measure nothing.
+    with pytest.raises(PreflightError):
+        row_match_probe("postgresql", gateway=gw, table="usertable")

@@ -253,6 +253,14 @@ DB_URI=postgresql://root@crdb-gcp-1:26257/ycsb?sslmode=disable
 CRDBLAB_RUNS_DIR=runs
 ```
 
+> **Pre-flight runs on both engines.** The row-match probe (D8's detector) and
+> the write-latency floor check were CockroachDB-only until 2026-09-08; they now
+> run for PostgreSQL too — `pg_stat_user_tables`'s scan and fetched-row counters
+> differenced across each tier, and the same Phase I quorum floor, which applies
+> because Patroni's `synchronous_standby_names: ANY 2 (*)` waits for two standby
+> acks just as a 3-of-5 Raft quorum does. A seed/insert-count mismatch is
+> therefore caught on both arms of the comparison rather than only one.
+
 > **PostgreSQL needs a password everywhere; CockroachDB needs none.** The
 > CockroachDB nodes run `--insecure` and accept `root` with no credential.
 > Patroni bootstraps `pg_hba` as `host all all 0.0.0.0/0 md5`, so every TCP
