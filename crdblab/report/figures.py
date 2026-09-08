@@ -83,6 +83,23 @@ EXPORT_WIDTH_PX = 3840
 EXPORT_VECTOR = True
 
 
+def _engine_suffix(*runs) -> str:
+    """A filename suffix distinguishing which engine a figure came from.
+
+    Blank for CockroachDB, so filenames written before Postgres runs existed --
+    and any caption already citing them -- keep meaning the same figure. Blank
+    also whenever the runs disagree on engine (an all-engines comparison
+    figure) or there are no runs to ask, rather than guessing which one wins;
+    a filename that silently picked one engine's tag for a mixed figure would
+    misattribute it.
+    """
+    engines = {getattr(r, "engine", "cockroachdb") for r in runs if r is not None}
+    if len(engines) != 1:
+        return ""
+    (engine,) = engines
+    return "" if engine == "cockroachdb" else f"_{engine}"
+
+
 def _style() -> None:
     """Recessive chrome: hairline solid grid, no top/right spines, sans text."""
     plt.rcParams.update(
@@ -261,7 +278,10 @@ def throughput_sweep(runs: Sequence[Run], out_dir: Path) -> Path:
             transform=ax.transAxes, ha="right", va="bottom",
             fontsize=7, color=INK_MUTED,
         )
-    return _finish(fig, ax, [r.run_id for r in runs], out_dir / "fig2_throughput_sweep.png")
+    suffix = _engine_suffix(*runs)
+    return _finish(
+        fig, ax, [r.run_id for r in runs], out_dir / f"fig2_throughput_sweep{suffix}.png"
+    )
 
 
 def latency_by_operation(run: Run, out_dir: Path) -> Path:
@@ -304,7 +324,10 @@ def latency_by_operation(run: Run, out_dir: Path) -> Path:
         x=0.02, ha="left", color=INK, fontsize=10, fontweight="bold",
     )
     fig.tight_layout()
-    return _finish(fig, axes, [run.run_id], out_dir / "fig3_latency_by_operation.png")
+    suffix = _engine_suffix(run)
+    return _finish(
+        fig, axes, [run.run_id], out_dir / f"fig3_latency_by_operation{suffix}.png"
+    )
 
 
 #: Output filename per fault class. Phases III-IV each run one fault and
@@ -321,12 +344,24 @@ _RESILIENCE_FIGURES = {
 }
 
 
-def _resilience_filename(mode: str | None) -> str:
-    """Filename for one fault class, distinct for any class not yet named."""
+def _resilience_filename(mode: str | None, engine_suffix: str = "") -> str:
+    """Filename for one fault class and engine, distinct for any class not yet named.
+
+    ``engine_suffix`` from :func:`_engine_suffix` is inserted before the
+    extension rather than appended after it, so ``fig6_..._recover.png``
+    becomes ``fig6_..._recover_postgresql.png`` and stays sorted next to its
+    CockroachDB sibling rather than falling under an unrelated ``_postgresql``
+    prefix that would also collide with fig2/fig3's own suffix placement.
+    """
     if mode in _RESILIENCE_FIGURES:
-        return _RESILIENCE_FIGURES[mode]
-    slug = "".join(c if c.isalnum() else "_" for c in str(mode or "unknown"))
-    return f"fig5_resilience_timeline_{slug}.png"
+        name = _RESILIENCE_FIGURES[mode]
+    else:
+        slug = "".join(c if c.isalnum() else "_" for c in str(mode or "unknown"))
+        name = f"fig5_resilience_timeline_{slug}.png"
+    if not engine_suffix:
+        return name
+    stem, _, ext = name.rpartition(".")
+    return f"{stem}{engine_suffix}.{ext}"
 
 
 # --- Phases III-IV ----------------------------------------------------------
@@ -410,7 +445,8 @@ def resilience_timeline(run: Run, out_dir: Path) -> Path:
         loc="left",
     )
     ax.legend(labelcolor=INK_SECONDARY, loc="lower right", fontsize=7.5)
-    return _finish(fig, ax, [run.run_id], out_dir / _resilience_filename(mode))
+    filename = _resilience_filename(mode, _engine_suffix(run))
+    return _finish(fig, ax, [run.run_id], out_dir / filename)
 
 
 def render_all(

@@ -824,6 +824,7 @@ def run(
     manifest = Manifest(
         run_id=run_dir.path.name,
         phase="p4_chaos",
+        engine=engine,
         profile=profile.to_dict(),
         # Filled once the run's monotonic zero is taken, below.
         clock_epoch_utc=None,

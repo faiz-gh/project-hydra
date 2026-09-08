@@ -219,6 +219,14 @@ class Manifest:
     run_id: str
     phase: str
     schema_version: str = SCHEMA_VERSION
+    #: "cockroachdb" or "postgresql". Recorded explicitly rather than left
+    #: inferable from `cockroach_version` being null or from a note's text,
+    #: both of which report/figures.py would otherwise have to guess from --
+    #: guessing which engine produced a run is exactly the kind of inference
+    #: this project exists to make unnecessary. Defaults to "cockroachdb" so
+    #: every run written before this field existed still resolves as a value
+    #: rather than None, matching what those runs actually were.
+    engine: str = "cockroachdb"
     started_utc: str = field(default_factory=utcnow)
     finished_utc: str | None = None
     git_revision: str | None = field(default_factory=_git_revision)

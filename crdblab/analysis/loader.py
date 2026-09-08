@@ -79,6 +79,16 @@ class Run:
         return str(self.manifest.get("schema_version", "unknown"))
 
     @property
+    def engine(self) -> str:
+        """"cockroachdb" or "postgresql". Defaults for runs predating the field.
+
+        A run written before ``Manifest.engine`` existed has no such key, and
+        every one of those runs was a CockroachDB run -- the flag that lets
+        ``--engine postgresql`` be requested at all didn't exist yet either.
+        """
+        return str(self.manifest.get("engine") or "cockroachdb")
+
+    @property
     def profile(self) -> dict[str, Any]:
         return self.manifest.get("profile", {}) or {}
 

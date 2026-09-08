@@ -431,6 +431,7 @@ def run(
     manifest = Manifest(
         run_id=run_dir.path.name,
         phase=target.phase,
+        engine=target.engine,
         clock_epoch_utc=utcnow(),
         profile=profile.to_dict(),
         topology=[
