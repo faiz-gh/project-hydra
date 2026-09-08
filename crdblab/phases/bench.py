@@ -50,6 +50,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
+from urllib.parse import quote
 
 from ..config import Profile, Settings
 from ..core import preflight, ssh
@@ -91,6 +92,11 @@ class Target:
     voters: int
     engine: str
     nodes: tuple[Node, ...] = ()
+    #: PostgreSQL only. CockroachDB runs ``--insecure`` here and takes ``root``
+    #: with no password; Patroni's ``pg_hba`` is ``md5`` for every host
+    #: connection, so a DSN without one is refused before the generator sends a
+    #: single operation.
+    password: str | None = None
 
     @property
     def db_uri(self) -> str:
@@ -101,7 +107,10 @@ class Target:
         unnecessary.
         """
         if self.engine == "postgresql":
-            return f"postgresql://root@127.0.0.1:5000/{self.database}?sslmode=disable"
+            return (
+                f"postgresql://root:{quote(self.password or '', safe='')}"
+                f"@127.0.0.1:5000/{self.database}?sslmode=disable"
+            )
         gateway = next((n for n in self.nodes if n.gateway), None)
         host = gateway.host if gateway else "crdb-gcp-1"
         port = gateway.sql_port if gateway else 26257
@@ -512,4 +521,5 @@ def cluster_target(settings: Settings, database: str = "ycsb", engine: str = "co
         voters=len(settings.topology),
         engine=engine,
         nodes=settings.topology.nodes,
+        password=settings.pg_password if engine == "postgresql" else None,
     )

@@ -64,12 +64,14 @@ rather than as a failed run.
 from __future__ import annotations
 
 import json
+import shlex
 import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
+from urllib.parse import quote
 
 from ..config import Profile, Settings
 from ..core import preflight, ssh
@@ -126,10 +128,36 @@ PROBE_OVERRUN_S = 600.0
 SUDO = "sudo -n"
 
 
+#: PostgreSQL's process death has to be arranged around systemd; CockroachDB's
+#: does not. `cockroach` is started by cloud-init with `--background` and has no
+#: unit, so `killall -9 cockroach` is simply the end of it. Patroni is a
+#: packaged systemd service with `Restart=on-failure`, so a SIGKILL is a
+#: *failure* by systemd's definition and the unit comes back within
+#: `RestartSec` -- roughly 100 ms. A `dead` run against PostgreSQL would then
+#: measure systemd's restart loop rather than the cluster's failover, and would
+#: do so while reporting an RTO far better than CockroachDB's, on a fault that
+#: was never comparable in the first place.
+#:
+#: `Restart=no` is set first (a drop-in under /etc/systemd/system.control/,
+#: which `restore_target` reverses) and the kill is then delivered through
+#: `systemctl kill --kill-who=all`, not `killall`. That matters twice over:
+#: nothing has to guess the process name -- Patroni runs as `/usr/bin/python3
+#: /usr/bin/patroni`, so its `comm` is `python3` and `killall -9 patroni` finds
+#: nothing at all -- and a `pkill -f patroni` written to work around that
+#: matches the very SSH command carrying it. Signalling the unit's cgroup has
+#: neither problem, and takes postgres down with it since Patroni starts the
+#: postmaster as its child.
+_PG_DEAD_PAYLOAD = (
+    f"{SUDO} systemctl set-property patroni.service Restart=no && "
+    f"{SUDO} systemctl kill --kill-who=all --signal=SIGKILL patroni.service"
+)
+
+
 def get_payload(mode: str, engine: str) -> str:
     if mode == "dead":
-        procs = "patroni postgres" if engine == "postgresql" else "cockroach"
-        return f"{SUDO} killall -9 {procs}"
+        if engine == "postgresql":
+            return _PG_DEAD_PAYLOAD
+        return f"{SUDO} killall -9 cockroach"
     elif mode == "recover":
         # The partition has to outlive the SSH connection that delivered it --
         # `tailscale down` severs the overlay this very session is riding on --
@@ -155,8 +183,13 @@ def preflight_payload(mode: str, engine: str) -> str:
     needs the same daemon access ``tailscale down`` does.
     """
     if mode == "dead":
-        procs = "patroni postgres" if engine == "postgresql" else "cockroach"
-        return f"{SUDO} killall -0 {procs}"
+        if engine == "postgresql":
+            # Same rights as the payload (passwordless sudo over systemctl on
+            # this unit), while changing nothing: `show` reads properties and
+            # `--kill-who` is not involved. A unit that does not exist, or a
+            # sudo that prompts, both fail here rather than during the fault.
+            return f"{SUDO} systemctl show patroni.service --property=MainPID"
+        return f"{SUDO} killall -0 cockroach"
     elif mode == "recover":
         return f"{SUDO} tailscale status --json >/dev/null"
     raise ValueError(f"Unknown mode: {mode}")
@@ -466,7 +499,13 @@ def restore_target(
     join = ",".join(f"{n.host}:{n.sql_port}" for n in survivors)
 
     if engine == "postgresql":
-        payload = "sudo -n systemctl start patroni"
+        # Restart=no was set by the fault so systemd could not undo it; putting
+        # it back is part of restoring the node, not an extra courtesy. Doing it
+        # in the other order would let a failed start stay down silently.
+        payload = (
+            "sudo -n systemctl set-property patroni.service Restart=on-failure && "
+            "sudo -n systemctl start patroni"
+        )
     else:
         payload = (
             "TS_IP=$(tailscale ip -4); sudo -n cockroach start --insecure "
@@ -767,8 +806,14 @@ def run(
     report.raise_if_failed()
 
     if engine == "postgresql":
-        workload_uri = f"postgresql://root@127.0.0.1:5000/{database}?sslmode=disable"
-        audit_dsn = f"postgresql://root@127.0.0.1:5000/{audit_database}?sslmode=disable"
+        # Credentialed, unlike the CockroachDB branch: Patroni's pg_hba is
+        # `host all all 0.0.0.0/0 md5`, so every one of these -- generator,
+        # audit writer, probe agent -- is refused without a password. All three
+        # go through the client node's HAProxy on :5000, which is the only
+        # endpoint that follows the leader through a failover.
+        creds = f"root:{quote(settings.pg_password, safe='')}"
+        workload_uri = f"postgresql://{creds}@127.0.0.1:5000/{database}?sslmode=disable"
+        audit_dsn = f"postgresql://{creds}@127.0.0.1:5000/{audit_database}?sslmode=disable"
     else:
         # A single connection, not one per cluster member: `cockroach workload
         # run`, given more than one URL, dials its --concurrency connections
@@ -804,6 +849,7 @@ def run(
     if engine == "postgresql":
         ssh.run(
             gateway,
+            f"PGPASSWORD={shlex.quote(settings.pg_password)} "
             f"psql -h 127.0.0.1 -p 5000 -U root -d {audit_database} "
             '-c "DROP TABLE IF EXISTS rpo_audit; '
             'CREATE TABLE rpo_audit (seq_id INT8 PRIMARY KEY, ts TIMESTAMPTZ DEFAULT now()); '

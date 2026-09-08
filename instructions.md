@@ -247,9 +247,22 @@ entrypoint you intend to load and capture against (see `.env.example`):
 ```bash
 # CockroachDB
 DB_URI=postgresql://root@crdb-gcp-1:26257/ycsb?sslmode=disable
-# PostgreSQL/Patroni, instead: DB_URI=postgresql://postgres:postgres@127.0.0.1:5000/ycsb?sslmode=disable
+# PostgreSQL/Patroni, instead:
+# DB_URI=postgresql://root:rootpassword@127.0.0.1:5000/ycsb?sslmode=disable
+# PG_PASSWORD=rootpassword
 CRDBLAB_RUNS_DIR=runs
 ```
+
+> **PostgreSQL needs a password everywhere; CockroachDB needs none.** The
+> CockroachDB nodes run `--insecure` and accept `root` with no credential.
+> Patroni bootstraps `pg_hba` as `host all all 0.0.0.0/0 md5`, so every TCP
+> connection the harness makes — the generator, the RPO audit writer, the RTO
+> probe agent, the DDL creating their tables — is refused without one.
+> `DB_URI` carries it for loading and `capture` (`run-experiment.sh` refuses to
+> start without it); the measured phases build their own DSNs and read
+> `PG_PASSWORD`, which defaults to the `rootpassword` that
+> `terraform/scripts/bootstrap-patroni.tftpl` creates. Change the template and
+> you must set `PG_PASSWORD` to match.
 
 > **`DB_URI` is for data loading and `crdblab capture` only; the measured
 > phases (`bench`, `chaos run`) resolve their own connection string from

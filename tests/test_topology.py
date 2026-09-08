@@ -88,10 +88,39 @@ def test_cluster_target_generates_a_single_gateway_uri_for_cockroachdb():
 
 
 def test_cluster_target_generates_single_haproxy_uri_for_postgresql():
+    """One host (the client node's HAProxy, which follows Patroni's leader) and
+    a password: Patroni's pg_hba is md5 for every host connection, so an
+    uncredentialed DSN is refused before the generator sends an operation."""
     from crdblab.config import Settings
     from crdblab.phases.bench import cluster_target
 
-    settings = Settings(db_uri="postgresql://root@crdb-gcp-1:26257/ycsb", topology=DEFAULT_TOPOLOGY)
+    settings = Settings(
+        db_uri="postgresql://root@crdb-gcp-1:26257/ycsb",
+        topology=DEFAULT_TOPOLOGY,
+        pg_password="s3cret",
+    )
     target = cluster_target(settings, database="ycsb", engine="postgresql")
-    assert target.db_uri == "postgresql://root@127.0.0.1:5000/ycsb?sslmode=disable"
+    assert target.db_uri == "postgresql://root:s3cret@127.0.0.1:5000/ycsb?sslmode=disable"
+
+
+def test_cockroachdb_target_stays_uncredentialed():
+    """CockroachDB runs --insecure here and takes root with no password; adding
+    one to that DSN would change what the CockroachDB half of the comparison
+    connects as."""
+    from crdblab.config import Settings
+    from crdblab.phases.bench import cluster_target
+
+    settings = Settings(topology=DEFAULT_TOPOLOGY, pg_password="s3cret")
+    assert "s3cret" not in cluster_target(settings, engine="cockroachdb").db_uri
+
+
+def test_a_password_with_url_metacharacters_is_escaped():
+    """A password is copied into a URL, so `@` or `/` in one would otherwise
+    re-parse the DSN into a different host."""
+    from crdblab.config import Settings
+    from crdblab.phases.bench import cluster_target
+
+    settings = Settings(topology=DEFAULT_TOPOLOGY, pg_password="p@ss/word")
+    uri = cluster_target(settings, engine="postgresql").db_uri
+    assert uri == "postgresql://root:p%40ss%2Fword@127.0.0.1:5000/ycsb?sslmode=disable"
 

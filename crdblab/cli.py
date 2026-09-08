@@ -163,12 +163,20 @@ def _cmd_net_probe(args: argparse.Namespace) -> int:
     report = preflight.PreflightReport()
     if args.checks:
         preflight.check_clock_offset(report, settings.topology)
-        preflight.check_leaseholder_placement(
-            report,
-            settings.topology.gateway,
-            args.database,
-            settings.topology.gateway.region,
-        )
+        # Leaseholder placement is a CockroachDB concept and the check reads it
+        # with `cockroach sql` on the gateway, so against a PostgreSQL
+        # deployment it does not merely not apply -- it fails, and Phase I with
+        # it. Patroni has no equivalent to assert: its leader is an etcd
+        # election with nothing biasing it, which is why `chaos run` resolves
+        # the primary live instead of trusting the profile. Skipped for the
+        # same reason `bench.py` skips it.
+        if args.engine == "cockroachdb":
+            preflight.check_leaseholder_placement(
+                report,
+                settings.topology.gateway,
+                args.database,
+                settings.topology.gateway.region,
+            )
         print()
         for check in report.checks:
             print(f"  [{'PASS' if check.passed else 'FAIL'}] {check.name}: {check.detail}")

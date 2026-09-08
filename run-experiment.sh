@@ -242,8 +242,24 @@ ok "DB_URI names host $DB_HOST"
 if [ "$ENGINE" = "postgresql" ] && [ "$DB_HOST" != "127.0.0.1" ]; then
   warn "engine is postgresql but DB_URI names $DB_HOST, not 127.0.0.1 (the client node's HAProxy)."
   note "loading and 'crdblab capture' will not follow a Patroni failover; expected"
-  note "postgresql://root@127.0.0.1:5000/ycsb?sslmode=disable (see instructions.md section 6)."
+  note "postgresql://root:<password>@127.0.0.1:5000/ycsb?sslmode=disable (see instructions.md section 6)."
 fi
+
+# Unlike CockroachDB, which runs --insecure and accepts root with no password,
+# Patroni bootstraps a pg_hba of `host all all 0.0.0.0/0 md5`: every TCP
+# connection needs one. This is fatal rather than a warning because the
+# alternative is discovering it in the middle of the load step, after the
+# testbed checks have all passed.
+case "$ENGINE:$DB_URI" in
+  postgresql:*://*:*@*) ok "DB_URI carries a password" ;;
+  postgresql:*) die "engine is postgresql but DB_URI has no password.
+  Patroni's pg_hba requires md5 for every host connection, so loading and
+  'crdblab capture' would be refused. Expected the form
+    postgresql://root:<password>@127.0.0.1:5000/ycsb?sslmode=disable
+  with the root password from terraform/scripts/bootstrap-patroni.tftpl
+  (the measured phases read PG_PASSWORD from .env instead, defaulting to the
+  same value)." ;;
+esac
 
 # The seed and row count are read from the profile the sweep will actually use.
 # Hardcoding them here would create a second source of truth for the one
@@ -436,10 +452,21 @@ try_each_host() {  # try_each_host <description> <command-template>
   return 1
 }
 
+# `cockroach workload init ycsb` defaults to --families=true, which puts every
+# column in its own COLUMN FAMILY -- CockroachDB DDL that PostgreSQL rejects
+# outright, so the load fails before a single row is written. The flag changes
+# only the physical layout of the table, not the rows, the keyspace or the
+# seed, so passing it for PostgreSQL does not make the two engines' working
+# sets differ in anything the workload can observe.
+FAMILIES_FLAG=""
+if [ "$ENGINE" = "postgresql" ]; then
+  FAMILIES_FLAG="--families=false "
+fi
+
 load_data() {
   note "loading $INSERT_COUNT rows @ seed $SEED on database (~1-2 min)"
   try_each_host "workload init" \
-    "cockroach workload init ycsb --drop --seed=$SEED --insert-count=$INSERT_COUNT '$URI_PLACEHOLDER'" \
+    "cockroach workload init ycsb --drop ${FAMILIES_FLAG}--seed=$SEED --insert-count=$INSERT_COUNT '$URI_PLACEHOLDER'" \
     >/dev/null \
     || die "workload init failed against every candidate host: ${DB_CANDIDATES[*]}"
 }

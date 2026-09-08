@@ -227,7 +227,40 @@ def test_every_fault_payload_is_privileged(mode, engine):
 
 def test_dead_payload_kills_the_right_process_per_engine():
     assert "cockroach" in get_payload("dead", "cockroachdb")
-    assert "patroni postgres" in get_payload("dead", "postgresql")
+    assert "patroni" in get_payload("dead", "postgresql")
+
+
+def test_the_postgresql_dead_fault_cannot_be_undone_by_systemd():
+    """patroni.service ships Restart=on-failure, so a SIGKILL is a failure by
+    systemd's definition and the unit returns within RestartSec (~100 ms). A
+    dead run would then measure systemd's restart rather than the cluster's
+    failover -- and report a better RTO than CockroachDB's on a fault that was
+    never the same fault. Restart must be disabled before the kill lands."""
+    payload = get_payload("dead", "postgresql")
+    assert "Restart=no" in payload
+    assert payload.index("Restart=no") < payload.index("kill")
+
+
+def test_the_postgresql_dead_fault_signals_the_unit_not_a_process_name():
+    """Patroni runs as `/usr/bin/python3 /usr/bin/patroni`, so its comm is
+    `python3` and `killall -9 patroni` matches nothing; a `pkill -f patroni`
+    written to fix that matches the SSH command carrying it. Signalling the
+    unit's cgroup avoids both, and takes the postmaster with it."""
+    payload = get_payload("dead", "postgresql")
+    assert "systemctl kill" in payload
+    assert "--kill-who=all" in payload
+    assert "killall" not in payload and "pkill" not in payload
+
+
+def test_restoring_postgresql_puts_the_restart_policy_back():
+    """Otherwise the node comes back with Restart=no still set and the next
+    dead run measures a node systemd has stopped supervising."""
+    import inspect
+
+    from crdblab.phases import p4_chaos
+
+    source = inspect.getsource(p4_chaos.restore_target)
+    assert "Restart=on-failure" in source
 
 
 @pytest.mark.parametrize("mode", ["dead", "recover"])

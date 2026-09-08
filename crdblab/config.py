@@ -20,6 +20,11 @@ from .topology import DEFAULT_TOPOLOGY, Topology
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PROFILE_DIR = PROJECT_ROOT / "profiles"
 DEFAULT_RUNS_DIR = PROJECT_ROOT / "runs"
+
+#: Password of the ``root`` role created by ``bootstrap-patroni.tftpl``. Kept
+#: here rather than inline in each DSN so the harness and the provisioning
+#: template have exactly one thing to agree on.
+DEFAULT_PG_PASSWORD = "rootpassword"
 DEFAULT_ENV_FILE = PROJECT_ROOT / ".env"
 
 
@@ -191,12 +196,24 @@ class Settings:
     db_uri: str | None = None
     runs_dir: Path = DEFAULT_RUNS_DIR
     topology: Topology = field(default_factory=lambda: DEFAULT_TOPOLOGY)
+    #: Password for the ``root`` role on the PostgreSQL/Patroni deployment.
+    #:
+    #: Required, unlike CockroachDB's, which runs ``--insecure`` and accepts
+    #: ``root`` with no password at all. Patroni's bootstrap writes a `pg_hba`
+    #: of ``host all all 0.0.0.0/0 md5``, so *every* connection the harness
+    #: makes over TCP -- the generator, the RPO audit writer, the RTO probe
+    #: agent, the DDL that creates their tables -- is refused without one. The
+    #: default matches the ``root`` user created by
+    #: ``terraform/scripts/bootstrap-patroni.tftpl``; change both together, or
+    #: set ``PG_PASSWORD`` in ``.env``.
+    pg_password: str = DEFAULT_PG_PASSWORD
 
     @classmethod
     def from_env(cls) -> "Settings":
         return cls(
             db_uri=os.environ.get("DB_URI"),
             runs_dir=Path(os.environ.get("CRDBLAB_RUNS_DIR", DEFAULT_RUNS_DIR)),
+            pg_password=os.environ.get("PG_PASSWORD", DEFAULT_PG_PASSWORD),
         )
 
     def require_db_uri(self) -> str:

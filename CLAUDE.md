@@ -344,6 +344,64 @@ testbed, not something touched by most code changes to `crdblab/`.
   `*** THE FAULT DID NOT LAND ***` banner in `analyze resilience`. Old runs
   have no `fault_landed` key and correctly stay silent rather than
   false-alarming.
+- **Every PostgreSQL connection needs a password; no CockroachDB one does.**
+  The CockroachDB nodes run `--insecure` and accept `root` with no credential,
+  so every DSN in this harness was written without one. Patroni bootstraps
+  `pg_hba` as `host all all 0.0.0.0/0 md5`, which refuses all of them: the
+  generator, the RPO audit writer, the RTO probe agent, and the `psql` that
+  creates their tables. `Settings.pg_password` (env `PG_PASSWORD`, default
+  `rootpassword` to match `bootstrap-patroni.tftpl`) is the single source;
+  `Target.password` carries it into `bench.py`'s DSN and `p4_chaos.run` builds
+  the audit/probe DSNs and the `PGPASSWORD=` prefix from it. It is URL-quoted,
+  since a `@` or `/` in a password would otherwise re-parse the DSN into a
+  different host. `run-experiment.sh` refuses to start when `--engine
+  postgresql` meets a `DB_URI` without one, rather than failing mid-load.
+- **`cockroach workload init ycsb` defaults to `--families=true`, which is
+  CockroachDB DDL.** It puts each column in its own `COLUMN FAMILY`;
+  PostgreSQL rejects the statement outright, so the load fails before any row
+  is written. `run-experiment.sh` passes `--families=false` on the PostgreSQL
+  path only. The flag changes the table's physical layout and nothing the
+  workload can observe -- not the rows, the keyspace or the seed -- so the two
+  engines' working sets stay comparable.
+- **A PostgreSQL `dead` fault has to be arranged around systemd, or it heals
+  itself.** `patroni.service` ships `Restart=on-failure`, so a SIGKILL is a
+  *failure* by systemd's definition and the unit is back within `RestartSec`
+  (~100 ms). CockroachDB has no unit at all -- cloud-init starts it with
+  `--background` -- so `killall -9 cockroach` is simply the end of it. Left
+  alone, a PostgreSQL `dead` run would have measured systemd's restart loop
+  instead of Patroni's failover, and reported a *better* RTO than CockroachDB
+  on a fault that was never the same fault. The payload now sets
+  `Restart=no` first and delivers the kill with `systemctl kill
+  --kill-who=all --signal=SIGKILL patroni.service`; `restore_target` puts
+  `Restart=on-failure` back before starting the unit. Signalling the unit's
+  cgroup is also the only reliable way to hit Patroni: it runs as
+  `/usr/bin/python3 /usr/bin/patroni`, so its `comm` is `python3` and
+  `killall -9 patroni` matches nothing, while a `pkill -f patroni` written to
+  work around that matches the SSH command carrying it. The postmaster goes
+  down with the cgroup, being Patroni's child.
+- **`net probe` must skip the leaseholder check on PostgreSQL.** It reads
+  placement with `cockroach sql` on the gateway, so against Patroni it does not
+  merely not apply -- it fails, and takes Phase I with it. This became
+  reachable only when `net probe` gained `--engine`; `bench.py` already skipped
+  it for the same reason, and Patroni has no equivalent to assert (its leader
+  is an unbiased etcd election, which is why `chaos run` resolves the primary
+  live).
+- **Known gaps on the PostgreSQL path, not yet closed** (they weaken checks
+  rather than break runs, and all three want a real Patroni cluster to develop
+  against): `preflight.capture_server_config` is skipped wholesale for
+  PostgreSQL, so a pg run's manifest records no hardware fingerprint and
+  `validation.check_run_comparability` degrades the D9 asymmetry gate to a
+  warning for every cross-engine comparison -- the hardware half (`nproc`,
+  `/proc/meminfo`) is not CockroachDB-specific and could be captured for both.
+  `preflight.RowMatchProbe` and `check_write_latency_floor` are likewise
+  CockroachDB-only, so the D8 detector -- a workload addressing an empty
+  keyspace, which fails *flatteringly* -- does not exist on the PostgreSQL
+  side. And for PostgreSQL the RPO audit writer and the RTO probe both dial the
+  client node's single HAProxy, so the two deliberately independent
+  measurements now share one component; HAProxy's `on-marked-down
+  shutdown-sessions` also drops their in-flight connections at failover, which
+  is arguably the right thing to measure but is a behaviour with no CockroachDB
+  counterpart.
 - **Patroni's config must be at `/etc/patroni/config.yml`, and a skipped
   systemd condition is not an error.** Ubuntu's packaged `patroni.service`
   declares `ConditionPathExists=/etc/patroni/config.yml` and
