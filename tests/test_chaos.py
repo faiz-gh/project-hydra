@@ -1,6 +1,6 @@
-"""Tests for Phase IV recovery detection.
+"""Tests for Phases III-IV recovery detection.
 
-``find_recovery`` decides the single number Phase IV exists to produce, and the
+``find_recovery`` decides the single number Phases III-IV exist to produce, and the
 legacy implementation of it did not measure recovery at all: its guard clause
 prevented a recovery being declared sooner than ten of its own (double-speed)
 seconds, so the reported RTOs of 6.0 s and 5.2 s are the guard. These tests pin
@@ -118,3 +118,75 @@ def test_resolution_is_reported_so_the_figure_can_be_qualified():
     a = _attempts([(9.0, "ack"), (9.5, "ack"), (10.0, "ack"), (10.5, "ack")])
     r = availability_rto(a, fault_monotonic=10.0)
     assert r["resolution_s"] == pytest.approx(0.5)
+
+
+# --- Patroni primary resolution ---------------------------------------------
+#
+# Unlike CockroachDB's lease_preferences, nothing pins which node wins
+# Patroni's leader election, so a profile's static chaos.target cannot be
+# trusted for PostgreSQL: resolve_patroni_primary queries the cluster live
+# instead, immediately before the fault is scheduled.
+
+from unittest.mock import patch
+
+from crdblab.phases.p4_chaos import resolve_patroni_primary
+from crdblab.topology import Node, Topology
+
+_NODES = tuple(
+    Node(f"n{i}", f"host{i}", "ubuntu", "gcp", "us-east1", "cloud=gcp,region=us-east1")
+    for i in range(3)
+)
+_TOPO = Topology(nodes=_NODES)
+
+
+class _FakeResponse:
+    def __init__(self, status):
+        self.status = status
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _urlopen_returning(statuses_by_host):
+    """Build a fake ``urlopen`` keyed on the host embedded in the URL."""
+
+    def _urlopen(url, timeout=None):
+        for host, outcome in statuses_by_host.items():
+            if f"//{host}:" in url:
+                if isinstance(outcome, Exception):
+                    raise outcome
+                return _FakeResponse(outcome)
+        raise AssertionError(f"unexpected URL in test: {url}")
+
+    return _urlopen
+
+
+def test_the_single_node_answering_200_is_the_primary():
+    import urllib.error
+
+    fake = _urlopen_returning(
+        {"host0": 503, "host1": 200, "host2": urllib.error.URLError("refused")}
+    )
+    with patch("urllib.request.urlopen", side_effect=fake):
+        assert resolve_patroni_primary(_TOPO).name == "n1"
+
+
+def test_no_primary_found_refuses_rather_than_guessing():
+    import urllib.error
+
+    fake = _urlopen_returning(
+        {"host0": 503, "host1": 503, "host2": urllib.error.URLError("refused")}
+    )
+    with patch("urllib.request.urlopen", side_effect=fake):
+        with pytest.raises(ValueError, match="no cluster member"):
+            resolve_patroni_primary(_TOPO)
+
+
+def test_two_primaries_is_a_split_brain_and_refuses_rather_than_picking_one():
+    fake = _urlopen_returning({"host0": 200, "host1": 200, "host2": 503})
+    with patch("urllib.request.urlopen", side_effect=fake):
+        with pytest.raises(ValueError, match="split-brain"):
+            resolve_patroni_primary(_TOPO)

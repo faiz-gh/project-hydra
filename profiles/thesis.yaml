@@ -6,7 +6,7 @@ name: thesis
 workload:
   # ycsb, not kv: a kv read can only return a key written by the same run
   # process, so a pre-loaded table is unreachable and the effective read working
-  # set co-varies with the concurrency being swept (docs/defects.md, D8).
+  # set co-varies with the concurrency being swept (D8).
   generator: ycsb
   ycsb_workload: CUSTOM      # holds the original 80/20 mix; A-F also available
   read_freq: 0.8
@@ -31,8 +31,8 @@ workload:
   # The generator picks a fresh seed per invocation by default, which decouples
   # the loaded keyspace from the queried one: every lookup then matches zero
   # rows and returns in ~3 ms instead of the ~75 ms a real quorum write costs,
-  # so the broken configuration reads as an excellent result (docs/defects.md,
-  # D8). Verified: matching the seed moves the row-match rate 0.0000 -> 1.0000.
+  # so the broken configuration reads as an excellent result (D8). Verified:
+  # matching the seed moves the row-match rate 0.0000 -> 1.0000.
   seed: 42
   insert_count: 125000
   cycle_length: 1000000     # kv only
@@ -42,7 +42,7 @@ chaos:
   duration_s: 180
   inject_at_s: 60          # wall-clock, measured with a monotonic timer
   concurrency: 100
-  target: linode-2
+  target: gcp-1
   recovery_threshold: 0.80 # single definition, shared by runner and evaluator
   recovery_hold_s: 10
   audit_interval_s: 0.02

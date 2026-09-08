@@ -1,18 +1,21 @@
-# Phase II sweep extended downward to meet the cluster's throughput range.
+# Phase II sweep extended downward, to C=1, so the CockroachDB and PostgreSQL
+# runs it produces can be compared at matched throughput -- and, at C=1, in the
+# strongest unqueued form at all.
 #
-# Why this profile exists. A matched-throughput comparison between Phase II and
-# Phase III requires a load level at which *both* were measured. Under
-# `thesis.yaml` there is none: the cluster saturates at 1,855 ops/s (C=100) and
-# declines beyond it, while the single node's slowest tier is 2,502 ops/s
-# (C=200). The cluster's ceiling lies below the baseline's floor, so the ranges
-# cannot be made to meet by adding cluster tiers -- past saturation more workers
-# cost throughput. The only route is to measure the *baseline* at lower
-# concurrency, which is what this profile does.
+# Why this profile exists. A matched-throughput comparison between the two
+# engines' Phase II runs requires a load level at which *both* were measured.
+# `thesis.yaml`'s tiers are not guaranteed to give one: whichever engine
+# saturates at a lower throughput bounds the top of any overlap, and if its
+# saturated ceiling sits below the other engine's lowest measured tier, no
+# amount of adding tiers at the *high* end closes that gap -- past saturation,
+# more workers cost throughput rather than buying it. The only route open is
+# tiers at the *low* end, which is what this profile adds.
 #
-# The added tiers are C = 1, 2, 5. At C=10 the baseline sustains ~2,570 ops/s at
-# an implied residence time of 3.9 ms, so a single worker should land in the low
-# hundreds and C=5 near the plateau -- bracketing the cluster's measured 624-1,855
-# ops/s band from below and above.
+# The added tiers are C = 1, 2, 5. Sweeping down to C=1 is the stronger reason
+# to extend this profile: at one worker a closed-loop generator has exactly one
+# operation outstanding, so the measured median contains no queueing at all and
+# the two engines can be compared without either being confounded by load --
+# `engine_comparison.lightest_load_write_latency` is exactly this comparison.
 #
 # The existing tiers are retained rather than split into a separate run, so the
 # whole curve comes from one sweep under one randomised tier order. Two runs
@@ -23,10 +26,10 @@
 # Every other parameter is identical to `thesis.yaml`. This matters mechanically,
 # not just for tidiness: `analysis/validation.py::check_run_comparability` refuses
 # to compare two runs whose generator, mix, distribution, seed, insert count,
-# duration or warmup differ, so a casual edit here would make this run
-# incomparable with the Phase III cluster run it exists to be compared against.
-# Concurrency is deliberately *not* one of those keys -- differing tiers are the
-# entire point.
+# duration or warmup differ, so a casual edit here would make a CockroachDB run
+# swept under it incomparable with the PostgreSQL run it exists to be compared
+# against, or vice versa. Concurrency is deliberately *not* one of those keys --
+# differing tiers are the entire point.
 name: thesis-extended
 
 workload:
@@ -49,7 +52,7 @@ workload:
   # MUST equal the values the table was loaded with. A mismatch does not error:
   # every operation matches zero rows, returns in ~3 ms, and reports roughly
   # twenty times the throughput at a twenty-fifth of the latency
-  # (docs/defects.md, D8).
+  # (D8).
   seed: 42
   insert_count: 125000
   cycle_length: 1000000
@@ -59,7 +62,7 @@ chaos:
   duration_s: 180
   inject_at_s: 60
   concurrency: 100
-  target: linode-2
+  target: gcp-1
   recovery_threshold: 0.80
   recovery_hold_s: 10
   audit_interval_s: 0.02

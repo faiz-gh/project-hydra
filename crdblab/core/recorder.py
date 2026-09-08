@@ -112,7 +112,7 @@ NETWORK_COLUMNS: tuple[str, ...] = (
 )
 
 
-#: Schema for the Phase IV RPO audit log: one row per write the audit client
+#: Schema for the Phase III/IV RPO audit log: one row per write the audit client
 #: attempted, in order, with the outcome it observed.
 #:
 #: This is recorded rather than only summarised because the availability RTO is
@@ -271,7 +271,7 @@ class RunDirectory:
 
     @property
     def audit_csv(self) -> Path:
-        """Phase IV audit attempt log, written under :data:`AUDIT_COLUMNS`."""
+        """Phase III/IV audit attempt log, written under :data:`AUDIT_COLUMNS`."""
         return self.path / "audit.csv"
 
     @property

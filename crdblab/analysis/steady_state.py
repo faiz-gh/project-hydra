@@ -1,4 +1,4 @@
-"""Phase II and Phase III steady-state aggregation.
+"""Phase II steady-state aggregation.
 
 This module replaces ``analyze_single_node_baseline.py``, whose central
 operation was a mean over the rows of a long table. That is the wrong operation
@@ -75,7 +75,7 @@ def confidence_interval(values: pd.Series, level: float = 0.95) -> dict[str, Any
 def steady_state_window(run: Run) -> dict[str, Any]:
     """What part of each tier the recorded rows already represent.
 
-    Phase II and III discard the ramp-up window at write time, so applying a
+    Phase II discards the ramp-up window at write time, so applying a
     warmup filter again here would silently trim twice. This reports the profile's
     declared warmup against the earliest interval actually present, so the caller
     can see which is the case instead of assuming.
@@ -168,7 +168,7 @@ def throughput_latency_curve(run: Run, op: str, warmup_s: float = 0.0) -> pd.Dat
     the system at some canonical load: the concurrency setting fixes the number
     of workers, not the load they achieve, so two phases at the same concurrency
     sit at different points on their respective curves and are not comparable.
-    See :mod:`crdblab.analysis.raft_overhead`.
+    See :mod:`crdblab.analysis.engine_comparison`.
     """
     tiers = per_tier(run, warmup_s=warmup_s).set_index("concurrency")
     lat = latency_by_op(run, warmup_s=warmup_s)

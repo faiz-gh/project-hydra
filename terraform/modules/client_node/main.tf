@@ -71,7 +71,7 @@ resource "google_compute_instance" "this" {
 
   metadata = {
     ssh-keys = "ubuntu:${var.ssh_public_key}"
-    user-data = templatefile("${path.root}/scripts/bootstrap-local.tftpl", {
+    user-data = templatefile("${path.root}/scripts/bootstrap-client.tftpl", {
       tailscale_key = var.tailscale_auth_key
       hostname      = var.config.hostname
       join_nodes    = var.cluster_join_nodes

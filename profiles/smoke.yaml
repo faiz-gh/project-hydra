@@ -18,14 +18,16 @@ workload:
   # Do not "simplify" these to smaller values. A seed or row count that disagrees
   # with what the table was loaded with does not fail loudly: every operation
   # matches no row and returns in ~3 ms, so the harness self-test would pass at
-  # an apparently excellent throughput while measuring nothing (docs/defects.md,
-  # D8). That is the one failure mode a self-test must not have.
+  # an apparently excellent throughput while measuring nothing (D8). That is
+  # the one failure mode a self-test must not have.
   seed: 42
   insert_count: 125000
 chaos:
   duration_s: 45
   inject_at_s: 15
-  concurrency: 50
+  concurrency: 10
+  target: gcp-1
+  recovery_threshold: 0.80
 
   # The probe runs in the self-test too, and deliberately so: it opens
   # connections and issues DDL against the cluster, and a smoke test that skipped

@@ -6,7 +6,7 @@ than a decorative appendix. In particular the round-trip matrix determines the
 quorum floor: a write committed by a majority of five voting replicas cannot be
 faster than the round trip to the second-fastest follower, which converts an
 otherwise unfalsifiable latency measurement into one with a physical lower bound
-(see ``core/preflight.py`` and ``docs/defects.md``, D8).
+(see ``core/preflight.py``, D8).
 
 The probe is issued from each node in parallel, one SSH session per source, with
 all destinations batched into a single remote script. Ping output is parsed by

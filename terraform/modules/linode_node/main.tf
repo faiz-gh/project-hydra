@@ -12,7 +12,7 @@ resource "linode_instance" "this" {
   authorized_keys = [var.ssh_public_key]
 
   metadata {
-    user_data = base64encode(templatefile("${path.root}/scripts/bootstrap.tftpl", {
+    user_data = base64encode(templatefile(var.database_engine == "cockroachdb" ? "${path.root}/scripts/bootstrap-cockroachdb.tftpl" : "${path.root}/scripts/bootstrap-patroni.tftpl", {
       tailscale_key = var.tailscale_auth_key
       hostname      = var.config.hostname
       join_nodes    = var.cluster_join_nodes

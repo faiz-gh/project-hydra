@@ -4,6 +4,16 @@ variable "tailscale_auth_key" {
   sensitive   = true
 }
 
+variable "database_engine" {
+  type        = string
+  description = "Database engine to deploy: cockroachdb or postgresql"
+  default     = "cockroachdb"
+  validation {
+    condition     = contains(["cockroachdb", "postgresql"], var.database_engine)
+    error_message = "database_engine must be either 'cockroachdb' or 'postgresql'."
+  }
+}
+
 variable "ssh_public_key" {
   type        = string
   description = "Public SSH key for instance access"
@@ -64,8 +74,8 @@ variable "gcp_config" {
   })
 }
 
-variable "local_config" {
-  description = "Local GCP Configuration and Toggles"
+variable "client_config" {
+  description = "Client Generator Node Configuration and Toggles"
   type = object({
     nodes = map(object({
       enabled      = bool

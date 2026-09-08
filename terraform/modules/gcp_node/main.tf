@@ -71,7 +71,7 @@ resource "google_compute_instance" "this" {
 
   metadata = {
     ssh-keys = "ubuntu:${var.ssh_public_key}"
-    user-data = templatefile("${path.root}/scripts/bootstrap.tftpl", {
+    user-data = templatefile(var.database_engine == "cockroachdb" ? "${path.root}/scripts/bootstrap-cockroachdb.tftpl" : "${path.root}/scripts/bootstrap-patroni.tftpl", {
       tailscale_key = var.tailscale_auth_key
       hostname      = var.config.hostname
       join_nodes    = var.cluster_join_nodes

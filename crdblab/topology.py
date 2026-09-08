@@ -85,18 +85,22 @@ class Topology:
 #: bootstrap breaks leaseholder pinning without any error being raised -- that is
 #: precisely defect D7.
 #:
-#: **The gateway is gcp-1, not linode-1.** The generator and the audit clients run
-#: on whichever node carries ``gateway=True``, and Phase III is compared against
-#: the Phase II baseline in :data:`BASELINE_NODE`, which is a GCP instance. While
-#: the gateway was linode-1 the two phases ran on different CPU models -- Intel
-#: Xeon @ 2.80 GHz against AMD EPYC 7713 -- so their throughput difference
-#: confounded replication with the processor it was measured on, and
-#: ``raft-overhead`` could only be computed by passing
-#: ``--accept-hardware-difference`` (D11a). gcp-1 is the same GCP machine type as
-#: the baseline (``n2-custom-2-4096``, 2 vCPU / ~4 GiB, Intel Xeon), so the
-#: comparison is now single-variable and that override is no longer required.
-#: Nothing else about the topology changed: gcp-1 was already a member, already
-#: inside the fast triangle, and is still not the chaos target.
+#: **The gateway is gcp-1, not linode-1.** The gateway is the member the
+#: leaseholder is preferred onto (below); the generator and audit clients
+#: themselves run from the separate, dedicated :data:`CLIENT_NODE`, which is not
+#: a cluster member at all. Historically, before that separation, they ran
+#: directly on the gateway, and the study's replication-cost comparison was
+#: against a separate unreplicated baseline node rather than against a second
+#: replicated cluster running a different engine (the present design). While the
+#: gateway was linode-1 the two sides of that comparison ran on different CPU
+#: models -- Intel Xeon @ 2.80 GHz against AMD EPYC 7713 -- so their throughput
+#: difference confounded replication with the processor it was measured on, and
+#: could only be computed by accepting the hardware mismatch explicitly (D11a).
+#: gcp-1 is the same GCP machine type used elsewhere in this topology
+#: (``n2-custom-2-4096``, 2 vCPU / ~4 GiB, Intel Xeon), so a comparison pinned to
+#: it is single-variable on hardware without needing that override. Nothing else
+#: about the topology changed: gcp-1 was already a member, already inside the
+#: fast triangle, and is still not the chaos target.
 #:
 #: Two consequences of the move are load-bearing and are asserted, not assumed:
 #:
@@ -138,38 +142,9 @@ DEFAULT_TOPOLOGY = Topology(
     )
 )
 
-#: Phase II baseline: a separate ``cockroach start-single-node`` instance, not a
-#: member of :data:`DEFAULT_TOPOLOGY`. It is deliberately outside the cluster
-#: because Phase II establishes the cost of the workload *without* replication,
-#: against which Phase III measures Raft overhead. Including it in the topology
-#: would corrupt ``len(topology)`` where that is used as the voter count.
-#:
-#: It is a GCP instance despite the ``region=self-hosted`` locality label: the
-#: label says it is an isolated single-node server rather than a cluster member,
-#: and does not describe where it runs (instructions.md, Appendix A).
-#:
-#: HISTORY of the Raft-overhead comparison, because two successive asymmetries
-#: were retired here and the stale text describing them outlived both:
-#:
-#: * Memory. The comment this replaces read "7 GB of RAM against the cluster
-#:   members' 3 GB". That was D9, and it was fixed in the provisioning: every
-#:   node is now 2 vCPU / ~4 GiB (``n2-custom-2-4096``, ``g6-dedicated-2``,
-#:   ``Standard_B2ls_v2``), and the captured manifests read 4,007,012 kB here
-#:   against 4,005,704 kB on the gateway -- 0.03%, within
-#:   ``validation.MEMORY_TOLERANCE``. The claim of a 7 GB/3 GB split has been
-#:   false since that reprovisioning and is corrected rather than merely deleted,
-#:   since docs/dissertation-verification.md cites this comment as a stale fact a
-#:   write-up would otherwise inherit.
-#: * CPU model. Until the gateway moved to gcp-1 this host was an Intel Xeon
-#:   @ 2.80 GHz and the gateway an AMD EPYC 7713 (D11a), which confounded
-#:   replication cost with the processor. Both phases now run on the same GCP
-#:   machine type, so ``check_run_comparability`` should find nothing to accept.
-#:
-#: The comparison is therefore single-variable on the two axes the harness can
-#: see. It still is not free of confounds it cannot see -- utilisation is not
-#: matched by matching throughput, and ``raft_overhead`` reports the gap per
-#: point for that reason -- so do not read "same hardware" as "same conditions".
-BASELINE_NODE = Node(
-    "local-1", "crdb-local-1", "ubuntu", "local", "self-hosted",
-    "cloud=local,region=self-hosted",
+#: Client Generator Node: A dedicated instance used to generate workload traffic
+#: against the database cluster (CockroachDB or Patroni).
+CLIENT_NODE = Node(
+    "client-1", "crdb-client-1", "ubuntu", "gcp", "us-east1",
+    "cloud=gcp,region=us-east1",
 )

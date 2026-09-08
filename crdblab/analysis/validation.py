@@ -409,7 +409,7 @@ def check_run_comparability(
                         for flag, (v0, v1) in mismatched.items()
                     )
                     + "; the difference between them therefore confounds the "
-                    "variable under study with cache residency (docs/defects.md, D9)",
+                    "variable under study with cache residency (D9)",
                     {"mismatched_server_flags": {k: list(v) for k, v in mismatched.items()}},
                 )
             )

@@ -1,7 +1,14 @@
-"""Phase IV: fault injection, and the measurement of RTO and RPO.
+"""Phases III-IV: fault injection, and the measurement of RTO and RPO.
 
-A steady-state workload is driven against the gateway while a fault is injected
-into a different node at a fixed offset. Two quantities are measured:
+Phase III is the `recover` fault (a healable network partition); Phase IV is
+`dead` (the process is killed outright and stays down). Both modes share this
+one module because the sweep, the injection scheduling, and the RTO/RPO
+measurement are identical between them -- only the fault payload
+(:func:`get_payload`) and its recoverability differ.
+
+A steady-state workload is driven from the dedicated client node against the
+cluster while a fault is injected into the primary at a fixed offset. Two
+quantities are measured:
 
 * **RTO**, the interval from the fault to the point at which throughput has
   returned to a stated fraction of its pre-fault level and stayed there.
@@ -72,18 +79,70 @@ from ..core.recorder import (
 )
 from ..core.rto_probe import CREATE_TABLE_SQL, RtoProbe
 from ..core.workload import PERIODIC, Sample, WorkloadParser, group_timed_ticks
-from ..topology import Node, Topology
+from ..topology import CLIENT_NODE, Node, Topology
 
 #: Fault modes. ``dead`` removes the process outright; ``recover`` severs the
 #: node's overlay network for a period and then restores it, which exercises the
 #: heal path rather than only the detection path.
 MODES = ("dead", "recover")
 
-_PAYLOADS = {
-    "dead": "killall -9 cockroach",
-    # Detached so the SSH session can return before the network drops beneath it.
-    "recover": "nohup bash -c 'tailscale down && sleep 45 && tailscale up' >/dev/null 2>&1 &",
-}
+def get_payload(mode: str, engine: str) -> str:
+    if mode == "dead":
+        return "killall -9 patroni postgres" if engine == "postgresql" else "killall -9 cockroach"
+    elif mode == "recover":
+        return "nohup bash -c 'tailscale down && sleep 45 && tailscale up' >/dev/null 2>&1 &"
+    raise ValueError(f"Unknown mode: {mode}")
+
+
+#: Patroni's own REST endpoint, port 8008, answers 200 on the primary and a
+#: non-2xx status everywhere else -- the same check
+#: ``terraform/scripts/bootstrap-client.tftpl`` configures HAProxy's
+#: ``patroni_primary`` backend to poll. Unlike CockroachDB, nothing in
+#: ``bootstrap-patroni.tftpl`` biases which node wins Patroni's etcd-based
+#: leader election, so a profile's static ``chaos.target`` cannot be trusted to
+#: name the primary the way it can for CockroachDB (where
+#: ``preflight.check_leaseholder_placement`` asserts the gateway holds the
+#: lease). The primary is therefore resolved here, live, immediately before the
+#: fault is scheduled, rather than assumed from configuration.
+PATRONI_PRIMARY_PORT = 8008
+PATRONI_PRIMARY_TIMEOUT_S = 3.0
+
+
+def resolve_patroni_primary(topo: Topology, timeout_s: float = PATRONI_PRIMARY_TIMEOUT_S) -> Node:
+    """Query every cluster member's Patroni REST API and return the primary.
+
+    Raises if zero or more than one node claims to be primary: zero means the
+    cluster has no leader right now (mid-failover, or Patroni is down), and more
+    than one means a split-brain the harness must not paper over by picking
+    one arbitrarily.
+    """
+    import urllib.error
+    import urllib.request
+
+    primaries: list[Node] = []
+    unreachable: list[str] = []
+    for node in topo.nodes:
+        url = f"http://{node.host}:{PATRONI_PRIMARY_PORT}/primary"
+        try:
+            with urllib.request.urlopen(url, timeout=timeout_s) as response:
+                if response.status == 200:
+                    primaries.append(node)
+        except (urllib.error.URLError, OSError) as exc:
+            unreachable.append(f"{node.name} ({exc})")
+
+    if len(primaries) == 1:
+        return primaries[0]
+    if not primaries:
+        raise ValueError(
+            "no cluster member's Patroni REST API (port "
+            f"{PATRONI_PRIMARY_PORT}) reports itself primary; the cluster may be "
+            f"mid-failover or unreachable. Unreachable: {unreachable or 'none'}"
+        )
+    raise ValueError(
+        "more than one cluster member's Patroni REST API reports itself "
+        f"primary ({', '.join(n.name for n in primaries)}); this is a "
+        "split-brain and the harness refuses to guess which one to fault"
+    )
 
 
 @dataclass
@@ -219,7 +278,7 @@ class AuditWriter:
         )
 
 
-def inject_fault(node: Node, mode: str) -> dict[str, Any]:
+def inject_fault(node: Node, mode: str, engine: str) -> dict[str, Any]:
     """Apply the fault and return when it was applied.
 
     The timestamp is taken before the call and reported even when the transport
@@ -227,12 +286,10 @@ def inject_fault(node: Node, mode: str) -> dict[str, Any]:
     arrived on: an SSH error here is evidence the fault landed, not that it
     did not.
     """
-    if mode not in _PAYLOADS:
-        raise ValueError(f"unknown chaos mode {mode!r}; expected one of {MODES}")
     at_utc = utcnow()
     at_monotonic = time.monotonic()
     try:
-        result = ssh.run(node, _PAYLOADS[mode], timeout=10)
+        result = ssh.run(node, get_payload(mode, engine), timeout=10)
         detail = f"rc={result.returncode}"
     except Exception as exc:  # noqa: BLE001
         detail = f"transport error after dispatch: {type(exc).__name__}"
@@ -379,28 +436,75 @@ def run(
     mode: str,
     database: str = "ycsb",
     audit_database: str = "bench",
+    engine: str = "cockroachdb",
 ) -> tuple[RunDirectory, dict[str, Any]]:
     """Drive a steady-state workload, inject a fault, and measure RTO and RPO."""
     spec = profile.workload
     chaos = profile.chaos
     topo = settings.topology
-    gateway = topo.gateway
-    target = topo.get(chaos.target)
+    gateway = CLIENT_NODE
+    if engine == "postgresql":
+        # chaos.target names the intended primary for CockroachDB, where it is
+        # pinned by lease_preferences and checked below -- but nothing pins
+        # Patroni's leader, so the profile's static value cannot be trusted
+        # here. Resolve who actually holds the lease live instead.
+        fault_target = resolve_patroni_primary(topo)
+        if fault_target.name != chaos.target:
+            print(
+                f"  note: profile names {chaos.target!r} as chaos.target, but "
+                f"{fault_target.name!r} is the Patroni primary right now; "
+                "faulting the actual primary"
+            )
+    else:
+        fault_target = topo.get(chaos.target)
 
-    if target.host == gateway.host:
+    if fault_target.host == gateway.host:
         raise ValueError(
-            f"chaos target {target.name!r} is the gateway the workload is driven "
+            f"chaos target {fault_target.name!r} is the gateway the workload is driven "
             "from; the fault would remove the measurement apparatus along with "
             "the node under test"
         )
 
     report = preflight.PreflightReport()
-    preflight.check_clock_offset(report, [gateway, target])
-    preflight.check_leaseholder_placement(report, gateway, database, gateway.region)
+    preflight.check_clock_offset(report, [gateway, fault_target])
+    if engine == "cockroachdb":
+        preflight.check_leaseholder_placement(report, topo.gateway, database, topo.gateway.region)
+    else:
+        report.add(
+            "patroni_primary_resolved",
+            True,
+            f"resolved {fault_target.name} ({fault_target.host}) as the current "
+            "Patroni primary via its REST API immediately before scheduling "
+            "the fault",
+            target=fault_target.name,
+        )
     report.raise_if_failed()
 
-    workload_dsn = f"postgresql://root@{gateway.host}:26257/{database}?sslmode=disable"
-    audit_dsn = f"postgresql://root@{gateway.host}:26257/{audit_database}?sslmode=disable"
+    if engine == "postgresql":
+        workload_uri = f"postgresql://root@127.0.0.1:5000/{database}?sslmode=disable"
+        audit_dsn = f"postgresql://root@127.0.0.1:5000/{audit_database}?sslmode=disable"
+    else:
+        # A single connection, not one per cluster member: `cockroach workload
+        # run`, given more than one URL, dials its --concurrency connections
+        # *serially* against the list rather than in parallel -- ~2.65s each,
+        # measured on this topology, turning a sub-second connect into minutes
+        # at any real concurrency. That delay once landed *after* this run's
+        # fault-injection timer had already fired, so a chaos run's recorded
+        # RTO measured a fault injected mid-connection-setup, before the
+        # generator had sent a single operation. The single node chosen here
+        # is never the fault target, so the generator does not need multi-host
+        # tolerance to begin with -- it was never connected to the node that
+        # dies. The audit/probe connections below are unaffected: they are
+        # single psycopg connections each (or a small worker pool), not
+        # --concurrency many, and libpq's own multi-host fallback is a
+        # different, lighter-weight code path than the Go workload tool's.
+        admin_node = next((n for n in topo.nodes if n.name != fault_target.name), topo.gateway)
+        workload_uri = (
+            f"postgresql://root@{admin_node.host}:{admin_node.sql_port}/"
+            f"{database}?sslmode=disable"
+        )
+        hosts_ports = ",".join(f"{node.host}:{node.sql_port}" for node in topo.nodes)
+        audit_dsn = f"postgresql://root@{hosts_ports}/{audit_database}?sslmode=disable"
 
     # Both tables are dropped and recreated, and they are two tables rather than
     # one. Sharing would put the RPO sequence and the RTO canary in the same
@@ -411,14 +515,24 @@ def run(
         + CREATE_TABLE_SQL.format(table=chaos.probe_table)
         + ";"
     )
-    ssh.run(
-        gateway,
-        f"cockroach sql --insecure --host={gateway.host}:26257 --database={audit_database} "
-        '-e "DROP TABLE IF EXISTS rpo_audit; '
-        'CREATE TABLE rpo_audit (seq_id INT8 PRIMARY KEY, ts TIMESTAMPTZ DEFAULT now()); '
-        f'{canary_ddl}"',
-        timeout=60,
-    )
+    if engine == "postgresql":
+        ssh.run(
+            gateway,
+            f"psql -h 127.0.0.1 -p 5000 -U root -d {audit_database} "
+            '-c "DROP TABLE IF EXISTS rpo_audit; '
+            'CREATE TABLE rpo_audit (seq_id INT8 PRIMARY KEY, ts TIMESTAMPTZ DEFAULT now()); '
+            f'{canary_ddl}"',
+            timeout=60,
+        )
+    else:
+        ssh.run(
+            gateway,
+            f"cockroach sql --insecure --host={admin_node.host}:{admin_node.sql_port} --database={audit_database} "
+            '-e "DROP TABLE IF EXISTS rpo_audit; '
+            'CREATE TABLE rpo_audit (seq_id INT8 PRIMARY KEY, ts TIMESTAMPTZ DEFAULT now()); '
+            f'{canary_ddl}"',
+            timeout=60,
+        )
 
     run_dir = RunDirectory(settings.runs_dir, new_run_id(f"p4-chaos-{mode}"))
     manifest = Manifest(
@@ -429,14 +543,20 @@ def run(
         clock_epoch_utc=None,
         topology=[
             {"name": gateway.name, "host": gateway.host, "role": "generator, audit endpoint"},
-            {"name": target.name, "host": target.host, "role": f"chaos target ({mode})"},
+            {"name": fault_target.name, "host": fault_target.host, "role": f"chaos target ({mode})"},
         ],
         ssh_options=list(ssh.SSH_OPTIONS),
     )
-    server = preflight.capture_server_config(gateway)
-    manifest.cockroach_version = server.get("version")
-    manifest.note(f"server: {server['start_command']}")
-    manifest.note(f"host: {preflight.format_hardware(server['hardware'])}")
+    server = {}
+    if engine == "cockroachdb":
+        server = preflight.capture_server_config(topo.gateway)
+        manifest.cockroach_version = server.get("version")
+        manifest.note(f"server: {server.get('start_command', '')}")
+        manifest.note(f"host: {preflight.format_hardware(server.get('hardware', {}))}")
+    else:
+        manifest.note(f"engine: postgresql (patroni HA)")
+    payload = get_payload(mode, engine)
+    manifest.note(f"fault scheduled for {profile.chaos.inject_at_s}s: {payload}")
     manifest.note(
         f"rto probe: {'enabled' if chaos.probe_enabled else 'DISABLED'}, "
         f"{chaos.probe_workers} worker(s) at {chaos.probe_interval_s * 1000:.0f} ms "
@@ -450,11 +570,11 @@ def run(
         f"--request-distribution={spec.request_distribution} "
         f"--read-freq={spec.read_freq} --update-freq={spec.update_freq} "
         f"--concurrency={chaos.concurrency} --duration={chaos.duration_s}s "
-        f"--display-every={spec.display_every_s}s '{workload_dsn}'"
+        f"--display-every={spec.display_every_s}s '{workload_uri}'"
     )
     manifest.generator_command = generator
 
-    events: dict[str, Any] = {"mode": mode, "target": target.name}
+    events: dict[str, Any] = {"mode": mode, "target": fault_target.name}
     series: list[tuple[float, float]] = []
     injected: dict[str, Any] = {}
     first_error_at: float | None = None
@@ -465,11 +585,12 @@ def run(
         while (remaining := deadline - time.monotonic()) > 0:
             if stop_timer.wait(min(remaining, 0.25)):
                 return
-        injected.update(inject_fault(target, mode))
+        injected.update(inject_fault(fault_target, mode, engine))
         injected["at_offset_s"] = round(injected["at_monotonic"] - t_zero, 3)
         print(
-            f"  [{injected['at_offset_s']:6.1f}s] fault injected on {target.host} "
-            f"({mode}); {injected['detail']}"
+            f"  [{injected['at_offset_s']:6.1f}s] fault injected on {fault_target.host} "
+            f"({mode}); {injected['detail']}",
+            flush=True,
         )
 
     stop_timer = threading.Event()
@@ -481,7 +602,11 @@ def run(
     observed_at: dict[float, float] = {}
     raw_path = run_dir.raw(f"chaos_{mode}.txt")
 
-    print(f"  running {chaos.duration_s}s at C={chaos.concurrency}, injecting at {chaos.inject_at_s}s")
+    print(
+        f"  running {chaos.duration_s}s at C={chaos.concurrency}, injecting at "
+        f"{chaos.inject_at_s}s",
+        flush=True,
+    )
 
     # The probe's epoch is taken *before* it starts and is then handed to it, so
     # every offset it records shares an origin with events.json, audit.csv and
@@ -528,7 +653,11 @@ def run(
                             first_error_at = offset
                             events["t_first_error_offset_s"] = round(offset, 3)
                         if int(tick.elapsed_s) % 15 == 0:
-                            print(f"  [{offset:6.1f}s] tps={tick.total_tps:8.1f} errors={tick.errors_cum}")
+                            print(
+                                f"  [{offset:6.1f}s] tps={tick.total_tps:8.1f} "
+                                f"errors={tick.errors_cum}",
+                                flush=True,
+                            )
 
             stop_timer.set()
             timer_thread.join(timeout=5)
@@ -579,9 +708,33 @@ def run(
             else {"measurable": False, "detail": "fault was never injected"}
         )
 
+    clock = clock_offsets(observed_at)
+    fault_offset_s = injected.get("at_offset_s")
+    generator_start_s = clock.get("generator_start_offset_s")
+    if fault_offset_s is not None and generator_start_s is not None and generator_start_s >= fault_offset_s:
+        # This is not a warning about a slow generator; it means the RTO/RPO
+        # figures below describe a fault injected before the generator ever
+        # sent an operation, which happened for real once already (9 min of
+        # serialised multi-host connection setup against a 60 s inject_at_s,
+        # 2026-09-07). The throughput-based recovery detection has no pre-fault
+        # baseline to fall from in that case, and any number it reports is not
+        # a measurement of recovery.
+        print(
+            f"  WARNING: the generator's first sample arrived at {generator_start_s:.1f}s, "
+            f"*after* the fault was injected at {fault_offset_s:.1f}s. The throughput-based "
+            "RTO/degradation-profile in this run is not measuring recovery from steady "
+            "state and should not be trusted -- investigate why connection setup took "
+            "this long before using this run's figures."
+        )
+        manifest.note(
+            f"fault injected at {fault_offset_s:.1f}s but the generator's first sample "
+            f"did not arrive until {generator_start_s:.1f}s; throughput-based recovery "
+            "figures from this run are not measurements of recovery from steady state"
+        )
+
     events.update(
         {
-            "clock": clock_offsets(observed_at),
+            "clock": clock,
             "injected": injected,
             "availability": avail,
             # A second, finer reading of the same quantity, from an independent

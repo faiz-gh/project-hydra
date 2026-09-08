@@ -13,15 +13,9 @@ in :meth:`Run.ticks` / :meth:`Run.latency_by_op`; tier statistics come from
 :class:`crdblab.analysis.resilience.Alignment`. A plotting module that did its
 own aggregation would be a second implementation of the policy D1 violated.
 
-Two constraints fall directly out of the Stage 5 analysis and are enforced in
+One constraint falls directly out of the Stage 5 analysis and is enforced in
 code rather than left to the author's memory:
 
-* **The Raft-overhead figure is a throughput-latency curve, never a bar chart of
-  per-concurrency deltas.** Concurrency fixes the worker count, not the offered
-  load, so two systems at the same concurrency sit at different points on their
-  own curves. A bar chart of their difference draws that artefact as if it were
-  a result -- in this data it would show the replicated cluster reading *faster*
-  than the unreplicated baseline.
 * **The resilience figure takes its time axis from the run's clock alignment.**
   Where the offset between the generator's clock and the harness's was measured,
   the fault is a line; where it was only bounded, it is a **band** of the
@@ -47,7 +41,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
 
-from ..analysis import raft_overhead, resilience, steady_state
+from ..analysis import resilience, steady_state
 from ..analysis.loader import NetworkRun, Run
 
 # --- palette ---------------------------------------------------------------
@@ -218,7 +212,7 @@ def network_matrix(run: NetworkRun, out_dir: Path) -> Path:
     return _finish(fig, ax, [run.run_id], out_dir / "fig1_network_matrix.png")
 
 
-# --- Phases II and III -----------------------------------------------------
+# --- Phase II ---------------------------------------------------------------
 
 def throughput_sweep(runs: Sequence[Run], out_dir: Path) -> Path:
     """Throughput against offered concurrency, with an interval where one exists.
@@ -313,125 +307,7 @@ def latency_by_operation(run: Run, out_dir: Path) -> Path:
     return _finish(fig, axes, [run.run_id], out_dir / "fig3_latency_by_operation.png")
 
 
-def raft_overhead_curve(
-    baseline: Run, cluster: Run, out_dir: Path, op: str = "update",
-    quorum_floor_ms: float | None = None,
-) -> Path:
-    """Replication cost as a throughput-latency curve.
-
-    The only defensible form for this comparison. Each point is one tier and is
-    labelled with the concurrency that produced it, so the reader can see the two
-    phases reach a given throughput at different worker counts -- which is
-    precisely why subtracting them tier by tier is meaningless.
-
-    Where the phases' measured throughput ranges overlap, the region is shaded:
-    that is the only interval in which a matched-throughput statement can be
-    made. Where they do not overlap, the figure says so rather than inviting the
-    eye to interpolate across the gap.
-    """
-    _style()
-    curves = raft_overhead.curves(baseline, cluster, op)
-    fig, ax = plt.subplots(figsize=(5.8, 3.9))
-
-    for index, (phase, frame) in enumerate(curves.groupby("phase", sort=False)):
-        # Concurrency order: the path the experiment traversed. See
-        # steady_state.throughput_latency_curve -- a saturated phase's curve bends
-        # back, and sorting by throughput would draw that as a zigzag.
-        frame = frame.sort_values("concurrency")
-        ax.plot(
-            frame["mean_total_tps"],
-            frame["p50_ms"],
-            color=SERIES[index % len(SERIES)],
-            marker=MARKERS[index % len(MARKERS)],
-            linestyle=DASHES[index % len(DASHES)],
-            markersize=6,
-            markeredgecolor=SURFACE,
-            markeredgewidth=2,
-            label=phase,
-        )
-        # Selective labels, not one per point. With seven tiers a label on every
-        # marker collides: the cluster's C=1, C=2 and C=5 sit within 260 ops/s of
-        # each other on a 2,600-wide axis, and the baseline's C=5, C=10, C=50 and
-        # C=100 within 150 ops/s, so their labels overprint one another and the
-        # band caption. Rendered and observed 2026-09-03 after the low tiers were
-        # added; the earlier four-tier version did not collide, which is why this
-        # only surfaced now.
-        #
-        # The three kept per series are the ones the curve's shape is read from:
-        # where it starts, where it turns, and where it ends. Intermediate tiers
-        # remain visible as markers -- the reader can count them -- but are not
-        # named, which is the standard rule for a labelled series and not a
-        # concession to crowding.
-        peak_idx = frame["mean_total_tps"].idxmax()
-        keep = {
-            int(frame["concurrency"].iloc[0]),
-            int(frame.loc[peak_idx, "concurrency"]),
-            int(frame["concurrency"].iloc[-1]),
-        }
-        for _, point in frame.iterrows():
-            if int(point["concurrency"]) not in keep:
-                continue
-            ax.annotate(
-                f"C={int(point['concurrency'])}",
-                (point["mean_total_tps"], point["p50_ms"]),
-                # Offset horizontally rather than vertically: phase II's tiers
-                # sit almost on top of each other (its curve is flat, which is
-                # the finding), so a label above a marker lands on the segment
-                # joining it to the next.
-                textcoords="offset points", xytext=(9, 0),
-                ha="left", va="center",
-                fontsize=7, color=INK_SECONDARY,
-            )
-
-    matched = raft_overhead.matched_throughput(baseline, cluster, op)
-    if matched["comparable"]:
-        low, high = matched["overlap_tps"]
-        ax.axvspan(low, high, color=SERIES[0], alpha=0.08, zorder=0)
-        # Along the bottom, not the top: the legend occupies the upper left and
-        # the cluster's curve climbs through the upper middle of the band.
-        # Inside the band, in the gap between the baseline's flat curve (~2 ms)
-        # and the quorum floor (~67 ms), which no series crosses within the
-        # band's x-range. The two obvious placements are both occupied: along
-        # the axis floor the baseline curve and its C=1 label now sit, and along
-        # the top the legend and the cluster's C=200 marker do.
-        ax.text(
-            (low + high) / 2, 0.13,
-            f"comparable at matched throughput ({low:.0f}-{high:.0f} ops/s)",
-            transform=ax.get_xaxis_transform(),
-            ha="center", va="center", fontsize=7, color=INK_SECONDARY,
-        )
-    else:
-        ax.text(
-            0.5, 0.02,
-            "measured throughput ranges do not overlap: "
-            "no matched-throughput comparison is available",
-            transform=ax.transAxes, ha="center", va="bottom",
-            fontsize=7.5, color=INK_MUTED, style="italic",
-        )
-
-    if quorum_floor_ms is not None:
-        ax.axhline(quorum_floor_ms, color=WARNING, linewidth=1.4, zorder=1)
-        ax.text(
-            ax.get_xlim()[1], quorum_floor_ms,
-            f" quorum floor {quorum_floor_ms:.0f} ms",
-            va="bottom", ha="right", fontsize=7, color=INK_SECONDARY,
-        )
-
-    ax.set_xlabel("throughput (ops/s), summed across operation types")
-    ax.set_ylabel(f"{op} latency p50 (ms)")
-    ax.set_title(
-        "Cost of Raft replication, as a throughput-latency curve\n"
-        "points at equal concurrency are NOT at equal load",
-        loc="left",
-    )
-    ax.set_ylim(bottom=0)
-    ax.legend(labelcolor=INK_SECONDARY, loc="upper left")
-    return _finish(
-        fig, ax, [baseline.run_id, cluster.run_id], out_dir / "fig4_raft_overhead.png"
-    )
-
-
-#: Output filename per fault class. Phase IV runs one fault of each class and
+#: Output filename per fault class. Phases III-IV each run one fault and
 #: the two timelines are different figures, so the name is keyed on the class
 #: rather than fixed: rendering a second run through a single hard-coded
 #: ``fig5`` filename silently overwrote the first, which is why
@@ -453,7 +329,7 @@ def _resilience_filename(mode: str | None) -> str:
     return f"fig5_resilience_timeline_{slug}.png"
 
 
-# --- Phase IV --------------------------------------------------------------
+# --- Phases III-IV ----------------------------------------------------------
 
 def resilience_timeline(run: Run, out_dir: Path) -> Path:
     """Throughput through a fault, on a single, explicitly stated clock.
@@ -513,9 +389,10 @@ def resilience_timeline(run: Run, out_dir: Path) -> Path:
     elif not performance.get("defined"):
         state = performance.get("post_fault_state") or {}
         if state.get("mean_tps"):
+            frac = state.get('fraction_of_baseline')
+            frac_str = f" ({frac:.0%} of baseline)" if frac is not None else ""
             ax.axhline(state["mean_tps"], color=SERIES[1], linewidth=1.4, linestyle="-.",
-                       label=f"settled {state['mean_tps']:.0f} ops/s "
-                             f"({state['fraction_of_baseline']:.0%} of baseline)")
+                       label=f"settled {state['mean_tps']:.0f} ops/s{frac_str}")
 
     ax.set_xlabel(xlabel)
     ax.set_ylabel("throughput (ops/s)")
@@ -539,28 +416,22 @@ def resilience_timeline(run: Run, out_dir: Path) -> Path:
 def render_all(
     out_dir: Path,
     network: NetworkRun | None = None,
-    baseline: Run | None = None,
     cluster: Run | None = None,
     chaos: Run | Sequence[Run] | None = None,
 ) -> list[Path]:
     """Render every figure whose inputs are available.
 
-    ``chaos`` accepts a sequence because Phase IV produces one timeline per
+    ``chaos`` accepts a sequence because Phases III-IV each produce one timeline per
     fault class and they are separate figures. Calling
     :func:`resilience_timeline` once here was the other half of the fig6
     provenance gap: even with both runs loaded, only one could be drawn.
     """
     written: list[Path] = []
-    floor = network.quorum_floor_ms if network else None
     if network is not None:
         written.append(network_matrix(network, out_dir))
-    sweep = [r for r in (baseline, cluster) if r is not None]
-    if sweep:
-        written.append(throughput_sweep(sweep, out_dir))
     if cluster is not None:
+        written.append(throughput_sweep([cluster], out_dir))
         written.append(latency_by_operation(cluster, out_dir))
-    if baseline is not None and cluster is not None:
-        written.append(raft_overhead_curve(baseline, cluster, out_dir, quorum_floor_ms=floor))
     if chaos is not None:
         runs = [chaos] if isinstance(chaos, Run) else list(chaos)
         for run in runs:

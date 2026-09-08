@@ -44,7 +44,7 @@ MIN_ROW_MATCH_RATE = 0.99
 #: from the workstation to the gateway on 2026-09-02: 376 ms round trip,
 #: and 6.2-6.9 s for a complete `ssh ... chronyc tracking`. The previous 20 s
 #: budget on the clock check was about three times that, and a transient spike
-#: duly exceeded it and refused an entire Phase III sweep.
+#: duly exceeded it and refused an entire Phase II sweep.
 #:
 #: This value is therefore a *hang detector*, not a latency budget: it exists so
 #: a wedged session cannot stall a sweep indefinitely, and nothing is weakened by
@@ -363,7 +363,7 @@ class RowMatchProbe:
         if result.returncode != 0:
             raise PreflightError(
                 "could not read statement statistics, so the row-match rate cannot "
-                "be asserted and this run must not be trusted (docs/defects.md, D8): "
+                "be asserted and this run must not be trusted (D8): "
                 f"{result.stderr.strip() or result.stdout.strip()}"
             )
         # The SET above emits its own acknowledgement line before the result set,
@@ -423,7 +423,7 @@ class RowMatchProbe:
             # Statements existed at start() and none exist now, so the view was
             # flushed *after* this tier's workload stopped and before this
             # sample: the flush moved the evidence rather than the tier failing
-            # to produce it. Observed 2026-09-03 on a 21-tier Phase III sweep,
+            # to produce it. Observed 2026-09-03 on a 21-tier Phase II sweep,
             # where twenty tiers matched at >= 0.9999 and the twenty-first --
             # C=10 rep 3, which had itself just sustained 611.7 ops/s for 55
             # intervals -- reported nothing. The branch above recovers the case
@@ -473,8 +473,8 @@ class RowMatchProbe:
                 False,
                 detail
                 + " and no independent detector covers this tier, so it cannot "
-                "be shown that the workload touched data (docs/defects.md, D8). "
-                "An unreplicated baseline has no quorum floor to corroborate "
+                "be shown that the workload touched data (D8). "
+                "An unreplicated system has no quorum floor to corroborate "
                 "against, which is why this is fatal rather than downgraded",
                 table=self.table,
                 window="flushed; uncorroborated",
@@ -560,7 +560,7 @@ def check_write_latency_floor(
         f"{floor_ms:.1f} ms"
         + ("" if observed_write_p50_ms >= limit else
            "; a committed write cannot outrun quorum, so these writes are "
-           "probably matching no rows (see docs/defects.md, D8)"),
+           "probably matching no rows (D8)"),
         observed_write_p50_ms=round(observed_write_p50_ms, 3),
         quorum_floor_ms=round(floor_ms, 3),
     )

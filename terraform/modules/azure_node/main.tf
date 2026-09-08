@@ -106,7 +106,7 @@ resource "azurerm_linux_virtual_machine" "this" {
     version   = "latest"
   }
 
-  custom_data = base64encode(templatefile("${path.root}/scripts/bootstrap.tftpl", {
+  custom_data = base64encode(templatefile(var.database_engine == "cockroachdb" ? "${path.root}/scripts/bootstrap-cockroachdb.tftpl" : "${path.root}/scripts/bootstrap-patroni.tftpl", {
     tailscale_key = var.tailscale_auth_key
     hostname      = var.config.hostname
     join_nodes    = var.cluster_join_nodes

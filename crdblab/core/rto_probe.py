@@ -53,7 +53,7 @@ therefore costs that link plus the ~70 ms quorum, near 450 ms, and *not* the
 * The load the probe puts on the cluster is *lower* than a naive reading
   suggests, because concurrency here buys observations against a link rather than
   work against the database: eight workers is 18 writes a second, roughly 5% of
-  the ~371 writes/s a Phase IV tier at C=100 issues, and twenty-four is 43/s or
+  the ~371 writes/s a Phase III/IV tier at C=100 issues, and twenty-four is 43/s or
   ~12%. Concurrency is therefore the cheap axis on this testbed and the interval
   is not.
 * **The link, not the design, is what caps the resolution.** A client on the
@@ -77,8 +77,9 @@ deadline is computed from the epoch rather than by adding to the last one. But a
 tick only becomes an attempt if a worker is free, and with writes costing ~450 ms
 from the workstation and eight workers, all but about one tick in fifty finds
 none. Reporting the configured 2 ms as the
-resolution of an RTO would be false precision of exactly the kind
-``docs/defects.md`` is a catalogue of, so what :func:`RtoProbe.summary` reports as
+resolution of an RTO would be false precision of exactly the kind this
+project's recorded instrumentation defects are made of, so what
+:func:`RtoProbe.summary` reports as
 ``resolution_s`` is the *observed* median gap between completed observations, and
 ``dispatch_saturation`` says how often a tick was dropped.
 

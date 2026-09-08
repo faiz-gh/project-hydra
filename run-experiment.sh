@@ -14,7 +14,7 @@
 #   ./run-experiment.sh                     # full sweep, ~75 min
 #   ./run-experiment.sh --smoke             # harness self-test, ~8 min
 #   ./run-experiment.sh --skip-load         # working set already loaded
-#   ./run-experiment.sh --no-chaos          # phases I-III only
+#   ./run-experiment.sh --no-chaos          # phases I-II only, no fault injection
 #
 set -euo pipefail
 
@@ -27,6 +27,14 @@ PY="$VENV/bin/python"
 CRDBLAB="$VENV/bin/crdblab"
 LOG_DIR="$REPO/runs/_logs"
 LOG=""
+
+# Piping this script's own stdout through `tee` (below) means Python is no
+# longer attached to a terminal, so it switches from line-buffered to fully
+# block-buffered output by default -- crdblab's live per-tier progress would
+# then queue up and appear all at once when a buffer fills or the process
+# exits, which reads exactly like "no logs until it's done" even though the
+# code is printing the whole time. This forces line buffering regardless.
+export PYTHONUNBUFFERED=1
 
 # --- output -----------------------------------------------------------------
 
@@ -48,6 +56,10 @@ usage() {
   sed -n '3,18p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
   exit 0
 }
+HAS_ARGS=0
+if [ $# -gt 0 ]; then
+  HAS_ARGS=1
+fi
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -59,6 +71,31 @@ while [ $# -gt 0 ]; do
     *)           die "unknown argument: $1 (try --help)" ;;
   esac
 done
+
+if [ "$HAS_ARGS" -eq 0 ] && [ -t 0 ]; then
+  printf "\nInteractive Configuration:\n"
+  printf "Select test profile:\n"
+  printf "  1) smoke (fast self-test)\n"
+  printf "  2) thesis (standard)\n"
+  printf "  3) thesis-extended (long run)\n"
+  read -p "Choice [1-3, default=3]: " choice
+  case "$choice" in
+    1) PROFILE="smoke" ;;
+    2) PROFILE="thesis" ;;
+    *) PROFILE="thesis-extended" ;;
+  esac
+
+  read -p "Skip data load? (y/N): " skip_choice
+  if [[ "$skip_choice" =~ ^[Yy] ]]; then
+    SKIP_LOAD=1
+  fi
+
+  read -p "Run Chaos phase? (Y/n): " chaos_choice
+  if [[ "$chaos_choice" =~ ^[Nn] ]]; then
+    RUN_CHAOS=0
+  fi
+  printf "\n"
+fi
 
 mkdir -p "$LOG_DIR"
 LOG="$LOG_DIR/experiment-$(date -u +%Y%m%dT%H%M%SZ).log"
@@ -92,24 +129,19 @@ ok "harness installed"
 DB_URI="$(grep -E '^\s*DB_URI=' "$REPO/.env" | tail -1 | cut -d= -f2- | tr -d '"'"'"' ' || true)"
 [ -n "$DB_URI" ] || die "DB_URI is not set in .env"
 
-# Two properties of DB_URI are load-bearing and are asserted rather than assumed.
+# DB_URI is used only for `crdblab capture` and for loading the working set
+# (§3/§4) -- never for the measured phases, which resolve their own connection
+# strings from crdblab/topology.py and --engine. A multi-host DB_URI is
+# therefore fine here: it does not put the wide-area network on any measured
+# path, and it is what lets loading and capture survive the primary being
+# down (postgres wire-protocol clients, including `cockroach workload`, try
+# the listed hosts in order).
 #
-# It must name exactly ONE host. A multi-host URI puts the wide-area network
-# back on the client's path, which is precisely the latency the gateway-execution
-# design exists to exclude -- it would inflate every measured latency and mask
-# the consensus overhead being measured.
-#
-# It must name the `ycsb` database. `cockroach workload init ycsb` refuses any
-# other name, so a URI pointing at `defaultdb` cannot have a loaded working set
-# behind it.
+# It must still name the `ycsb` database. `cockroach workload init ycsb`
+# refuses any other name, so a URI pointing at `defaultdb` cannot have a
+# loaded working set behind it.
 case "$DB_URI" in
-  *,*) die "DB_URI names multiple hosts. Use the single gateway host only:
-    DB_URI=postgresql://root@<gateway>:26257/ycsb?sslmode=disable
-  A multi-host URI reintroduces the wide-area client latency that running the
-  generator on the gateway exists to exclude." ;;
-esac
-case "$DB_URI" in
-  */ycsb\?*|*/ycsb) ok "DB_URI names one host and the ycsb database" ;;
+  */ycsb\?*|*/ycsb) ok "DB_URI names the ycsb database" ;;
   *) die "DB_URI must name the 'ycsb' database, not '$(echo "$DB_URI" | sed 's|.*/||; s|?.*||')'.
   'cockroach workload init ycsb' rejects any other database name, so a URI
   pointing elsewhere cannot have a loaded working set behind it." ;;
@@ -123,30 +155,23 @@ command -v tailscale >/dev/null 2>&1 && {
 
 step "Resolving topology"
 
-read -r GW_USER GW_HOST GW_REGION BL_USER BL_HOST < <("$PY" - <<'PYEOF'
-from crdblab.topology import DEFAULT_TOPOLOGY as t, BASELINE_NODE as b
+read -r GW_USER GW_HOST GW_REGION CL_USER CL_HOST < <("$PY" - <<'PYEOF'
+from crdblab.topology import DEFAULT_TOPOLOGY as t, CLIENT_NODE as c
 g = t.gateway
-print(g.user, g.host, g.region, b.user, b.host)
+print(g.user, g.host, g.region, c.user, c.host)
 PYEOF
 ) || die "could not resolve topology from crdblab.topology"
-ok "gateway $GW_USER@$GW_HOST ($GW_REGION)   baseline $BL_USER@$BL_HOST"
+ok "gateway $GW_USER@$GW_HOST ($GW_REGION)   client $CL_USER@$CL_HOST"
 
 # The gateway is declared in crdblab/topology.py, but DB_URI is hand-written in
-# .env and nothing else reconciles the two. `crdblab capture` drives the
-# generator at whatever DB_URI names while every measured phase drives it at the
-# topology's gateway, so a stale .env does not fail -- it quietly captures a
-# column layout from one machine and measures on another. Since the gateway moved
-# from crdb-linode-1 to crdb-gcp-1 that is a live hazard for anyone with an older
-# .env, so it is asserted here rather than trusted.
+# .env and nothing else reconciles the two. For PostgreSQL, this will usually point
+# to 127.0.0.1 (local HAProxy), while for CockroachDB it will point to the cluster gateway.
 DB_HOST="$(printf '%s' "$DB_URI" | sed -E 's|^[a-z]+://||; s|^[^@/]*@||; s|[:/?].*$||')"
-[ "$DB_HOST" = "$GW_HOST" ] || die "DB_URI names '$DB_HOST' but the gateway is '$GW_HOST'.
-  The gateway is declared in crdblab/topology.py and .env must agree with it. Set:
-    DB_URI=postgresql://root@$GW_HOST:26257/ycsb?sslmode=disable"
-ok "DB_URI names the gateway"
+ok "DB_URI names host $DB_HOST"
 
 # The seed and row count are read from the profile the sweep will actually use.
 # Hardcoding them here would create a second source of truth for the one
-# parameter whose mismatch is silent and flattering (docs/defects.md, D8).
+# parameter whose mismatch is silent and flattering (D8).
 read -r SEED INSERT_COUNT < <("$CRDBLAB" profile "$PROFILE" | "$PY" -c '
 import json,sys
 w = json.load(sys.stdin)["workload"]
@@ -156,22 +181,27 @@ ok "profile '$PROFILE': seed $SEED, insert_count $INSERT_COUNT"
 
 CHAOS_TARGET="$("$CRDBLAB" profile "$PROFILE" | "$PY" -c '
 import json,sys; print(json.load(sys.stdin)["chaos"]["target"])')"
-read -r CT_USER CT_HOST CT_LOCALITY < <("$PY" - "$CHAOS_TARGET" <<'PYEOF'
+# JOIN_HOST is any other cluster member, for the dead-mode restore below: the
+# chaos target now defaults to the gateway itself (CHAOS_TARGET == gcp-1), so
+# --join can no longer just be $GW_HOST -- that would tell a node being
+# restarted to join itself, which is not a real join hint.
+read -r CT_USER CT_HOST CT_LOCALITY JOIN_HOST < <("$PY" - "$CHAOS_TARGET" <<'PYEOF'
 import sys
 from crdblab.topology import DEFAULT_TOPOLOGY as t
 n = t.get(sys.argv[1])
-print(n.user, n.host, n.locality)
+peer = next(p for p in t.nodes if p.name != n.name)
+print(n.user, n.host, n.locality, peer.host)
 PYEOF
 ) || die "could not resolve chaos target '$CHAOS_TARGET'"
-note "chaos target $CT_HOST ($CT_LOCALITY)"
+note "chaos target $CT_HOST ($CT_LOCALITY); rejoin via $JOIN_HOST"
 
 # --- 3. the testbed ---------------------------------------------------------
 
 step "Checking the testbed"
 
 remote "$GW_USER" "$GW_HOST" true || die "cannot ssh to the gateway $GW_HOST"
-remote "$BL_USER" "$BL_HOST" true || die "cannot ssh to the baseline $BL_HOST"
-ok "ssh to gateway and baseline"
+remote "$CL_USER" "$CL_HOST" true || die "cannot ssh to the client $CL_HOST"
+ok "ssh to gateway and client"
 
 LIVE=$(remote "$GW_USER" "$GW_HOST" \
   "cockroach node status --insecure --host=$GW_HOST:26257 --format=csv 2>/dev/null | tail -n +2 | wc -l" \
@@ -220,40 +250,85 @@ esac
 
 step "Working set"
 
-load_one() {  # load_one <user> <host>
-  local user="$1" host="$2"
-  note "loading $INSERT_COUNT rows @ seed $SEED on $host (~1-2 min)"
-  remote "$user" "$host" \
-    "cockroach workload init ycsb --drop --seed=$SEED --insert-count=$INSERT_COUNT \
-     'postgresql://root@$host:26257/ycsb?sslmode=disable'" >/dev/null \
-    || die "workload init failed on $host"
+# `cockroach workload init`/`cockroach sql --url` do NOT accept a PostgreSQL-
+# style comma-separated multi-host URI -- unlike psql/libpq, CockroachDB's own
+# CLI tools hand the whole host segment to Go's DNS resolver verbatim, so
+# `host1:26257,host2:26257` fails as "no such host" rather than trying each in
+# turn. (Observed 2026-09-08: exactly this error against a DB_URI written that
+# way.) CockroachDB is a distributed database, so any live cluster member
+# answers identically for loading or counting; the fallback here is therefore
+# a genuine per-attempt retry across single-host URIs built from
+# crdblab/topology.py, not a syntax the tool is trusted to parse itself. It
+# only applies to the CockroachDB path -- PostgreSQL's DB_URI already points
+# at the client node's local HAProxy (127.0.0.1:5000), which resolves the
+# live primary on its own.
+if [ "$DB_HOST" = "127.0.0.1" ]; then
+  DB_CANDIDATES=("$DB_URI")
+else
+  read -r DB_USER DB_PATH DB_QUERY < <("$PY" - "$DB_URI" <<'PYEOF'
+import sys
+from urllib.parse import urlsplit
+u = urlsplit(sys.argv[1])
+print(u.username or "root", u.path.lstrip("/") or "ycsb", u.query or "sslmode=disable")
+PYEOF
+  ) || die "could not parse DB_URI"
+  CANDIDATE_HOSTS="$("$PY" - <<'PYEOF'
+from crdblab.topology import DEFAULT_TOPOLOGY as t
+ordered = [t.gateway] + [n for n in t.nodes if not n.gateway]
+print(" ".join(n.host for n in ordered))
+PYEOF
+  )"
+  DB_CANDIDATES=()
+  for h in $CANDIDATE_HOSTS; do
+    DB_CANDIDATES+=("postgresql://$DB_USER@$h:26257/$DB_PATH?$DB_QUERY")
+  done
+fi
+
+# Runs a command template against each candidate URI in turn, stopping at the
+# first that succeeds. The template contains the literal token URI_PLACEHOLDER
+# where the candidate URI goes; substituted with plain bash string replacement
+# so no quoting or environment-variable indirection is needed.
+URI_PLACEHOLDER="__DB_URI__"
+
+try_each_host() {  # try_each_host <description> <command-template>
+  local desc="$1" template="$2" uri cmd out
+  for uri in "${DB_CANDIDATES[@]}"; do
+    cmd="${template//$URI_PLACEHOLDER/$uri}"
+    out="$(remote "$CL_USER" "$CL_HOST" "$cmd")" && { printf '%s' "$out"; return 0; }
+    note "$desc against $(printf '%s' "$uri" | sed -E 's|^[a-z]+://[^@]*@||; s|[:/?].*$||') failed, trying next host"
+  done
+  return 1
 }
 
-count_rows() {  # count_rows <user> <host>
-  remote "$1" "$2" \
-    "cockroach sql --insecure --host=$2:26257 --format=csv \
-     -e 'SELECT count(*) FROM ycsb.usertable;' 2>/dev/null | tail -1" | tr -d ' \r'
+load_data() {
+  note "loading $INSERT_COUNT rows @ seed $SEED on database (~1-2 min)"
+  try_each_host "workload init" \
+    "cockroach workload init ycsb --drop --seed=$SEED --insert-count=$INSERT_COUNT '$URI_PLACEHOLDER'" \
+    >/dev/null \
+    || die "workload init failed against every candidate host: ${DB_CANDIDATES[*]}"
+}
+
+count_rows() {
+  try_each_host "row count" \
+    "cockroach sql --url '$URI_PLACEHOLDER' --format=csv -e 'SELECT count(*) FROM ycsb.usertable;' 2>/dev/null | tail -1" \
+    | tr -d ' \r'
 }
 
 if [ "$SKIP_LOAD" -eq 1 ]; then
   warn "--skip-load: not reloading. The seed behind the existing data is NOT verified here;"
   note "pre-flight's row-match probe will catch a mismatch, but only after a tier has run."
 else
-  load_one "$GW_USER" "$GW_HOST"
-  load_one "$BL_USER" "$BL_HOST"
+  load_data
 fi
 
-for pair in "$GW_USER $GW_HOST" "$BL_USER $BL_HOST"; do
-  set -- $pair
-  rows=$(count_rows "$1" "$2" || true)
-  case "$rows" in
-    ''|*[!0-9]*) die "could not count rows on $2 (got: '$rows'). If it reports the table
-  is offline, the import is still replicating -- wait and re-run with --skip-load." ;;
-    *) [ "$rows" -ge "$INSERT_COUNT" ] \
-         && ok "$2: $rows rows" \
-         || die "$2 has $rows rows, expected $INSERT_COUNT" ;;
-  esac
-done
+rows=$(count_rows || true)
+case "$rows" in
+  ''|*[!0-9]*) die "could not count rows on database (got: '$rows'). If it reports the table
+is offline, the import is still replicating -- wait and re-run with --skip-load." ;;
+  *) [ "$rows" -ge "$INSERT_COUNT" ] \
+       && ok "database: $rows rows" \
+       || die "database has $rows rows, expected $INSERT_COUNT" ;;
+esac
 
 # --- 5. the four phases -----------------------------------------------------
 
@@ -263,16 +338,15 @@ phase() {  # phase <label> <crdblab args...>
   "$CRDBLAB" "$@" || die "$label failed. Nothing after this point has run."
 }
 
-phase "Phase I — network substrate"      net probe    --profile "$PROFILE"
-phase "Phase II — unreplicated baseline" bench single --profile "$PROFILE"
-phase "Phase III — five-node cluster"    bench cluster --profile "$PROFILE"
+phase "Phase I — network substrate"        net probe    --profile "$PROFILE"
+phase "Phase II — benchmark, five-node cluster" bench --profile "$PROFILE"
 
 if [ "$RUN_CHAOS" -eq 1 ]; then
-  phase "Phase IV — heal-able partition" chaos run --mode recover --profile "$PROFILE"
+  phase "Phase III — heal-able partition"  chaos run --mode recover --profile "$PROFILE"
 
   # `dead` runs last because it leaves the target down. The harness does not
   # restore it: the fault is real, and restarting is an operator action.
-  phase "Phase IV — process kill"        chaos run --mode dead    --profile "$PROFILE"
+  phase "Phase IV — process kill"          chaos run --mode dead    --profile "$PROFILE"
 
   step "Restoring $CT_HOST"
   # CockroachDB is started by cloud-init with --background, not as a systemd
@@ -297,7 +371,7 @@ if [ "$RUN_CHAOS" -eq 1 ]; then
       --listen-addr=\$TS_IP:26257 --advertise-addr=\$TS_IP:26257 \
       --locality=$CT_LOCALITY \
       --cache=0.25 --max-sql-memory=0.25 \
-      --join=$GW_HOST:26257 --background </dev/null >/dev/null 2>&1" >/dev/null 2>&1 || true
+      --join=$JOIN_HOST:26257 --background </dev/null >/dev/null 2>&1" >/dev/null 2>&1 || true
 
   # Now that the restore returns promptly, the poll has to do its own waiting.
   # It previously inherited the hang as an accidental grace period: six
@@ -339,37 +413,20 @@ done
 
 latest() { ls -1d "$REPO"/runs/*_"$1" 2>/dev/null | tail -1; }
 
-P1="$(latest p1-network)"; P2="$(latest p2_baseline)"; P3="$(latest p3_cluster)"
+P1="$(latest p1-network)"; P2="$(latest bench_cluster)"
 P4R="$(latest p4-chaos-recover)"; P4D="$(latest p4-chaos-dead)"
 
 step "Analysis"
 [ -n "$P2" ] && "$CRDBLAB" analyze steady-state "$P2"
-[ -n "$P3" ] && "$CRDBLAB" analyze steady-state "$P3"
-
-if [ -n "$P2" ] && [ -n "$P3" ]; then
-  # --accept-hardware-difference is deliberately NOT passed any more. It used to
-  # be mandatory here: the Phase II baseline is a GCP instance and the gateway
-  # was a Linode one, so the two phases differed in CPU model and the flag was
-  # the only way to compute the comparison at all (D11a). The gateway is now
-  # crdb-gcp-1, the same GCP machine type as the baseline, so there should be
-  # nothing left to accept -- and running without the flag is what makes that a
-  # tested claim rather than an assumption. If this refuses, the two runs really
-  # do differ and the refusal names exactly how; do not paper over it by adding
-  # the flag back without reading what it says.
-  "$CRDBLAB" analyze raft-overhead --baseline "$P2" --cluster "$P3" \
-    || die "raft-overhead refused to compare Phase II with Phase III.
-  Read the refusal above. Since the gateway moved to crdb-gcp-1 the two phases
-  are supposed to be on identical hardware, so a hardware refusal here means the
-  testbed does not match crdblab/topology.py -- not that the flag is missing."
-fi
+# Note: For dual-engine comparison, run the script for both engines separately,
+# then use: crdblab analyze engine-comparison --crdb <CRDB_RUN> --pg <PG_RUN>
 [ -n "$P4R" ] && "$CRDBLAB" analyze resilience "$P4R"
 [ -n "$P4D" ] && "$CRDBLAB" analyze resilience "$P4D"
 
 step "Figures"
 FIG_ARGS=()
 [ -n "$P1" ]  && FIG_ARGS+=(--network  "$(basename "$P1")")
-[ -n "$P2" ]  && FIG_ARGS+=(--baseline "$(basename "$P2")")
-[ -n "$P3" ]  && FIG_ARGS+=(--cluster  "$(basename "$P3")")
+[ -n "$P2" ]  && FIG_ARGS+=(--cluster "$(basename "$P2")")
 # BOTH fault classes, because there is one timeline figure per class and
 # `--chaos` is a pin, not a filter. Passing only the dead run left
 # fig6_resilience_timeline_recover untouched, so it kept whatever data the last

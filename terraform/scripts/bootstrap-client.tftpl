@@ -1,0 +1,89 @@
+#!/bin/bash
+set -e
+
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -yq
+apt-get install -yq wget tar curl chrony haproxy postgresql-client
+
+# ==========================================
+# 1. Install & Configure Tailscale Mesh
+# ==========================================
+echo "Installing Tailscale..."
+curl -fsSL https://tailscale.com/install.sh | sh
+tailscale up --authkey="${tailscale_key}" --hostname="${hostname}" --accept-dns=true
+
+echo "Waiting for Tailscale IP assignment..."
+TS_IP=""
+while [ -z "$TS_IP" ]; do
+    sleep 2
+    TS_IP=$(tailscale ip -4 || true)
+done
+echo "Node registered on mesh with IP: $TS_IP"
+
+# Pin this node's own name to the address to avoid MagicDNS resolving to link-local
+grep -qxF "$TS_IP ${hostname}" /etc/hosts || echo "$TS_IP ${hostname}" >> /etc/hosts
+
+# ==========================================
+# 2. NTP & Clock Sync
+# ==========================================
+echo "Configuring Chrony..."
+systemctl enable chrony
+systemctl start chrony
+chronyc makestep || true
+chronyc tracking
+
+# ==========================================
+# 3. Install CockroachDB (Client Only)
+# ==========================================
+echo "Installing CockroachDB v26.3.0 for client binaries..."
+wget -qO- https://binaries.cockroachdb.com/cockroach-v26.3.0.linux-amd64.tgz | tar xvz
+cp -i cockroach-v26.3.0.linux-amd64/cockroach /usr/local/bin/
+
+# We do NOT run cockroach start-single-node. This is a pure load generator node.
+
+# ==========================================
+# 4. Configure HAProxy for Patroni/PostgreSQL
+# ==========================================
+# In PostgreSQL mode, this HAProxy routes port 5000 to the current Patroni primary.
+# The nodes list is injected via the join_nodes variable.
+IFS=',' read -ra PEERS <<< "${join_nodes}"
+
+cat <<EOF > /etc/haproxy/haproxy.cfg
+global
+    log /dev/log local0
+    log /dev/log local1 notice
+    maxconn 4096
+    user haproxy
+    group haproxy
+    daemon
+
+defaults
+    log     global
+    mode    tcp
+    option  tcplog
+    option  dontlognull
+    retries 3
+    timeout connect 5s
+    timeout client  300s
+    timeout server  300s
+
+frontend db_front
+    bind *:5000
+    default_backend patroni_primary
+
+backend patroni_primary
+    option httpchk GET /primary
+    http-check expect status 200
+    default-server inter 3s fall 3 rise 2 on-marked-down shutdown-sessions
+EOF
+
+for peer in "$${PEERS[@]}"; do
+    if [ "$peer" != "${hostname}" ]; then
+        echo "    server $peer $peer:5432 maxconn 1000 check port 8008" >> /etc/haproxy/haproxy.cfg
+    fi
+done
+
+systemctl enable haproxy
+systemctl restart haproxy
+
+echo "✅ Client node provisioned successfully."

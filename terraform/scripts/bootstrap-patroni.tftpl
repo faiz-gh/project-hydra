@@ -1,0 +1,161 @@
+#!/bin/bash
+set -e
+
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -yq
+apt-get install -yq wget tar curl chrony gnupg2 software-properties-common jq
+
+# ==========================================
+# 1. Install & Configure Tailscale Mesh
+# ==========================================
+echo "Installing Tailscale..."
+curl -fsSL https://tailscale.com/install.sh | sh
+tailscale up --authkey="${tailscale_key}" --hostname="${hostname}" --accept-dns=true
+
+echo "Waiting for Tailscale IP assignment..."
+TS_IP=""
+while [ -z "$TS_IP" ]; do
+    sleep 2
+    TS_IP=$(tailscale ip -4 || true)
+done
+echo "Node registered on mesh with IP: $TS_IP"
+
+# Pin hostname to TS_IP
+grep -qxF "$TS_IP ${hostname}" /etc/hosts || echo "$TS_IP ${hostname}" >> /etc/hosts
+
+# ==========================================
+# 2. NTP & Clock Sync
+# ==========================================
+echo "Configuring Chrony..."
+systemctl enable chrony
+systemctl start chrony
+chronyc makestep || true
+
+# ==========================================
+# 3. Install etcd, PostgreSQL, Patroni
+# ==========================================
+echo "Installing PostgreSQL and Patroni..."
+sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | apt-key add -
+apt-get update -yq
+
+apt-get install -yq etcd postgresql-16 postgresql-client-16 patroni python3-psycopg2
+
+# ==========================================
+# 4. Configure etcd cluster
+# ==========================================
+# Build etcd cluster string from join_nodes
+IFS=',' read -ra PEERS <<< "${join_nodes}"
+ETCD_CLUSTER=""
+for peer in "$${PEERS[@]}"; do
+    if [ -n "$ETCD_CLUSTER" ]; then ETCD_CLUSTER="$ETCD_CLUSTER,"; fi
+    ETCD_CLUSTER="$ETCD_CLUSTER$peer=http://$peer:2380"
+done
+
+cat <<EOF > /etc/default/etcd
+ETCD_NAME="${hostname}"
+ETCD_DATA_DIR="/var/lib/etcd/default.etcd"
+ETCD_LISTEN_PEER_URLS="http://$TS_IP:2380"
+ETCD_LISTEN_CLIENT_URLS="http://$TS_IP:2379,http://127.0.0.1:2379"
+ETCD_INITIAL_ADVERTISE_PEER_URLS="http://${hostname}:2380"
+ETCD_ADVERTISE_CLIENT_URLS="http://${hostname}:2379"
+ETCD_INITIAL_CLUSTER="$ETCD_CLUSTER"
+ETCD_INITIAL_CLUSTER_STATE="new"
+ETCD_INITIAL_CLUSTER_TOKEN="patroni-cluster"
+EOF
+
+systemctl enable etcd
+systemctl restart etcd
+
+# ==========================================
+# 5. Configure Patroni
+# ==========================================
+cat <<EOF > /etc/patroni/patroni.yml
+scope: postgres-cluster
+namespace: /db/
+name: ${hostname}
+
+restapi:
+  listen: 0.0.0.0:8008
+  connect_address: ${hostname}:8008
+
+etcd:
+  host: 127.0.0.1:2379
+
+bootstrap:
+  dcs:
+    ttl: 30
+    loop_wait: 10
+    retry_timeout: 10
+    maximum_lag_on_failover: 1048576
+    postgresql:
+      use_pg_rewind: true
+      use_slots: true
+      parameters:
+        synchronous_commit: on
+        synchronous_standby_names: 'ANY 2 (*)'
+        max_connections: 500
+  initdb:
+    - auth-host: md5
+    - auth-local: trust
+    - encoding: UTF8
+    - data-checksums
+
+  pg_hba:
+    - host replication replicator 0.0.0.0/0 md5
+    - host all all 0.0.0.0/0 md5
+    - host all all ::0/0 md5
+
+  users:
+    admin:
+      password: adminpassword
+      options:
+        - createrole
+        - createdb
+    root:
+      password: rootpassword
+      options:
+        - superuser
+
+postgresql:
+  listen: 0.0.0.0:5432
+  connect_address: ${hostname}:5432
+  data_dir: /var/lib/postgresql/16/data
+  bin_dir: /usr/lib/postgresql/16/bin
+  pgpass: /tmp/pgpass
+  authentication:
+    replication:
+      username: replicator
+      password: replpassword
+    superuser:
+      username: postgres
+      password: postgrespassword
+
+tags:
+  nofailover: false
+  noloadbalance: false
+  clonefrom: false
+  nosync: false
+EOF
+
+systemctl stop postgresql
+systemctl disable postgresql
+systemctl enable patroni
+systemctl start patroni
+
+# Wait for Patroni to initialize
+echo "Waiting for Patroni to start and elect a leader..."
+sleep 20
+
+PRIMARY_NODE="$${PEERS[0]}"
+if [ "${hostname}" == "$PRIMARY_NODE" ]; then
+    echo "Creating databases on the primary..."
+    # Ensure this node is the primary before writing
+    sleep 10
+    export PGPASSWORD=rootpassword
+    psql -h 127.0.0.1 -U root -d postgres -c "CREATE DATABASE bench;" || true
+    psql -h 127.0.0.1 -U root -d postgres -c "CREATE DATABASE ycsb;" || true
+    echo "Databases created."
+fi
+
+echo "✅ Patroni node provisioned successfully."

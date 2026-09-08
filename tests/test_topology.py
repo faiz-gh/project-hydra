@@ -9,38 +9,19 @@ from __future__ import annotations
 
 import pytest
 
-from crdblab.topology import BASELINE_NODE, DEFAULT_TOPOLOGY, Node, Topology
+from crdblab.topology import CLIENT_NODE, DEFAULT_TOPOLOGY, Node, Topology
 
 
 def test_the_gateway_is_the_gcp_node():
-    """The gateway shares a machine type with the Phase II baseline, by design.
-
-    The whole of the Raft-overhead result is Phase III against Phase II, and
-    while the gateway was ``crdb-linode-1`` those two ran on different processors
-    -- Intel Xeon against AMD EPYC (D11a) -- so the difference between them
-    confounded replication with the CPU it was measured on and the comparison
-    could only be computed by passing ``--accept-hardware-difference``.
-
-    Moving the gateway back to a node at another provider reintroduces that
-    confound without changing any number that looks wrong, which is why it is
-    asserted here and not left to a comment.
+    """The gateway is the gcp node, which was previously the baseline node.
     """
     gateway = DEFAULT_TOPOLOGY.gateway
     assert gateway.name == "gcp-1"
     assert gateway.host == "crdb-gcp-1"
     assert gateway.provider == "gcp"
 
-    # BASELINE_NODE.provider reads "local", which is a *role* label and not a
-    # location: it says the node is an isolated single-node server rather than a
-    # cluster member. It is provisioned by `local_config` in the same GCP project
-    # and at the same machine type as the gateway (instructions.md, Appendix A),
-    # which is the fact this test is really about. That fact cannot be asserted
-    # from this file, so it is asserted where it can be -- against the hardware
-    # each run actually captured, by `validation.check_run_comparability`, which
-    # `run-experiment.sh` now invokes without --accept-hardware-difference for
-    # exactly this reason.
-    assert BASELINE_NODE.provider == "local"
-    assert BASELINE_NODE.name not in DEFAULT_TOPOLOGY.names
+    assert CLIENT_NODE.provider == "gcp"
+    assert CLIENT_NODE.name not in DEFAULT_TOPOLOGY.names
 
 
 def test_exactly_one_node_is_the_gateway():
@@ -70,10 +51,10 @@ def test_the_gateway_is_inside_the_lease_preference_triangle():
     assert DEFAULT_TOPOLOGY.gateway.region in {"us-east", "us-east1", "us-west"}
 
 
-def test_the_baseline_is_not_a_member_of_the_cluster():
+def test_the_client_node_is_not_a_member_of_the_cluster():
     """``len(topology)`` is used as the voter count, so admitting the
-    unreplicated baseline into it would corrupt the quorum arithmetic."""
-    assert BASELINE_NODE.name not in DEFAULT_TOPOLOGY.names
+    client node into it would corrupt the quorum arithmetic."""
+    assert CLIENT_NODE.name not in DEFAULT_TOPOLOGY.names
     assert len(DEFAULT_TOPOLOGY) == 5
 
 
@@ -86,4 +67,31 @@ def test_the_chaos_target_default_is_not_the_gateway():
     for name in ("thesis", "thesis-extended", "smoke"):
         target = Profile.load(name).chaos.target
         assert target in DEFAULT_TOPOLOGY.names
-        assert target != DEFAULT_TOPOLOGY.gateway.name
+        assert target != CLIENT_NODE.name
+
+
+def test_cluster_target_generates_a_single_gateway_uri_for_cockroachdb():
+    """Not one URI per cluster member.
+
+    `cockroach workload run`, given more than one URL, dials its
+    --concurrency connections *serially* against the list rather than in
+    parallel -- ~2.65s each, measured on this topology, turning a sub-second
+    connect into minutes at any real concurrency (and once desynchronised a
+    chaos run's fault-injection timer from the generator ever starting).
+    """
+    from crdblab.config import Settings
+    from crdblab.phases.bench import cluster_target
+
+    settings = Settings(db_uri="postgresql://root@crdb-gcp-1:26257/ycsb", topology=DEFAULT_TOPOLOGY)
+    target = cluster_target(settings, database="ycsb", engine="cockroachdb")
+    assert target.db_uri == "postgresql://root@crdb-gcp-1:26257/ycsb?sslmode=disable"
+
+
+def test_cluster_target_generates_single_haproxy_uri_for_postgresql():
+    from crdblab.config import Settings
+    from crdblab.phases.bench import cluster_target
+
+    settings = Settings(db_uri="postgresql://root@crdb-gcp-1:26257/ycsb", topology=DEFAULT_TOPOLOGY)
+    target = cluster_target(settings, database="ycsb", engine="postgresql")
+    assert target.db_uri == "postgresql://root@127.0.0.1:5000/ycsb?sslmode=disable"
+

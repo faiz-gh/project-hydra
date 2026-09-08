@@ -190,11 +190,7 @@ def _cmd_bench(args: argparse.Namespace) -> int:
 
     settings = Settings.from_env()
     profile = Profile.load(args.profile)
-    target = (
-        bench.single_target(settings, args.database)
-        if args.scope == "single"
-        else bench.cluster_target(settings, args.database)
-    )
+    target = bench.cluster_target(settings, args.database, args.engine)
 
     network_run = Path(args.network_run) if args.network_run else _latest_network_run(
         settings.runs_dir
@@ -237,10 +233,7 @@ def _cmd_bench(args: argparse.Namespace) -> int:
         print("\npre-flight failures:", file=sys.stderr)
         for check in failed:
             print(f"  [FAIL] {check.name}: {check.detail}", file=sys.stderr)
-        print(
-            "\nThis run must not be used for figures. See docs/defects.md.",
-            file=sys.stderr,
-        )
+        print("\nThis run must not be used for figures.", file=sys.stderr)
         return 1
     print(f"\nall {len(report.checks)} pre-flight checks passed")
     print(f"next: crdblab validate {run_dir.path}")
@@ -254,7 +247,7 @@ def _cmd_chaos(args: argparse.Namespace) -> int:
     profile = Profile.load(args.profile)
     print(f"p4_chaos ({args.mode}): target={profile.chaos.target}")
     try:
-        run_dir, events = p4_chaos.run(settings, profile, args.mode, database=args.database)
+        run_dir, events = p4_chaos.run(settings, profile, args.mode, database=args.database, engine=args.engine)
     except Exception as exc:
         print(f"\nrefusing to measure: {exc}", file=sys.stderr)
         return 1
@@ -363,7 +356,7 @@ def _cmd_chaos(args: argparse.Namespace) -> int:
 def _cmd_analyze(args: argparse.Namespace) -> int:
     """Stage 5 analysis. Every path here loads through the canonical loader,
     which refuses a run that has no manifest or does not pass validation."""
-    from .analysis import raft_overhead, resilience, steady_state
+    from .analysis import engine_comparison, resilience, steady_state
     from .analysis.loader import RunLoadError, load_run
 
     settings = Settings.from_env()
@@ -391,21 +384,21 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
             print(steady_state.latency_by_op(run).to_string(index=False))
             return 0
 
-        if args.analysis == "raft-overhead":
-            baseline = load_run(args.baseline, settings.runs_dir)
-            cluster = load_run(args.cluster, settings.runs_dir)
+        if args.analysis == "engine-comparison":
+            crdb = load_run(args.crdb, settings.runs_dir)
+            pg = load_run(args.pg, settings.runs_dir)
             try:
-                result = raft_overhead.compare(
-                    baseline,
-                    cluster,
+                result = engine_comparison.compare(
+                    crdb,
+                    pg,
                     args.op,
                     accept_hardware_difference=args.accept_hardware_difference,
                 )
-            except raft_overhead.NotComparable as exc:
+            except engine_comparison.NotComparable as exc:
                 print(f"refusing to compare: {exc}", file=sys.stderr)
                 print(
-                    "\nThese two runs differ in more than replication, so their "
-                    "difference is not replication cost (see docs/defects.md, D9).",
+                    "\nThese two runs differ in more than the engine under test, "
+                    "so their difference is not replication cost.",
                     file=sys.stderr,
                 )
                 return 1
@@ -413,10 +406,10 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
                 emit(result)
                 return 0
 
-            print(f"phase II  {baseline.run_id}")
-            print(f"phase III {cluster.run_id}")
+            print(f"CockroachDB {crdb.run_id}")
+            print(f"PostgreSQL  {pg.run_id}")
             print(f"\nthroughput-latency curve ({args.op}):")
-            print(raft_overhead.curves(baseline, cluster, args.op).to_string(index=False))
+            print(engine_comparison.curves(crdb, pg, args.op).to_string(index=False))
             for phase, sat in result["saturation"].items():
                 print(f"  {phase}: {sat['detail']}")
 
@@ -437,18 +430,18 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
                         )
                     # The utilisation gap is printed against every point, and the
                     # narrowest is named, because matching throughput does not
-                    # match utilisation: at the cluster's peak it is at 100% of
-                    # its capacity while the baseline is at 72% of its, so most of
-                    # the ratio there is the cluster's own queueing rather than
-                    # replication. Printing the four ratios undifferentiated
-                    # invites the largest one to be quoted.
+                    # match utilisation: at one engine's peak it is at 100% of
+                    # its capacity while the other is at 72% of its, so most of
+                    # the ratio there is queueing rather than replication cost.
+                    # Printing the four ratios undifferentiated invites the
+                    # largest one to be quoted.
                     mark = " <-- least confounded" if point is best or (
                         best and point["throughput_tps"] == best.get("throughput_tps")
                     ) else ""
                     print(
                         f"  {point['throughput_tps']:>8.0f} ops/s: "
-                        f"phase II {point['phase_ii_latency_ms']:.2f} ms, "
-                        f"phase III {point['phase_iii_latency_ms']:.2f} ms "
+                        f"CockroachDB {point['phase_ii_latency_ms']:.2f} ms, "
+                        f"PostgreSQL {point['phase_iii_latency_ms']:.2f} ms "
                         f"({point['overhead_x']:.2f}x){util}{mark}"
                     )
                 if best:
@@ -460,20 +453,20 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
                 print(f"  caveat: {matched['caveat']}")
 
             util = result.get("matched_utilisation", {})
-            print("\nat matched utilisation (the phases are at DIFFERENT throughputs here):")
+            print("\nat matched utilisation (the engines are at DIFFERENT throughputs here):")
             if not util.get("comparable"):
                 print(f"  NOT AVAILABLE. {util.get('reason')}")
             else:
                 print(
-                    f"  capacity: phase II {util['phase_ii_peak_tps']:.0f} ops/s, "
-                    f"phase III {util['phase_iii_peak_tps']:.0f} ops/s"
+                    f"  capacity: CockroachDB {util['phase_ii_peak_tps']:.0f} ops/s, "
+                    f"PostgreSQL {util['phase_iii_peak_tps']:.0f} ops/s"
                 )
                 for point in util["points"]:
                     print(
                         f"  {point['utilisation']:>5.0%} of capacity: "
-                        f"phase II {point['phase_ii_latency_ms']:.2f} ms "
+                        f"CockroachDB {point['phase_ii_latency_ms']:.2f} ms "
                         f"@{point['phase_ii_tps']:.0f} ops/s, "
-                        f"phase III {point['phase_iii_latency_ms']:.2f} ms "
+                        f"PostgreSQL {point['phase_iii_latency_ms']:.2f} ms "
                         f"@{point['phase_iii_tps']:.0f} ops/s "
                         f"({point['overhead_x']:.2f}x)"
                     )
@@ -483,9 +476,9 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
             if light.get("ratio_x"):
                 print(
                     f"\nlightest-load write median: "
-                    f"phase II {light['phase_ii']['p50_ms']:.2f} ms at "
+                    f"CockroachDB {light['phase_ii']['p50_ms']:.2f} ms at "
                     f"{light['phase_ii']['offered_load_tps']:.0f} ops/s, "
-                    f"phase III {light['phase_iii']['p50_ms']:.2f} ms at "
+                    f"PostgreSQL {light['phase_iii']['p50_ms']:.2f} ms at "
                     f"{light['phase_iii']['offered_load_tps']:.0f} ops/s "
                     f"({light['ratio_x']:.2f}x)"
                 )
@@ -558,10 +551,11 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
         print(f"  {perf.get('claim', perf.get('detail'))}")
         if perf.get("post_fault_state", {}).get("mean_tps"):
             state = perf["post_fault_state"]
+            frac = state.get('fraction_of_baseline')
+            frac_str = f", {frac:.0%} of baseline" if frac is not None else ""
             print(
                 f"  settled at {state['mean_tps']:.0f} ops/s "
-                f"(sd {state['sd_tps']:.0f}, {state['fraction_of_baseline']:.0%} of "
-                f"baseline) over {state['intervals']} intervals"
+                f"(sd {state['sd_tps']:.0f}{frac_str}) over {state['intervals']} intervals"
             )
 
         geom = summary["quorum_geometry"]
@@ -603,10 +597,9 @@ def _cmd_report(args: argparse.Namespace) -> int:
 
     picks = {
         "network": args.network or _latest_run(runs, "p1-network"),
-        "baseline": args.baseline or _latest_run(runs, "p2_baseline"),
-        "cluster": args.cluster or _latest_run(runs, "p3_cluster"),
+        "cluster": args.cluster or _latest_run(runs, "bench_cluster"),
     }
-    # One Phase IV figure per fault class, so the default is the most recent run
+    # One Phase III/IV figure per fault class, so the default is the most recent run
     # of *each* class. Defaulting to the recover run alone left the dead-fault
     # timeline unreachable without an explicit argument, and the figure of it in
     # ``figures/`` therefore had no invocation that reproduced it.
@@ -626,7 +619,6 @@ def _cmd_report(args: argparse.Namespace) -> int:
         written = figures.render_all(
             out_dir,
             network=load_network_run(picks["network"], runs) if picks["network"] else None,
-            baseline=load_run(picks["baseline"], runs) if picks["baseline"] else None,
             cluster=load_run(picks["cluster"], runs) if picks["cluster"] else None,
             chaos=[load_run(run_id, runs) for run_id in chaos_picks],
         )
@@ -691,7 +683,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     for finding in report.findings:
         print(f"[{finding.severity.upper():7}] {finding.check}: {finding.message}")
 
-    # A Phase IV run may also carry a probe log, under its own schema. It is
+    # A Phase III/IV run may also carry a probe log, under its own schema. It is
     # checked here rather than in a separate command so that "the run validates"
     # keeps meaning "everything this run recorded validates" -- a second gate
     # nobody remembers to run is not a gate.
@@ -721,7 +713,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
 def _cmd_probe(args: argparse.Namespace) -> int:
     """Run the RTO probe on its own, with no workload generator anywhere.
 
-    The probe is designed to run *beside* a Phase IV chaos run and does so by
+    The probe is designed to run *beside* a Phase III or IV chaos run and does so by
     default, but it is genuinely independent of the generator and this is the
     command that demonstrates it. Two uses:
 
@@ -845,7 +837,13 @@ def _cmd_profile(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="crdblab",
-        description="Multi-cloud CockroachDB benchmarking and chaos testbed harness",
+        description="Multi-cloud Database benchmarking and chaos testbed harness",
+    )
+    parser.add_argument(
+        "--engine",
+        default="cockroachdb",
+        choices=("cockroachdb", "postgresql"),
+        help="target database engine (default: cockroachdb)",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -856,8 +854,12 @@ def build_parser() -> argparse.ArgumentParser:
     cap.add_argument(
         "--node",
         default="gcp-1",
-        help="node on which to run the generator; defaults to the gateway, which "
-        "is where every measured workload runs (crdblab.topology)",
+        help="cluster node on which to run the generator, to pin the column "
+        "layout the deployed CockroachDB version emits; defaults to the "
+        "gateway (crdblab.topology). A measured sweep instead runs the "
+        "generator from the dedicated client node, but the output format this "
+        "captures does not depend on which node ran it, only on the "
+        "CockroachDB version.",
     )
     cap.add_argument("--generator", default="ycsb", choices=("ycsb", "kv"))
     cap.add_argument("--concurrency", type=int, default=10)
@@ -876,7 +878,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=42,
         help="generator key seed; MUST match the seed the table was loaded with, "
-        "or every lookup silently matches nothing (see docs/defects.md, D8)",
+        "or every lookup silently matches nothing (D8)",
     )
     cap.add_argument(
         "--insert-count",
@@ -898,7 +900,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=1_000_000,
         help="kv only; note that kv reads cannot reach pre-loaded rows regardless "
-        "of this value (see docs/defects.md, D8)",
+        "of this value (D8)",
     )
     cap.add_argument("--pty", action="store_true", help="allocate a pseudo-terminal")
     cap.add_argument("--output", default="tests/fixtures/workload/captured.txt")
@@ -925,13 +927,7 @@ def build_parser() -> argparse.ArgumentParser:
     probe.set_defaults(func=_cmd_net_probe)
 
     ben = sub.add_parser(
-        "bench", help="Phases II and III: steady-state throughput and latency"
-    )
-    ben.add_argument(
-        "scope",
-        choices=("single", "cluster"),
-        help="single: unreplicated baseline on the local node. "
-        "cluster: five-node cluster driven from its gateway.",
+        "bench", help="Phase II: steady-state throughput and latency"
     )
     ben.add_argument("--profile", default="thesis")
     ben.add_argument("--database", default="ycsb")
@@ -990,7 +986,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     prb_rto.set_defaults(func=_cmd_probe)
 
-    cha = sub.add_parser("chaos", help="Phase IV: fault injection, RTO and RPO")
+    cha = sub.add_parser("chaos", help="Phases III-IV: fault injection, RTO and RPO")
     cha_sub = cha.add_subparsers(dest="chaos_command", required=True)
     cha_run = cha_sub.add_parser("run", help="inject a fault into a steady-state run")
     cha_run.add_argument(
@@ -1010,39 +1006,38 @@ def build_parser() -> argparse.ArgumentParser:
     ana_sub = ana.add_subparsers(dest="analysis", required=True)
 
     ss = ana_sub.add_parser(
-        "steady-state", help="Phase II or III throughput and latency by tier"
+        "steady-state", help="one run's throughput and latency by tier"
     )
     ss.add_argument("run", help="run id or directory")
     ss.add_argument("--json", action="store_true")
     ss.set_defaults(func=_cmd_analyze, analysis="steady-state")
 
-    ro = ana_sub.add_parser(
-        "raft-overhead",
-        help="replication cost: phase III against phase II, at matched throughput",
+    ec = ana_sub.add_parser(
+        "engine-comparison",
+        help="replication cost: CockroachDB against PostgreSQL+Patroni on the "
+        "same five-node topology, at matched throughput",
     )
-    ro.add_argument("--baseline", required=True, help="phase II run id or directory")
-    ro.add_argument("--cluster", required=True, help="phase III run id or directory")
-    ro.add_argument(
+    ec.add_argument("--crdb", required=True, help="CockroachDB run id or directory")
+    ec.add_argument("--pg", required=True, help="PostgreSQL run id or directory")
+    ec.add_argument(
         "--op",
         default="update",
         help="operation type to compare; writes are the path replication affects",
     )
-    ro.add_argument(
+    ec.add_argument(
         "--accept-hardware-difference",
         action="store_true",
         help="proceed even though the two runs were measured on different CPU "
         "models or memory sizes. Use only when that difference is a stated "
         "limitation of the study rather than a mistake; it is recorded as a "
         "warning in the output. Latency ratios on a network-bound path are "
-        "least affected by it, absolute throughput most. NOT needed for runs "
-        "measured since the gateway moved to gcp-1, which is the same machine "
-        "type as the Phase II baseline; it is for re-analysing older runs, "
-        "whose gateway was a Linode node with a different CPU.",
+        "least affected by it, absolute throughput most. Both engines run on "
+        "the same five-node topology, so this should not normally be needed.",
     )
-    ro.add_argument("--json", action="store_true")
-    ro.set_defaults(func=_cmd_analyze, analysis="raft-overhead")
+    ec.add_argument("--json", action="store_true")
+    ec.set_defaults(func=_cmd_analyze, analysis="engine-comparison")
 
-    rs = ana_sub.add_parser("resilience", help="Phase IV RTO and RPO with their limits")
+    rs = ana_sub.add_parser("resilience", help="Phases III-IV: RTO and RPO with their limits")
     rs.add_argument("run", help="chaos run id or directory")
     rs.add_argument(
         "--network-run",
@@ -1057,12 +1052,11 @@ def build_parser() -> argparse.ArgumentParser:
     figs = rep_sub.add_parser("figures", help="render every figure whose inputs exist")
     figs.add_argument("--out", default="figures", help="output directory")
     figs.add_argument("--network", help="Phase I run id (default: most recent)")
-    figs.add_argument("--baseline", help="Phase II run id (default: most recent)")
-    figs.add_argument("--cluster", help="Phase III run id (default: most recent)")
+    figs.add_argument("--cluster", help="benchmark cluster run id (default: most recent)")
     figs.add_argument(
         "--chaos",
         action="append",
-        help="Phase IV run id; repeatable (default: the most recent run of each "
+        help="Phase III/IV run id; repeatable (default: the most recent run of each "
         "fault class, one figure per class)",
     )
     figs.set_defaults(func=_cmd_report)

@@ -14,7 +14,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from crdblab.analysis import raft_overhead, resilience, steady_state
+from crdblab.analysis import engine_comparison, resilience, steady_state
 from crdblab.analysis.loader import RunLoadError, load_run
 from crdblab.analysis.validation import validate_comparison
 from crdblab.core.recorder import COLUMNS
@@ -228,7 +228,7 @@ def test_matched_throughput_refuses_when_the_ranges_do_not_overlap(tmp_path):
     experiment never applied.
     """
     baseline, cluster = _pair(tmp_path)
-    matched = raft_overhead.matched_throughput(baseline, cluster, "update")
+    matched = engine_comparison.matched_throughput(baseline, cluster, "update")
     assert matched["comparable"] is False
     assert "do not overlap" in matched["reason"]
     assert matched["points"] == []
@@ -252,7 +252,7 @@ def test_matched_throughput_compares_only_inside_the_measured_range(tmp_path):
             phase="p3_cluster",
         )
     )
-    matched = raft_overhead.matched_throughput(baseline, cluster, "update")
+    matched = engine_comparison.matched_throughput(baseline, cluster, "update")
     assert matched["comparable"] is True
     lo, hi = matched["overlap_tps"]
     assert all(lo <= p["throughput_tps"] <= hi for p in matched["points"])
@@ -268,7 +268,7 @@ def test_the_same_concurrency_delta_is_produced_only_as_a_labelled_artefact(tmp_
     *faster* than the unreplicated baseline's.
     """
     baseline, cluster = _pair(tmp_path)
-    delta = raft_overhead.same_concurrency_delta(baseline, cluster)
+    delta = engine_comparison.same_concurrency_delta(baseline, cluster)
     assert delta["comparable"] is False
     assert "error case study" in delta["use"]
     assert delta["rows"][0]["read_p50_ratio_x"] < 1.0
@@ -319,18 +319,18 @@ def test_compare_refuses_outright_when_the_runs_are_not_comparable(tmp_path):
             manifest_extra={"cockroach_version": "v25.1.0"},
         )
     )
-    with pytest.raises(raft_overhead.NotComparable):
-        raft_overhead.compare(baseline, broken)
+    with pytest.raises(engine_comparison.NotComparable):
+        engine_comparison.compare(baseline, broken)
 
 
 def test_a_still_rising_curve_reports_its_peak_as_a_lower_bound(tmp_path):
     """Calling a number that is still climbing "capacity" is how the original
     C=200 result asserted a property of the system from the edge of the sweep."""
     baseline, cluster = _pair(tmp_path)
-    rising = raft_overhead._saturation(steady_state.per_tier(cluster))
+    rising = engine_comparison._saturation(steady_state.per_tier(cluster))
     assert rising["saturated"] is False
     assert "lower bound" in rising["detail"]
-    flat = raft_overhead._saturation(steady_state.per_tier(baseline))
+    flat = engine_comparison._saturation(steady_state.per_tier(baseline))
     assert flat["saturated"] is True
 
 
@@ -683,7 +683,7 @@ def test_the_overlap_remedy_does_not_advise_raising_a_saturated_phase(tmp_path):
             phase="p3_cluster",
         )
     )
-    remedy = raft_overhead.matched_throughput(baseline, cluster, "update")["remedy"]
+    remedy = engine_comparison.matched_throughput(baseline, cluster, "update")["remedy"]
     assert "saturated" in remedy
     assert "lower" in remedy
     assert "higher concurrency tier cannot" in remedy
@@ -705,7 +705,7 @@ def test_the_overlap_remedy_suggests_extending_a_still_rising_phase(tmp_path):
             phase="p3_cluster",
         )
     )
-    remedy = raft_overhead.matched_throughput(baseline, cluster, "update")["remedy"]
+    remedy = engine_comparison.matched_throughput(baseline, cluster, "update")["remedy"]
     assert "still rising" in remedy
 
 
@@ -728,17 +728,17 @@ def test_interpolation_does_not_cross_the_saturation_fold(tmp_path):
             phase="p3_cluster",
         )
     )
-    curve = raft_overhead.throughput_latency_curve(cluster, "update")
+    curve = engine_comparison.throughput_latency_curve(cluster, "update")
     # Ordered by the control variable, so the fold is visible rather than sorted away.
     assert curve["concurrency"].tolist() == [10, 50, 200]
 
     # 1000 tps occurs twice: on the rising branch (interpolated) and at C=200.
     # Only the rising branch is used, so the answer stays below the peak's latency.
-    value = raft_overhead._interpolate(curve, 1000.0, "p50_ms")
+    value = engine_comparison._interpolate(curve, 1000.0, "p50_ms")
     assert value is not None
     assert value < 108.0
     # And nothing beyond the peak is reachable.
-    assert raft_overhead._interpolate(curve, 1300.0, "p50_ms") is None
+    assert engine_comparison._interpolate(curve, 1300.0, "p50_ms") is None
 
 
 def test_matched_throughput_reports_overhead_where_the_ranges_meet(tmp_path):
@@ -775,7 +775,7 @@ def test_matched_throughput_reports_overhead_where_the_ranges_meet(tmp_path):
         )
     )
 
-    matched = raft_overhead.matched_throughput(baseline, cluster, "update")
+    matched = engine_comparison.matched_throughput(baseline, cluster, "update")
     assert matched["comparable"] is True
     lo, hi = matched["overlap_tps"]
     assert lo == pytest.approx(625.0) and hi == pytest.approx(1750.0)
@@ -785,11 +785,11 @@ def test_matched_throughput_reports_overhead_where_the_ranges_meet(tmp_path):
         assert lo <= point["throughput_tps"] <= hi
         # Replication cost is a real penalty at every common load.
         assert point["overhead_x"] > 1.0
-        assert point["measured_in"] in ("both", "phase II", "phase III")
+        assert point["measured_in"] in ("both", "CockroachDB", "PostgreSQL")
 
     # At least one point is an observation on each side rather than two
     # interpolations meeting in the middle.
-    assert {p["measured_in"] for p in matched["points"]} & {"phase II", "phase III", "both"}
+    assert {p["measured_in"] for p in matched["points"]} & {"CockroachDB", "PostgreSQL", "both"}
     assert "interpolated" in matched["caveat"]
 
 
@@ -825,7 +825,7 @@ def test_matched_throughput_reports_how_loaded_each_phase_is(tmp_path):
             phase="p3_cluster",
         )
     )
-    matched = raft_overhead.matched_throughput(baseline, cluster, "update")
+    matched = engine_comparison.matched_throughput(baseline, cluster, "update")
 
     for point in matched["points"]:
         assert 0.0 < point["phase_ii_utilisation"] <= 1.0
@@ -932,7 +932,7 @@ def _low_tier_pair(tmp_path):
 
 def test_matched_utilisation_compares_at_different_throughputs_by_design(tmp_path):
     baseline, cluster = _low_tier_pair(tmp_path)
-    out = raft_overhead.matched_utilisation(baseline, cluster)
+    out = engine_comparison.matched_utilisation(baseline, cluster)
     assert out["comparable"] is True
     assert "utilisation" in out["holds_fixed"]
     for point in out["points"]:
@@ -946,7 +946,7 @@ def test_matched_throughput_can_never_reach_equal_utilisation(tmp_path):
     load. This is why both comparisons exist rather than one superseding the
     other -- no amount of extra tiers closes it."""
     baseline, cluster = _low_tier_pair(tmp_path)
-    matched = raft_overhead.matched_throughput(baseline, cluster, "update")
+    matched = engine_comparison.matched_throughput(baseline, cluster, "update")
     gaps = [p["utilisation_gap"] for p in matched["points"] if p["utilisation_gap"]]
     assert gaps and min(gaps) > 0.0
     # Narrowest at the bottom of the overlap, widening with throughput.
@@ -963,7 +963,7 @@ def test_a_single_worker_tier_is_unqueued_structurally_not_statistically(tmp_pat
     behind. Gating this on a Little's-law threshold denied a structurally
     impossible queue on a 5.1% blend artefact."""
     baseline, cluster = _low_tier_pair(tmp_path)
-    out = raft_overhead.lightest_load_write_latency(baseline, cluster)
+    out = engine_comparison.lightest_load_write_latency(baseline, cluster)
     assert out["phase_ii"]["concurrency"] == 1
     assert out["phase_iii"]["concurrency"] == 1
     assert out["both_unqueued"] is True
@@ -972,7 +972,7 @@ def test_a_single_worker_tier_is_unqueued_structurally_not_statistically(tmp_pat
 
 def test_a_phase_that_never_reached_one_worker_is_not_called_unqueued(tmp_path):
     baseline, cluster = _pair(tmp_path)
-    out = raft_overhead.lightest_load_write_latency(baseline, cluster)
+    out = engine_comparison.lightest_load_write_latency(baseline, cluster)
     assert out["both_unqueued"] is False
     assert "at least one side is queueing" in out["caveat"]
 
@@ -1021,7 +1021,7 @@ def test_the_unqueued_ratio_is_computed_before_rounding(tmp_path):
     rounding's error into the result. It produced two figures for one quantity
     (50.37x against 50.38x), which a dissertation then has to reconcile."""
     baseline, cluster = _low_tier_pair(tmp_path)
-    out = raft_overhead.lightest_load_write_latency(baseline, cluster)
+    out = engine_comparison.lightest_load_write_latency(baseline, cluster)
     exact = out["phase_iii"]["_p50_exact"] / out["phase_ii"]["_p50_exact"]
     assert out["ratio_x"] == round(exact, 2)
     # ...and specifically not the ratio of the displayed values.
@@ -1057,7 +1057,7 @@ def test_the_same_concurrency_throughput_ratio_is_computed_before_rounding(tmp_p
     )
     row = next(
         r
-        for r in raft_overhead.same_concurrency_delta(baseline, cluster)["rows"]
+        for r in engine_comparison.same_concurrency_delta(baseline, cluster)["rows"]
         if r["concurrency"] == 1
     )
     a = steady_state.per_tier(baseline).set_index("concurrency")
@@ -1099,7 +1099,7 @@ def test_a_matched_utilisation_level_is_not_rounded_before_it_is_used(tmp_path):
             phase="p3_cluster",
         )
     )
-    out = raft_overhead.matched_utilisation(baseline, cluster)
+    out = engine_comparison.matched_utilisation(baseline, cluster)
     tiers = steady_state.per_tier(baseline).set_index("concurrency")
     lat = steady_state.latency_by_op(baseline)
     lat = lat[lat["op"] == "update"].set_index("concurrency")

@@ -1,9 +1,8 @@
 """Tests for the pre-flight assertions.
 
 ``RowMatchProbe`` is the only detector this project has for a workload that
-completes without touching data (docs/defects.md, D8), and for Phase II it is the
-*only* one: an unreplicated baseline has no quorum floor to check a write latency
-against. So its failure modes matter as much as its success path -- a probe that
+completes without touching data (D8). Its failure modes 
+matter as much as its success path -- a probe that
 cries wolf gets disabled, and a probe that passes silently on reset counters is
 worse than none.
 """
@@ -17,12 +16,12 @@ from crdblab.core.preflight import (
     format_hardware,
     parse_hardware,
 )
-from crdblab.topology import BASELINE_NODE
+from crdblab.topology import CLIENT_NODE
 
 
 def _probe(before, after):
     """A probe with its two samples stubbed, so no cluster is required."""
-    probe = RowMatchProbe(BASELINE_NODE, "usertable")
+    probe = RowMatchProbe(CLIENT_NODE, "usertable")
     probe._before = before
     probe._sample = lambda: after  # type: ignore[method-assign]
     return probe
@@ -94,7 +93,7 @@ def test_a_vanished_counter_fails_whatever_it_is_called():
 
 # --- hardware capture ------------------------------------------------------
 #
-# The Phase II baseline fell 22% across the redeployment of 2026-09-02 with every
+# The hardware baseline fell 22% across the redeployment of 2026-09-02 with every
 # recorded field identical, because nothing recorded the machine. These pin the
 # parse so that the *next* such shift is answerable from the artefact.
 
@@ -128,7 +127,7 @@ def test_the_note_round_trips_through_the_manifest():
 #
 # A flush landing *during* a tier is recovered by the partial-window fallback.
 # A flush landing after the tier's workload has stopped cannot be: there is no
-# evidence left. Observed 2026-09-03, where twenty of twenty-one Phase III tiers
+# evidence left. Observed 2026-09-03, where twenty of twenty-one Phase II tiers
 # matched at >= 0.9999 and the twenty-first reported nothing while having just
 # sustained 611.7 ops/s.
 
@@ -165,7 +164,7 @@ def test_corroboration_never_rescues_a_measured_seed_mismatch():
     assert report.checks[-1].passed is False
 
 
-def test_a_baseline_with_no_statements_at_all_still_fails_outright():
+def test_a_run_with_no_statements_at_all_still_fails_outright():
     """c0 == 0 and c1 == 0 is genuinely no work, not a flush, and keeps the
     original message."""
     probe = _probe((0.0, 0.0), (0.0, 0.0))

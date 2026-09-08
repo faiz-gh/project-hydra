@@ -1,4 +1,4 @@
-"""Phase IV analysis: recovery time, recovery point, and their limits.
+"""Phases III-IV analysis: recovery time, recovery point, and their limits.
 
 This module replaces ``evaluate_resilience.py``. Three things it does are
 corrections rather than refinements, and each is load-bearing.
@@ -29,8 +29,8 @@ state* below the threshold, this reports the metric as **undefined**, not as an
 infinite recovery time: losing a member of the fast quorum triangle raises the
 write path's floor from ~66.8 ms to ~190 ms, and a level the cluster will not
 return to while the node is down is not a recovery the metric can time. Whether
-that happens is not fixed by the geometry alone -- the two Phase IV runs here
-share a target and disagree, the ``dead`` run at C=50 settling at 0.67 of
+that happens is not fixed by the geometry alone -- the Phase III and IV runs
+here share a target and disagree, the ``dead`` run at C=50 settling at 0.67 of
 baseline while the ``recover`` run at C=100 regained the threshold in about 9 s
 -- so the classification is made from the observed post-fault series and the
 geometry is reported alongside as the explanation. Reporting only availability
@@ -577,8 +577,8 @@ def quorum_geometry(
     ~66.8 ms to ~190 ms, because the next-fastest replica is in South Asia.
 
     What this does **not** establish is that total throughput must stay below the
-    recovery threshold. The two Phase IV runs in this project disagree on that
-    while sharing a target: the ``dead`` run at C=50 settled at 0.67 of baseline
+    recovery threshold. The Phase III and IV runs in this project disagree on
+    that while sharing a target: the ``dead`` run at C=50 settled at 0.67 of baseline
     and never recovered, while the ``recover`` run at C=100 regained the threshold
     in about 9 s with the same node partitioned. A closed workload can absorb
     higher per-operation latency by keeping more operations outstanding, and 80%
@@ -695,7 +695,7 @@ def summarise(
     network_csv: Path | None = None,
     topology: Topology = DEFAULT_TOPOLOGY,
 ) -> dict[str, Any]:
-    """Everything Phase IV produces, with the limits attached to each figure."""
+    """Everything Phase III/IV produces, with the limits attached to each figure."""
     alignment = align(run)
     return {
         "run_id": run.run_id,

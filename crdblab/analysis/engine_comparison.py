@@ -1,46 +1,53 @@
-"""The cost of Raft replication: Phase III measured against Phase II.
+"""The comparison of CockroachDB vs PostgreSQL/Patroni on identical cluster topologies.
 
-This module replaces ``compare_raft_overhead.py``, which produced the results
-tables of the original dissertation by subtracting the two phases tier by tier.
-That comparison is invalid, and the reason is worth stating precisely because
-the invalid form is the intuitive one.
+Both engines are measured on the *same* five-node, three-provider topology
+(``crdblab/topology.py``): CockroachDB with its own Raft-based replication,
+PostgreSQL under Patroni configured for synchronous replication with a quorum
+of standbys (``synchronous_standby_names: 'ANY 2 (*)'``, see
+``terraform/scripts/bootstrap-patroni.tftpl``). Neither side is unreplicated,
+so this module's job is isolating the two engines' different replication
+mechanisms, not isolating replication cost from its absence.
+
+The comparison at matched *concurrency* -- reading two engines' numbers off
+the same ``--concurrency`` tier and subtracting them -- is invalid, and the
+reason is worth stating precisely because the invalid form is the intuitive
+one.
 
 **Concurrency is not load.** The profile's ``--concurrency`` fixes the number of
 client workers, not the work they accomplish. A closed workload of N workers
-offers whatever load the system under test can absorb, so two systems of
+offers whatever load the system under test can absorb, so two engines of
 different capacity run at the same concurrency sit at *different points on their
 respective throughput-latency curves*. Subtracting them measures the difference
-between two arbitrary operating points, not the difference between the systems.
+between two arbitrary operating points, not the difference between the engines.
+An engine further from saturation at a given concurrency reports a lower
+latency at that tier for reasons that have nothing to do with replication --
+purely an artefact of where each curve happens to sit, which can flatter
+either engine depending on which one saturates first.
 
-The measured data shows this plainly. At C=10 the cluster's read median is
-0.93 ms against the single node's 1.97 ms: the replicated, cross-continental
-cluster appears to read twice as fast as the unreplicated baseline. It does not.
-The single node is carrying 3,505 ops/s at that worker count and the cluster
-647, so the baseline is five times closer to saturation and its queueing delay
-is correspondingly higher. The apparent result is an artefact of comparing at
-matched concurrency, and it is in the direction that would flatter the cluster.
+The comparison is therefore reported in two forms, both load-explicit:
 
-Replication cost is therefore reported in two forms, both load-explicit:
-
-* the **throughput-latency curve** of each phase, which is the honest primitive
+* the **throughput-latency curve** of each engine, which is the honest primitive
   and the only form that carries its own caveat; and
-* scalars **at matched throughput**, computed only where the two phases'
+* scalars **at matched throughput**, computed only where the two engines'
   measured throughput ranges actually overlap. Where they do not, this module
   says so and declines to produce the number rather than extrapolating a curve
   beyond the data that defines it.
 
 A third quantity is reported and is comparable without matching load: the
-**lightest-load write median** of each phase. A committed write cannot outrun
-the round trip to the follower that completes quorum, so the cluster's write
-latency is floored by a physical constant of the topology (~70.6 ms) that the
-single node does not pay at all. That floor is a property of the system, not of
-the operating point, which is what makes it quotable.
+**lightest-load write median** of each engine. A committed write cannot outrun
+the round trip to however many replicas its quorum requires, so each engine's
+write latency at its lowest measured concurrency is floored by a physical
+constant of the topology rather than by queueing. That floor is a property of
+the topology and the quorum size, not of the operating point, which is what
+makes it quotable -- the two engines' floors are not asserted to be equal, since
+Raft and Patroni's synchronous-replication quorum need not agree even on
+identical hardware.
 
 Finally, every comparison is gated on
 :func:`crdblab.analysis.validation.check_run_comparability`. Defect D9 -- a
-fifteen-fold block-cache asymmetry between the two phases -- inflated the
-apparent write-latency overhead from 12.8x to 18.3x while both runs remained
-individually valid. No check on a single run can detect that, so the check
+fifteen-fold block-cache asymmetry between two runs that were otherwise
+individually valid -- inflated an apparent replication-cost ratio by 43% in
+this project's history. No check on a single run can detect that, so the check
 belongs here, on the pair.
 """
 
@@ -65,7 +72,7 @@ class NotComparable(RuntimeError):
     """Raised when the two runs may not legitimately be compared at all."""
 
 
-def curves(baseline: Run, cluster: Run, op: str) -> pd.DataFrame:
+def curves(crdb: Run, pg: Run, op: str) -> pd.DataFrame:
     """Both phases' throughput-latency curves for one operation type.
 
     This is the primitive the comparison rests on and the form any figure should
@@ -74,7 +81,7 @@ def curves(baseline: Run, cluster: Run, op: str) -> pd.DataFrame:
     throughput at different worker counts.
     """
     frames = []
-    for run, label in ((baseline, "phase II single node"), (cluster, "phase III cluster")):
+    for run, label in ((crdb, "CockroachDB"), (pg, "PostgreSQL")):
         frame = throughput_latency_curve(run, op)
         frame.insert(0, "phase", label)
         frame.insert(1, "run_id", run.run_id)
@@ -128,7 +135,7 @@ def _interpolate(curve: pd.DataFrame, tps: float, column: str) -> float | None:
     **Only the rising branch is interpolated.** Past saturation a load curve bends
     backwards: adding workers costs throughput and adds latency, so one throughput
     corresponds to two different latencies and "the latency at 1,700 ops/s" stops
-    being well defined. Measured 2026-09-02, the cluster reached 1,728 ops/s at
+    being well defined. Measured 2026-09-02, the pg reached 1,728 ops/s at
     C=50 with an update median of 108 ms and 1,732 ops/s at C=200 with 230 ms --
     the same throughput at twice the latency. Interpolating across that fold would
     silently average two operating points that differ by a factor of two, so the
@@ -151,24 +158,23 @@ def _interpolate(curve: pd.DataFrame, tps: float, column: str) -> float | None:
     return float(ys[-1])
 
 
-def _overlap_remedy(baseline: Run, cluster: Run) -> str:
-    """How to make the two phases' throughput ranges meet -- if it is possible.
+def _overlap_remedy(crdb: Run, pg: Run) -> str:
+    """How to make the two engines' throughput ranges meet -- if it is possible.
 
-    The obvious advice, "run the slower phase at higher concurrency", is only
-    sound while that phase's curve is still rising. Once it has saturated, more
-    workers do not buy more throughput and may cost some: measured 2026-09-02,
-    the cluster peaked at 1,855 ops/s at C=100 and fell to 1,732 at C=200, while
-    the single node's *slowest* tier was 2,502. The cluster's ceiling lies below
-    the baseline's floor, so no amount of added concurrency can close that gap
-    and the only way to a matched comparison is to measure the baseline lower.
+    The obvious advice, "run the slower engine at higher concurrency", is only
+    sound while that engine's curve is still rising. Once it has saturated, more
+    workers do not buy more throughput and may cost some. If the saturated
+    engine's peak lies below the other engine's slowest measured tier, no
+    amount of added concurrency can close the gap -- the only way to an overlap
+    is to measure the faster engine at *lower* concurrency instead.
 
     Stating that distinction matters because the wrong remedy costs half an hour
     of sweep and produces the same refusal.
     """
-    a, b = per_tier(baseline), per_tier(cluster)
+    a, b = per_tier(crdb), per_tier(pg)
     slower, faster = (b, a) if b["mean_total_tps"].max() < a["mean_total_tps"].max() else (a, b)
-    slower_name = "the cluster" if slower is b else "the baseline"
-    faster_name = "the baseline" if slower is b else "the cluster"
+    slower_name = "the pg" if slower is b else "the crdb"
+    faster_name = "the crdb" if slower is b else "the pg"
     saturated = _saturation(slower)["saturated"]
 
     if saturated:
@@ -188,8 +194,8 @@ def _overlap_remedy(baseline: Run, cluster: Run) -> str:
 
 
 def matched_throughput(
-    baseline: Run,
-    cluster: Run,
+    crdb: Run,
+    pg: Run,
     op: str,
     quantile: str = "p50_ms",
 ) -> dict[str, Any]:
@@ -199,8 +205,8 @@ def matched_throughput(
     inside both phases' measured ranges, so that at least one side of each
     comparison is an observation rather than an interpolation.
     """
-    a = throughput_latency_curve(baseline, op)
-    b = throughput_latency_curve(cluster, op)
+    a = throughput_latency_curve(crdb, op)
+    b = throughput_latency_curve(pg, op)
     lo = max(a["mean_total_tps"].min(), b["mean_total_tps"].min())
     hi = min(a["mean_total_tps"].max(), b["mean_total_tps"].max())
 
@@ -209,8 +215,8 @@ def matched_throughput(
             "comparable": False,
             "reason": (
                 f"the two phases' measured throughput ranges do not overlap: "
-                f"phase II spans {a['mean_total_tps'].min():.0f}-"
-                f"{a['mean_total_tps'].max():.0f} ops/s and phase III "
+                f"CockroachDB spans {a['mean_total_tps'].min():.0f}-"
+                f"{a['mean_total_tps'].max():.0f} ops/s and PostgreSQL "
                 f"{b['mean_total_tps'].min():.0f}-{b['mean_total_tps'].max():.0f} "
                 "ops/s. There is no load level at which both were measured, so a "
                 "matched-throughput comparison would have to extrapolate one curve "
@@ -224,7 +230,7 @@ def matched_throughput(
                 round(float(b["mean_total_tps"].min()), 1),
                 round(float(b["mean_total_tps"].max()), 1),
             ],
-            "remedy": _overlap_remedy(baseline, cluster),
+            "remedy": _overlap_remedy(crdb, pg),
             "points": [],
         }
 
@@ -242,12 +248,12 @@ def matched_throughput(
         if ya is None or yb is None or ya <= 0:
             continue
         # Matching throughput does NOT match utilisation, and conflating the two
-        # is the residual trap in this comparison. Two systems delivering the
+        # is the residual trap in this comparison. Two engines delivering the
         # same work rate can sit at very different distances from their own
-        # capacity: at 1,856 ops/s the cluster is at 100% of its measured peak
-        # while the single node is at 72% of its, so part of the latency ratio
-        # there is the cluster's own queueing rather than the cost of
-        # replication. Reporting each side's utilisation lets a reader see which
+        # capacity -- one near its measured peak, the other with headroom to
+        # spare -- so part of the latency ratio at a matched-throughput point can
+        # be one engine's own queueing rather than a difference between the
+        # engines. Reporting each side's utilisation lets a reader see which
         # points are like-for-like; the least confounded comparison is the one
         # where the two are closest, not the one at the highest throughput.
         util_a = float(tps) / peak_a if peak_a else None
@@ -266,7 +272,7 @@ def matched_throughput(
                 "measured_in": (
                     "both"
                     if tps in set(a["mean_total_tps"]) and tps in set(b["mean_total_tps"])
-                    else "phase II" if tps in set(a["mean_total_tps"]) else "phase III"
+                    else "CockroachDB" if tps in set(a["mean_total_tps"]) else "PostgreSQL"
                 ),
             }
         )
@@ -280,7 +286,7 @@ def matched_throughput(
         # The point whose two utilisations are closest, i.e. where both systems
         # are the same distance from their own capacity. This is the defensible
         # single number if one is needed; the others are still correct, but
-        # increasingly mix replication cost with the cluster's own saturation.
+        # increasingly mix replication cost with the pg's own saturation.
         "least_confounded": (
             min(
                 (p for p in points if p["utilisation_gap"] is not None),
@@ -297,8 +303,8 @@ def matched_throughput(
 
 
 def matched_utilisation(
-    baseline: Run,
-    cluster: Run,
+    crdb: Run,
+    pg: Run,
     op: str = "update",
     quantile: str = "p50_ms",
 ) -> dict[str, Any]:
@@ -319,20 +325,20 @@ def matched_utilisation(
     * **Matched throughput** asks what the same delivered work rate costs. It is
       the operationally meaningful comparison -- a service must serve the load it
       is given -- but it necessarily loads the smaller system harder relative to
-      its capacity, so the ratio includes the cluster's own queueing.
+      its capacity, so the ratio includes the pg's own queueing.
     * **Matched utilisation** asks what replication costs when both systems are
       the same distance from saturation, so their queueing components are
       comparable and the residual is closer to the replication path alone. It
       compares two *different* throughputs, which is why it cannot be quoted as
       "the cost at N ops/s".
 
-    Reporting only the first overstates replication cost near the cluster's peak;
+    Reporting only the first overstates replication cost near the pg's peak;
     reporting only the second invites the ratio to be read as a cost at a load
     that was never offered. Both are emitted, each labelled with what it holds
     fixed.
     """
-    a = throughput_latency_curve(baseline, op)
-    b = throughput_latency_curve(cluster, op)
+    a = throughput_latency_curve(crdb, op)
+    b = throughput_latency_curve(pg, op)
     peak_a = float(a["mean_total_tps"].max())
     peak_b = float(b["mean_total_tps"].max())
     if not peak_a or not peak_b:
@@ -349,7 +355,7 @@ def matched_utilisation(
             "comparable": False,
             "reason": (
                 f"no utilisation level is inside both phases' measured ranges "
-                f"(phase II from {lo:.2f}, phase III from "
+                f"(CockroachDB from {lo:.2f}, PostgreSQL from "
                 f"{float(b['mean_total_tps'].min()) / peak_b:.2f})"
             ),
             "points": [],
@@ -408,20 +414,23 @@ def matched_utilisation(
 
 
 def lightest_load_write_latency(
-    baseline: Run, cluster: Run, op: str = "update"
+    crdb: Run, pg: Run, op: str = "update"
 ) -> dict[str, Any]:
-    """Each phase's write median at its lowest measured concurrency.
+    """Each engine's write median at its lowest measured concurrency.
 
-    Comparable across phases despite the differing load, because the quantity it
-    exposes is a floor rather than an operating point: a committed write cannot
-    be acknowledged faster than the round trip to the follower completing quorum,
-    which on this topology is ~70.6 ms and which the unreplicated baseline does
-    not pay at all. The offered load of each measurement is reported alongside so
-    that the residual queueing component remains visible rather than implied
-    away.
+    Comparable across engines despite the differing load, because the quantity
+    it exposes is a floor rather than an operating point: a committed write
+    cannot be acknowledged faster than the round trip to however many replicas
+    each engine's quorum requires. Both engines are replicated on this topology
+    and both pay some such floor -- CockroachDB's Raft quorum and Patroni's
+    synchronous-replication quorum are not asserted to agree, even on identical
+    hardware, which is exactly why this is reported as two measured numbers
+    rather than assumed equal. The offered load of each measurement is reported
+    alongside so that the residual queueing component remains visible rather
+    than implied away.
     """
     out: dict[str, Any] = {"operation": op}
-    for run, key in ((baseline, "phase_ii"), (cluster, "phase_iii")):
+    for run, key in ((crdb, "phase_ii"), (pg, "phase_iii")):
         lat = latency_by_op(run)
         lat = lat[lat["op"] == op]
         if lat.empty:
@@ -438,7 +447,7 @@ def lightest_load_write_latency(
         # law is recorded beside it as corroboration only.
         #
         # It is deliberately not the gate. An earlier draft required N/X to agree
-        # with the frequency-weighted median to within 5% and phase III's C=1
+        # with the frequency-weighted median to within 5% and PostgreSQL's C=1
         # tier missed at 5.1%, which would have denied a structurally impossible
         # queue on the strength of a blend artefact: the weighted median averages
         # a 0.74 ms read against a 72.7 ms update, and the mean of per-interval
@@ -474,15 +483,14 @@ def lightest_load_write_latency(
         both_unqueued = out["phase_ii"]["unqueued"] and out["phase_iii"]["unqueued"]
         out["both_unqueued"] = both_unqueued
         if both_unqueued:
-            # The strongest form this comparison can take, and it became
-            # available only once the cluster was swept down to a single worker
-            # (2026-09-03). With one worker there is exactly one operation in
-            # flight, so neither median contains any waiting time: the ratio is
-            # between two serial write paths, one of which commits locally and
-            # the other of which must reach quorum across a continent. The
-            # differing throughputs are then a *consequence* of the latency
-            # rather than a confound in it -- which is precisely what cannot be
-            # said of any comparison where both sides are queueing.
+            # The strongest form this comparison can take: sweeping both engines
+            # down to a single worker (C=1) means exactly one operation is in
+            # flight for each, so neither median contains any waiting time. The
+            # ratio is then between two serial write paths, each bound by its own
+            # engine's quorum round trip across the same topology -- not by
+            # queueing. The differing throughputs are a *consequence* of the
+            # latency difference rather than a confound in it, which is precisely
+            # what cannot be said of any comparison where both sides are queueing.
             worst = max(
                 out["phase_ii"]["littles_law_agreement"] or 0.0,
                 out["phase_iii"]["littles_law_agreement"] or 0.0,
@@ -495,7 +503,7 @@ def lightest_load_write_latency(
                 f"({out['phase_ii']['offered_load_tps']:.0f} vs "
                 f"{out['phase_iii']['offered_load_tps']:.0f} ops/s) as a "
                 "consequence of the latency difference, not as a confound in it. "
-                "This is the least confounded replication-cost figure the "
+                "This is the least confounded cross-engine cost figure the "
                 "experiment produces"
             )
         else:
@@ -503,25 +511,25 @@ def lightest_load_write_latency(
                 "the two medians were measured at different offered loads "
                 f"({out['phase_ii']['offered_load_tps']:.0f} vs "
                 f"{out['phase_iii']['offered_load_tps']:.0f} ops/s) and at least "
-                "one side is queueing, so the ratio is not purely replication "
-                "cost; it is quotable because the cluster's component is "
-                "dominated by a quorum round trip the baseline does not make, "
-                "not because the loads match"
+                "one side is queueing, so the ratio is not purely the cost of one "
+                "engine's replication mechanism against the other's; it is "
+                "quotable because each side's component is dominated by its own "
+                "quorum round trip, not because the loads match"
             )
     return out
 
 
-def same_concurrency_delta(baseline: Run, cluster: Run) -> dict[str, Any]:
+def same_concurrency_delta(crdb: Run, pg: Run) -> dict[str, Any]:
     """The invalid comparison, computed and labelled as invalid.
 
-    Retained deliberately. It is the form the original dissertation reported, so
-    the error case study in Chapter 5 needs the numbers; and stating why it is
-    wrong is more useful than omitting it and leaving the intuitive comparison
-    un-refuted. It must never appear in a results table without this label.
+    Retained deliberately: stating why the intuitive same-concurrency
+    comparison is wrong, with the numbers alongside, is more useful than
+    omitting it and leaving readers to reach for it anyway. It must never
+    appear in a results table without this label.
     """
-    a, b = per_tier(baseline).set_index("concurrency"), per_tier(cluster).set_index("concurrency")
+    a, b = per_tier(crdb).set_index("concurrency"), per_tier(pg).set_index("concurrency")
     shared = sorted(set(a.index) & set(b.index))
-    la, lb = latency_by_op(baseline), latency_by_op(cluster)
+    la, lb = latency_by_op(crdb), latency_by_op(pg)
 
     rows: list[dict[str, Any]] = []
     for concurrency in shared:
@@ -549,20 +557,21 @@ def same_concurrency_delta(baseline: Run, cluster: Run) -> dict[str, Any]:
         "comparable": False,
         "reason": (
             "concurrency fixes the worker count, not the offered load, so the two "
-            "phases sit at different points on their own throughput-latency curves. "
-            "In this data the cluster's read median is *lower* than the single "
-            "node's at C=10 because the single node is carrying five times the load "
-            "at the same worker count -- an artefact in the direction that flatters "
-            "the cluster"
+            "engines sit at different points on their own throughput-latency "
+            "curves at a shared concurrency tier. Whichever engine is further "
+            "from its own saturation at that tier reports a lower latency there "
+            "for reasons that have nothing to do with replication cost -- an "
+            "artefact that can flatter either engine depending on which one is "
+            "closer to its own capacity limit"
         ),
-        "use": "Chapter 5 error case study only; never as a results table",
+        "use": "error case study only; never as a results table",
         "rows": rows,
     }
 
 
 def compare(
-    baseline: Run,
-    cluster: Run,
+    crdb: Run,
+    pg: Run,
     op: str = "update",
     accept_hardware_difference: bool = False,
 ) -> dict[str, Any]:
@@ -575,7 +584,7 @@ def compare(
     rather than inherited.
     """
     comparability: ValidationReport = validate_comparison(
-        baseline.manifest, cluster.manifest, baseline.phase, cluster.phase,
+        crdb.manifest, pg.manifest, crdb.phase, pg.phase,
         accept_hardware_difference=accept_hardware_difference,
     )
     if not comparability.ok:
@@ -584,21 +593,21 @@ def compare(
         )
 
     return {
-        "baseline_run_id": baseline.run_id,
-        "cluster_run_id": cluster.run_id,
+        "crdb_run_id": crdb.run_id,
+        "pg_run_id": pg.run_id,
         "operation": op,
         "comparability": comparability.to_dict(),
         "server_config": {
-            "phase_ii": baseline.server_command,
-            "phase_iii": cluster.server_command,
+            "phase_ii": crdb.server_command,
+            "phase_iii": pg.server_command,
         },
         "saturation": {
-            "phase_ii": _saturation(per_tier(baseline)),
-            "phase_iii": _saturation(per_tier(cluster)),
+            "phase_ii": _saturation(per_tier(crdb)),
+            "phase_iii": _saturation(per_tier(pg)),
         },
-        "curves": curves(baseline, cluster, op).to_dict(orient="records"),
-        "matched_throughput": matched_throughput(baseline, cluster, op),
-        "matched_utilisation": matched_utilisation(baseline, cluster, op),
-        "lightest_load_write_latency": lightest_load_write_latency(baseline, cluster),
-        "same_concurrency_delta": same_concurrency_delta(baseline, cluster),
+        "curves": curves(crdb, pg, op).to_dict(orient="records"),
+        "matched_throughput": matched_throughput(crdb, pg, op),
+        "matched_utilisation": matched_utilisation(crdb, pg, op),
+        "lightest_load_write_latency": lightest_load_write_latency(crdb, pg),
+        "same_concurrency_delta": same_concurrency_delta(crdb, pg),
     }

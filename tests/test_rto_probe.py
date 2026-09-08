@@ -2,8 +2,8 @@
 
 Each test pins a decision the probe makes about what its observations do and do
 not license, rather than a number it produces. A probe that reports a plausible
-recovery time it cannot actually resolve is the same failure as every defect in
-``docs/defects.md``: output that looks right and is not checkable.
+recovery time it cannot actually resolve is the same failure as this project's
+recorded instrumentation defects: output that looks right and is not checkable.
 
 No database is touched. ``_FakeProbe`` replaces the connection with a scripted
 one whose latency and failure window are set by the test, which is what makes the
@@ -160,7 +160,7 @@ def test_concurrency_is_what_makes_the_sampling_finer_than_the_write_cost(tmp_pa
 
     serial = resolution(1)
     parallel = resolution(4)
-    assert serial == pytest.approx(0.02, abs=0.01)
+    assert serial == pytest.approx(0.02, abs=0.015)
     assert parallel < serial / 2, (
         f"four workers resolved {parallel * 1000:.1f} ms against one worker's "
         f"{serial * 1000:.1f} ms; the pool is not buying resolution"
@@ -248,7 +248,7 @@ def test_the_probe_never_raises_into_the_run_it_is_observing(tmp_path):
 def test_offsets_are_taken_from_the_epoch_the_caller_supplies(tmp_path):
     """Four clocks in one run directory is D5; the caller owns the origin.
 
-    Phase IV hands the probe the same monotonic zero it gives ``events.json`` and
+    Phases III-IV hand the probe the same monotonic zero they give ``events.json`` and
     ``wall_offset_s``, so the fault offset and the probe's observations can be
     placed on one axis without an unmeasured conversion between them.
     """

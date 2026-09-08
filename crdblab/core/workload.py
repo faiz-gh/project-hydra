@@ -296,7 +296,7 @@ def _grouped_pairs(
     single place that decides which lines constitute one is this function.
 
     Grouping is implemented once and shared by :func:`group_ticks` and
-    :func:`group_timed_ticks`. Phase IV previously carried its own near-identical
+    :func:`group_timed_ticks`. Phases III-IV previously carried their own near-identical
     copy; maintaining two implementations of the rule that defines a measurement
     interval is the shape of defect D1 and is not reintroduced for the sake of
     attaching a timestamp.

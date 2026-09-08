@@ -1,19 +1,30 @@
-"""Phases II and III: steady-state throughput and latency under load.
+"""Benchmark: steady-state throughput and latency under load.
 
-Phase II measures a single ``cockroach start-single-node`` instance and Phase III
-the five-node cluster, so that the difference between them isolates the cost of
-Raft replication. The two differ only in which node the generator runs on and
-which endpoint it connects to; the sweep, the parsing, the sampling and the
-recording are identical and are therefore implemented once here. Maintaining two
-copies of this logic is what allowed three independent parsing defects to reach
-the results chapter (see ``docs/defects.md``), so the duplication is not
-reintroduced even though the phases are conceptually distinct.
+Measures the same five-node cluster twice, once per engine: CockroachDB and
+PostgreSQL under Patroni for HA. The generator is executed from the dedicated
+client node (:data:`crdblab.topology.CLIENT_NODE`) rather than from a node that
+is itself part of the system under test, so that the difference between a
+CockroachDB run and a PostgreSQL run isolates the engine rather than also
+moving where the generator runs. A single :class:`Target` carries the engine
+selector and the connection information for both: CockroachDB is driven
+against a single gateway connection string (:attr:`Target.db_uri`), while
+PostgreSQL is driven through the HAProxy endpoint on the client node itself
+(``127.0.0.1:5000``), which is what fronts the Patroni cluster's current
+leader. The sweep, the parsing, the sampling and the recording are identical
+for both engines and are implemented once here.
+
+``Target`` briefly carried one connection string *per cluster member* instead,
+on the theory that the client pool should survive a single node's loss. It
+does not: ``cockroach workload run``, given more than one URL, dials its
+``--concurrency`` connections *serially* against the list rather than in
+parallel, at roughly 2.65 s per connection measured on this topology --
+0.83 s for the whole pool at C=200 with one URL, 9m00s with five. Nothing
+faults during a benchmark sweep, so the resilience a multi-host string would
+buy is not needed here in the first place; it only added minutes of pure
+connection-setup time to every tier at any real concurrency.
 
 Design points that are corrections of specific observed failures:
 
-* The generator is executed on the target node over SSH so that the measured
-  latency excludes the round trip from the workstation, and the connection string
-  names exactly one host so that it excludes WAN latency to the other members.
 * Output is parsed by :class:`~crdblab.core.workload.WorkloadParser` in strict
   mode. Throughput is summed across operation types and latency distributions are
   kept separate (D1, D2, D3).
@@ -25,7 +36,8 @@ Design points that are corrections of specific observed failures:
   the observed write latency is checked against the quorum floor derived from
   Phase I. Both exist because a workload that matches no rows reports roughly
   twenty times the throughput at a twenty-fifth of the latency and is otherwise
-  indistinguishable from an excellent result (D8).
+  indistinguishable from an excellent result (D8). Both checks are
+  CockroachDB-specific and are skipped for a PostgreSQL target.
 """
 
 from __future__ import annotations
@@ -49,8 +61,8 @@ from ..core.recorder import (
     new_run_id,
     utcnow,
 )
-from ..core.workload import SUMMARY, WorkloadParser, group_timed_ticks
-from ..topology import BASELINE_NODE, Node, Topology
+from ..core.workload import PERIODIC, SUMMARY, WorkloadParser, group_timed_ticks
+from ..topology import CLIENT_NODE, Node, Topology
 
 _METRIC_RE = re.compile(r"^(?P<name>[a-z_]+)\{[^}]*\}\s+(?P<value>[0-9.e+-]+)$")
 
@@ -77,17 +89,27 @@ class Target:
     exec_node: Node
     database: str
     voters: int
+    engine: str
+    nodes: tuple[Node, ...] = ()
 
     @property
     def db_uri(self) -> str:
-        return (
-            f"postgresql://root@{self.exec_node.host}:26257/"
-            f"{self.database}?sslmode=disable"
-        )
+        """The single connection string the generator dials.
+
+        One URL, not one per cluster member -- see the module docstring for
+        why a multi-host string is actively harmful here, not merely
+        unnecessary.
+        """
+        if self.engine == "postgresql":
+            return f"postgresql://root@127.0.0.1:5000/{self.database}?sslmode=disable"
+        gateway = next((n for n in self.nodes if n.gateway), None)
+        host = gateway.host if gateway else "crdb-gcp-1"
+        port = gateway.sql_port if gateway else 26257
+        return f"postgresql://root@{host}:{port}/{self.database}?sslmode=disable"
 
     @property
     def metrics_url(self) -> str:
-        return f"http://{self.exec_node.host}:{self.exec_node.http_port}/_status/vars"
+        return ""
 
 
 @dataclass
@@ -191,6 +213,8 @@ def _run_tier(
     sampler: HostSampler,
     manifest: Manifest,
     t_zero: float,
+    tier_index: int = 0,
+    tier_total: int = 0,
 ) -> dict[str, Any]:
     """Execute one tier and record its per-interval samples.
 
@@ -212,6 +236,12 @@ def _run_tier(
     remote = ssh.force_tty(generator)
     manifest.generator_command = generator
 
+    print(
+        f"  tier {tier_index}/{tier_total}: C={concurrency}, rep={repetition}, "
+        f"{spec.duration_s}s",
+        flush=True,
+    )
+
     parser = WorkloadParser(strict=True)
     samples = []
     # Each sample is stamped with the harness's own clock as it is read, so the
@@ -227,6 +257,26 @@ def _run_tier(
                 if sample is not None:
                     samples.append(sample)
                     arrivals.append((time.monotonic(), sample))
+                    # A one-line-per-second summary, not the raw stream: the
+                    # raw text (every operation type's own row) is already
+                    # kept verbatim in raw_path, and echoing all of it here
+                    # duplicates that rather than helping anyone watch a tier
+                    # progress live. `flush=True` matters as much as what is
+                    # printed -- run-experiment.sh pipes this through `tee`,
+                    # which makes Python's stdout fully buffered instead of
+                    # line-buffered (it is no longer a TTY), so without an
+                    # explicit flush every print below queues up and appears
+                    # all at once when the buffer fills or the process exits,
+                    # which looks exactly like "no logs until it's done".
+                    if sample.kind == PERIODIC and int(sample.elapsed_s) % 15 == 0:
+                        total_tps = sum(
+                            s.tps for s in samples
+                            if s.kind == PERIODIC and s.elapsed_s == sample.elapsed_s
+                        )
+                        print(
+                            f"    [{sample.elapsed_s:6.1f}s] tps={total_tps:8.1f}",
+                            flush=True,
+                        )
 
     timed = list(group_timed_ticks(arrivals))
     started_at = timed[0][0] - timed[0][1].elapsed_s if timed else None
@@ -275,6 +325,26 @@ def _run_tier(
             f"C={concurrency} rep={repetition}: only {kept} steady-state ticks, "
             f"expected about {expected}"
         )
+    setup_s = (started_at - t_zero) if started_at is not None else None
+    mean_tps = round(sum(throughputs) / len(throughputs), 1) if throughputs else None
+    print(
+        f"  tier {tier_index}/{tier_total} done: {kept} ticks kept, "
+        f"mean {mean_tps or 0:.1f} ops/s"
+        + (f", setup {setup_s:.1f}s" if setup_s is not None else ""),
+        flush=True,
+    )
+    # A connection-setup delay this size means the generator was still dialing
+    # in when this ran -- for a bench sweep that only wastes wall time, but the
+    # same delay silently desynchronised a chaos run's fault-injection timer
+    # from its steady state once already (9 min of dialing against a 60 s
+    # inject_at_s). Surfaced here so a future regression like it is loud.
+    if setup_s is not None and setup_s > 10.0:
+        print(
+            f"  WARNING: tier {tier_index}/{tier_total} took {setup_s:.1f}s just to "
+            "establish connections -- investigate before trusting timings that "
+            "assume the generator started promptly",
+            flush=True,
+        )
     return {
         "concurrency": concurrency,
         "repetition": repetition,
@@ -309,11 +379,11 @@ def run(
     # Pre-flight runs before any measurement, not after: the point is to refuse
     # to spend half an hour producing a run that will have to be discarded.
     quorum_floor: float | None = None
-    if not skip_checks:
+    if not skip_checks and target.engine == "cockroachdb":
         preflight.check_clock_offset(report, [target.exec_node])
         if target.voters > 1:
             preflight.check_leaseholder_placement(
-                report, target.exec_node, target.database, target.exec_node.region
+                report, settings.topology.gateway, target.database, settings.topology.gateway.region
             )
             if network_run is None:
                 report.add(
@@ -323,7 +393,7 @@ def run(
                     "write-latency floor can be asserted",
                 )
             else:
-                rtts = preflight.gateway_rtts(network_run, target.exec_node.host)
+                rtts = preflight.gateway_rtts(network_run, settings.topology.gateway.host)
                 quorum_floor = preflight.quorum_floor_ms(rtts, target.voters)
                 report.add(
                     "quorum_floor_available",
@@ -358,35 +428,32 @@ def run(
     manifest.note(f"target={target.name} database={target.database} voters={target.voters}")
     manifest.note(f"tier order: {plan}")
 
-    # How the server was started, not merely how the client invoked it. See
-    # preflight.capture_server_config: a cache-size asymmetry between the
-    # baseline and the cluster was invisible in the artefact until this was
-    # recorded, and was attributed to replication cost.
-    server = preflight.capture_server_config(target.exec_node)
-    manifest.cockroach_version = server.get("version")
-    manifest.note(f"server: {server['start_command']}")
-    manifest.note(f"host: {preflight.format_hardware(server['hardware'])}")
+    # Capture server configuration
+    server = {}
+    if target.engine == "cockroachdb":
+        server = preflight.capture_server_config(settings.topology.gateway)
+        manifest.cockroach_version = server.get("version")
+        manifest.note(f"server: {server.get('start_command', '')}")
+        manifest.note(f"host: {preflight.format_hardware(server.get('hardware', {}))}")
+    else:
+        manifest.note(f"engine: postgresql (patroni HA)")
 
     tiers: list[dict[str, Any]] = []
     with HostSampler(target.metrics_url) as sampler:
         with MetricsWriter(run_dir.metrics_csv, COLUMNS) as writer:
             for index, (concurrency, repetition) in enumerate(plan):
-                probe = preflight.RowMatchProbe(target.exec_node, "usertable")
-                if not skip_checks:
+                probe = preflight.RowMatchProbe(settings.topology.gateway, "usertable")
+                if not skip_checks and target.engine == "cockroachdb":
                     probe.start()
 
                 raw_path = run_dir.raw(f"c{concurrency}_rep{repetition}.txt")
                 tier = _run_tier(
                     target, profile, concurrency, repetition,
                     raw_path, writer, sampler, manifest, t_zero,
+                    tier_index=index + 1, tier_total=len(plan),
                 )
 
-                if not skip_checks:
-                    # The quorum-floor check runs first so that its verdict is
-                    # available to the row-match probe. The probe consults it
-                    # only when the statistics view was flushed out from under
-                    # its window and it has nothing left to assert on; in every
-                    # other case the two checks are independent.
+                if not skip_checks and target.engine == "cockroachdb":
                     floor_ok = False
                     if quorum_floor is not None:
                         write_p50 = tier["mean_p50_ms"].get("update")
@@ -415,23 +482,14 @@ def run(
     return run_dir, {"tiers": tiers, "preflight": report}
 
 
-def single_target(settings: Settings, database: str = "ycsb") -> Target:
-    """Phase II: the unreplicated baseline."""
-    return Target(
-        name="single",
-        phase="p2_baseline",
-        exec_node=BASELINE_NODE,
-        database=database,
-        voters=1,
-    )
-
-
-def cluster_target(settings: Settings, database: str = "ycsb") -> Target:
-    """Phase III: the five-node cluster, driven from its gateway."""
+def cluster_target(settings: Settings, database: str = "ycsb", engine: str = "cockroachdb") -> Target:
+    """The five-node cluster, driven from the dedicated client node."""
     return Target(
         name="cluster",
-        phase="p3_cluster",
-        exec_node=settings.topology.gateway,
+        phase="bench_cluster",
+        exec_node=CLIENT_NODE,
         database=database,
         voters=len(settings.topology),
+        engine=engine,
+        nodes=settings.topology.nodes,
     )

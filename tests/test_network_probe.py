@@ -90,7 +90,7 @@ def test_quorum_floor_is_the_ack_that_completes_the_majority():
     runs/20260902T152535Z_p1-network/network.csv (the crdb-gcp-1 source rows,
     the gateway since the CPU confound was removed). The floor of ~69 ms is what
     makes a reported 3.1 ms write latency detectably impossible rather than
-    merely surprising (docs/defects.md, D8).
+    merely surprising (D8).
 
     The floor moved from 70.6 ms to 68.8 ms when the gateway moved from
     crdb-linode-1 to crdb-gcp-1, because it is a property of the *gateway's* view

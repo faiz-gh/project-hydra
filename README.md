@@ -1,18 +1,19 @@
 # crdblab
 
-Measurement harness for a five-node, three-provider CockroachDB testbed.
+Measurement harness for a five-node, three-provider database testbed, used to
+compare CockroachDB against PostgreSQL under Patroni for HA on identical
+topology.
 
 This package replaces a collection of standalone scripts whose independently
 maintained copies of the same parsing logic diverged, producing three
-compounding defects in the original Phase II/III exports (see `docs/defects.md`).
-The design goal is not convenience but defensibility: every figure must be
-traceable to a known code revision, a declared profile, and a retained copy of
-the raw generator output that produced it.
+compounding defects in the original exports. The design goal is not
+convenience but defensibility: every figure must be traceable to a known code
+revision, a declared profile, and a retained copy of the raw generator output
+that produced it.
 
 **Start here:** `instructions.md` is the step-by-step reproduction guide, from
-`git clone` to `terraform destroy`; `docs/defects.md` records the twelve
-instrumentation defects that shaped this design. This file covers the harness's
-own commitments.
+`git clone` to `terraform destroy`. This file covers the harness's own
+commitments.
 
 A wider briefing — the project's history, settled decisions, results and open
 questions — is kept outside the repository in `project-hydra-context/context.md`,
@@ -30,8 +31,7 @@ alongside the session log it was distilled from.
      'postgresql://root@crdb-gcp-1:26257/ycsb?sslmode=disable'
    ```
 
-   Repeat against `crdb-local-1` for the Phase II baseline, which needs its own
-   working set. The seed and row count **must** match the profile you intend to
+   The seed and row count **must** match the profile you intend to
    sweep with (`profiles/thesis-extended.yaml` for the dissertation's runs). They
    are not incidental — see the seed commitment below.
 3. `.venv/bin/crdblab capture --node gcp-1 --pty --duration 15`
@@ -42,13 +42,14 @@ alongside the session log it was distilled from.
    matrix and asserts clock offset and leaseholder placement. Its derived quorum
    floor is what makes the later write-latency check possible, so it must run
    before any benchmark.
-5. `crdblab bench single|cluster --profile thesis-extended` — Phases II and III.
-   `single` targets the unreplicated baseline node, which needs its own working
-   set loaded exactly as in step 2. Pre-flight refuses to start unless a Phase I
-   run exists to supply the quorum floor. Run both phases with the *same* profile:
-   the analysis layer refuses to compare runs whose workload parameters differ,
-   and concurrency is deliberately not one of those parameters.
-6. `crdblab chaos run --mode dead|recover` — Phase IV. A `dead` fault leaves the
+5. `crdblab bench --profile thesis-extended` — Phase II, the benchmark, driven
+   from the dedicated client node rather than from a node under test.
+   Pre-flight refuses to start unless a Phase I run exists to supply the
+   quorum floor. Pass `--engine postgresql` *before* the subcommand
+   (`crdblab --engine postgresql bench ...`) to benchmark the PostgreSQL/Patroni
+   cluster instead of the CockroachDB default. Run once per engine.
+6. `crdblab chaos run --mode recover|dead` — Phase III (`recover`) and Phase IV
+   (`dead`), fault injection against the primary. A `dead` fault leaves the
    target down and the harness does **not** restore it. CockroachDB is launched by
    cloud-init with `--background`, not as a systemd unit, so there is no service
    to start and a reboot will not bring it back; replay the start command, keeping
@@ -62,20 +63,14 @@ alongside the session log it was distilled from.
    serialised at the cost of one quorum write. `crdblab probe rto --duration 60`
    runs it standalone, with no benchmark anywhere.
 7. `crdblab validate runs/<run-id>` — gate before any analysis.
-8. `crdblab analyze steady-state <run>` — Phase II or III throughput and latency
+8. `crdblab analyze steady-state <run>` — one engine's throughput and latency
    by tier, with an interval estimate across repetitions.
-   `crdblab analyze raft-overhead --baseline <p2-run> --cluster <p3-run>` —
-   replication cost in three framings, each labelled with what it holds fixed:
+   `crdblab analyze engine-comparison --crdb <crdb-run> --pg <pg-run>` —
+   replication cost and engine comparison in three framings, each labelled with what it holds fixed:
    unqueued (both phases at one worker), matched throughput, and matched
    utilisation. It refuses to compare two runs configured differently, and
    declines the matched-throughput scalar where the phases' ranges do not overlap
-   rather than extrapolating. It no longer needs
-   `--accept-hardware-difference`: the gateway is `crdb-gcp-1`, the same machine
-   type as the Phase II baseline, so the two phases differ in replication and
-   nothing else the harness can see. The flag is retained for re-analysing runs
-   measured before that move, whose gateway was a Linode node with a different
-   CPU, and it downgrades the refusal to a *recorded warning* rather than
-   suppressing it.
+   rather than extrapolating.
    `crdblab analyze resilience <chaos-run>` — all three RTO figures with their
    limits (throughput-based, audit-log-based, and the probe's), the RPO, and the
    clock alignment every timing depends on.
@@ -130,15 +125,15 @@ All steps are implemented.
   a **line** where the offset was measured and as a **band** where it was only
   bounded.
 - **A comparison is checked, not just its operands.** Two runs can each be
-  internally valid while the inference from their difference is wrong: the
-  baseline and the cluster once ran with block caches differing fifteen-fold,
-  which inflated apparent replication cost by 43% (D9). `analyze raft-overhead`
-  asserts the two runs' server flags, workload parameters, version and hardware
-  match before it will compare them.
+  internally valid while the inference from their difference is wrong: two
+  phases once ran with block caches differing fifteen-fold, which inflated
+  apparent replication cost by 43% (D9). `analyze engine-comparison` asserts
+  the two runs' server flags, workload parameters, version and hardware match
+  before it will compare them.
 - **Concurrency is not load.** A closed workload's worker count fixes how many
   operations are outstanding, not how much work gets done, so two systems of
   different capacity at the same concurrency sit at different points on their
-  own throughput-latency curves. Replication cost is reported as a curve, or at
+  own throughput-latency curves. Engine comparison is reported as a curve, or at
   matched throughput; the same-concurrency delta is computed only under a label
   saying it is not a result.
 - **Internal consistency is necessary, not sufficient.** Four of the defects on
@@ -155,4 +150,4 @@ All steps are implemented.
   throughput being measured and making runs before and after the change
   incomparable. The race is handled instead: a flushed window is accepted only
   where the quorum-floor check independently covers the same tier, which is a
-  corroboration Phase II cannot have (D12).
+  corroboration an unreplicated system cannot have (D12).

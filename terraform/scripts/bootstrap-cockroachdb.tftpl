@@ -74,18 +74,8 @@ mkdir -p /var/lib/cockroach
 # 5. Start Node
 # ==========================================
 echo "Starting CockroachDB node..."
-# --cache and --max-sql-memory are stated explicitly and MUST be kept identical
-# to scripts/bootstrap-local.tftpl. The Phase II baseline exists to isolate the
-# cost of Raft replication, which requires that the baseline node and the cluster
-# members differ in exactly that respect. They did not: this template previously
-# omitted both flags, taking CockroachDB's 128 MiB default, while the local
-# template set 0.25 -- roughly a fifteen-fold larger block cache on the baseline.
-# Against a 205 MB working set that is the difference between holding the whole
-# dataset in cache and not holding it, so the measured Phase II advantage
-# conflated replication cost with cache residency.
-#
-# Relying on the default was also indefensible in a methodology chapter: the
-# figure is unstated, and it changes between CockroachDB versions.
+# Start CockroachDB node in the background.
+# --cache and --max-sql-memory are set to 0.25 to explicitly define resource boundaries.
 cockroach start \
   --insecure \
   --store=/var/lib/cockroach \
@@ -122,16 +112,8 @@ if [ "${hostname}" == "$PRIMARY_NODE" ]; then
         sleep 5
     done
 
-    # A responsive SQL gateway does not imply a complete cluster. The lease
-    # preference below names one locality per region, and CockroachDB rejects a
-    # constraint that matches no currently-live node. On the first provisioning
-    # run the GCP node (region=us-east1) joined five seconds after the primary
-    # began configuring, so "ALTER RANGE default ... lease_preferences" failed
-    # with 'constraint "+region=us-east1" matches no existing nodes' and, under
-    # 'set -e', aborted this script after num_replicas had already been applied.
-    # The cluster consequently ran with an empty lease_preferences list and
-    # placed the kv leaseholder in azure/centralindia, costing a factor of
-    # twelve in throughput. Wait for the full inventory before configuring.
+    # Wait for the full inventory before configuring to avoid applying constraints
+    # that match no existing nodes.
     EXPECTED_NODES=$${#PEERS[@]}
     echo "Waiting for all $EXPECTED_NODES nodes to join before applying zone configuration..."
     for i in $(seq 1 24); do
@@ -156,12 +138,8 @@ if [ "${hostname}" == "$PRIMARY_NODE" ]; then
         cockroach sql --insecure --host=$TS_IP:26257 \
             -e "CREATE DATABASE IF NOT EXISTS kv;"
 
-        # ycsb is the generator of record (docs/defects.md, D8). The database must
-        # exist before `cockroach workload init ycsb` can populate it, and that
-        # command rejects a URI naming any other database. Creating it here removes
-        # one step from the manual post-apply load; the load itself still has to be
-        # run explicitly, because its --seed and --insert-count must match the
-        # profile the sweep will use, and a mismatch is silent and *flattering*.
+        # ycsb is the generator of record. The database must exist before
+        # `cockroach workload init ycsb` can populate it.
         cockroach sql --insecure --host=$TS_IP:26257 \
             -e "CREATE DATABASE IF NOT EXISTS ycsb;"
 
@@ -173,10 +151,7 @@ if [ "${hostname}" == "$PRIMARY_NODE" ]; then
         cockroach sql --insecure --host=$TS_IP:26257 \
             -e "ALTER RANGE default CONFIGURE ZONE USING lease_preferences = '[[+region=us-east1], [+region=us-east], [+region=us-west]]';"
 
-        # Assert the end state rather than trusting that each statement ran.
-        # num_replicas applied while lease_preferences did not on the first run,
-        # and nothing detected the partial configuration: the cluster looked
-        # healthy and simply measured twelve times slower than it should have.
+        # Assert the end state to ensure lease_preferences applied correctly.
         APPLIED=$(cockroach sql --insecure --host=$TS_IP:26257 \
             -e "SELECT raw_config_sql FROM [SHOW ZONE CONFIGURATION FOR RANGE default];" 2>/dev/null \
             | grep -c "lease_preferences = '\[\[" || true)

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "crdblab"
 version = "0.1.0"
-description = "Measurement harness for a multi-cloud CockroachDB testbed"
+description = "Measurement harness for a multi-cloud CockroachDB vs PostgreSQL/Patroni testbed"
 requires-python = ">=3.10"
 dependencies = [
     "pandas>=2.0",
@@ -18,10 +18,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# python-docx is here rather than in the runtime dependencies on purpose:
-# tools/make_docx.py renders the dissertation and touches no measurement, and
-# every runtime pin is one more version a reproduction has to match.
-dev = ["pytest>=8.0", "pytest-cov>=5.0", "ruff>=0.5", "python-docx>=1.1"]
+dev = ["pytest>=8.0", "pytest-cov>=5.0", "ruff>=0.5"]
 
 [project.scripts]
 crdblab = "crdblab.cli:main"
@@ -31,3 +28,4 @@ include = ["crdblab*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]

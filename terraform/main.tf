@@ -6,6 +6,7 @@ module "linode_node_1" {
   ssh_public_key     = var.ssh_public_key
   tailscale_auth_key = var.tailscale_auth_key
   cluster_join_nodes = var.cluster_join_nodes
+  database_engine    = var.database_engine
 }
 
 module "linode_node_2" {
@@ -16,6 +17,7 @@ module "linode_node_2" {
   ssh_public_key     = var.ssh_public_key
   tailscale_auth_key = var.tailscale_auth_key
   cluster_join_nodes = var.cluster_join_nodes
+  database_engine    = var.database_engine
 }
 
 module "azure_node_1" {
@@ -27,6 +29,7 @@ module "azure_node_1" {
   ssh_public_key     = var.ssh_public_key
   tailscale_auth_key = var.tailscale_auth_key
   cluster_join_nodes = var.cluster_join_nodes
+  database_engine    = var.database_engine
 }
 
 module "azure_node_2" {
@@ -38,6 +41,7 @@ module "azure_node_2" {
   ssh_public_key     = var.ssh_public_key
   tailscale_auth_key = var.tailscale_auth_key
   cluster_join_nodes = var.cluster_join_nodes
+  database_engine    = var.database_engine
 }
 
 module "gcp_node_1" {
@@ -48,14 +52,16 @@ module "gcp_node_1" {
   ssh_public_key     = var.ssh_public_key
   tailscale_auth_key = var.tailscale_auth_key
   cluster_join_nodes = var.cluster_join_nodes
+  database_engine    = var.database_engine
 }
 
-module "local_node_1" {
-  source = "./modules/local_node"
-  count  = var.local_config.nodes["node1"].enabled ? 1 : 0
+module "client_node_1" {
+  source = "./modules/client_node"
+  count  = var.client_config.nodes["node1"].enabled ? 1 : 0
 
-  config             = var.local_config.nodes["node1"]
+  config             = var.client_config.nodes["node1"]
   ssh_public_key     = var.ssh_public_key
   tailscale_auth_key = var.tailscale_auth_key
   cluster_join_nodes = var.cluster_join_nodes
+  database_engine    = var.database_engine
 }

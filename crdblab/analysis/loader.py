@@ -210,7 +210,7 @@ def load_run(
         raise RunLoadError(
             f"{path} has no manifest.json. A run whose code revision, profile and "
             "server configuration are unrecorded cannot be cited, so it is not "
-            "loadable rather than loadable-with-a-warning (see docs/defects.md, D9)."
+            "loadable rather than loadable-with-a-warning (D9)."
         )
 
     metrics_path = path / "metrics.csv"
@@ -238,7 +238,7 @@ def load_run(
             f"{errors}"
         )
 
-    # A Phase IV run may also carry a probe log, under its own schema. It is
+    # A Phase III/IV run may also carry a probe log, under its own schema. It is
     # gated here for the same reason everything else is: `probe_availability`
     # reads it with a bare `read_csv`, and the whole point of this loader is that
     # no analysis reaches a CSV that has not been checked first. A run that

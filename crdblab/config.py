@@ -91,7 +91,13 @@ class ChaosSpec:
     duration_s: int = 180
     inject_at_s: int = 60
     concurrency: int = 100
-    target: str = "linode-2"
+    #: For CockroachDB: the node ``lease_preferences`` pins as leaseholder,
+    #: asserted by ``preflight.check_leaseholder_placement`` before the fault
+    #: fires. For PostgreSQL: informational only -- nothing pins Patroni's
+    #: leader to any specific node, so ``p4_chaos.resolve_patroni_primary``
+    #: queries the cluster live and faults whichever node actually holds the
+    #: lease, overriding this value if it disagrees.
+    target: str = "gcp-1"
     recovery_threshold: float = 0.80
     recovery_hold_s: int = 10
     #: Cadence of the RPO audit writer, which writes one sequence at a time on

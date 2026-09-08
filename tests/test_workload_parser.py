@@ -196,7 +196,7 @@ def test_update_latency_is_above_the_quorum_floor():
     observed = [t.latency_ms("update", "p50") for t in ticks]
     assert min(observed) >= quorum_floor_ms * 0.9, (
         f"update p50 {min(observed)} ms is below the {quorum_floor_ms} ms quorum "
-        "floor; the writes are probably matching no rows (see docs/defects.md, D8)"
+        "floor; the writes are probably matching no rows (D8)"
     )
 
 
