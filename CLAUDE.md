@@ -370,10 +370,21 @@ testbed, not something touched by most code changes to `crdblab/`.
   `--background` -- so `killall -9 cockroach` is simply the end of it. Left
   alone, a PostgreSQL `dead` run would have measured systemd's restart loop
   instead of Patroni's failover, and reported a *better* RTO than CockroachDB
-  on a fault that was never the same fault. The payload now sets
-  `Restart=no` first and delivers the kill with `systemctl kill
-  --kill-who=all --signal=SIGKILL patroni.service`; `restore_target` puts
-  `Restart=on-failure` back before starting the unit. Signalling the unit's
+  on a fault that was never the same fault. The payload installs `Restart=no` as a **drop-in file**
+  (`/etc/systemd/system/patroni.service.d/99-crdblab-chaos.conf`) plus a
+  `daemon-reload`, then delivers the kill with `systemctl kill --kill-who=all
+  --signal=SIGKILL patroni.service`; `restore_target` deletes the drop-in,
+  reloads, and starts the unit. The drop-in is not stylistic: `systemctl
+  set-property patroni.service Restart=no`, which this used first, fails with
+  "Cannot set property Restart, or unknown property" -- `set-property` only
+  takes properties settable on a running unit, essentially the cgroup knobs.
+  Measured against crdb-azure-1 on 2026-09-08: rc=1, the `&&` short-circuited,
+  and the primary served on untouched (the harness reported the fault as not
+  landed, which is what that check is for). **Verified live** with the drop-in:
+  patroni went to `failed` and stayed there, postgres processes went to zero,
+  Patroni promoted crdb-linode-1 about 30 s later, and `restore_target` brought
+  the node back in 29.5 s with `Restart=on-failure` in place and the drop-in
+  gone. Signalling the unit's
   cgroup is also the only reliable way to hit Patroni: it runs as
   `/usr/bin/python3 /usr/bin/patroni`, so its `comm` is `python3` and
   `killall -9 patroni` matches nothing, while a `pkill -f patroni` written to
@@ -408,14 +419,24 @@ testbed, not something touched by most code changes to `crdblab/`.
   produce (`different server versions (v26.3.0 vs None)`); it is now reported as
   a warning naming both builds. (4) `preflight.PostgresRowMatchProbe` +
   `row_match_probe(engine, ...)` give D8 a detector on the PostgreSQL side,
-  differencing `pg_stat_user_tables`'s scan and fetched-row counters across each
-  tier -- a workload addressing an empty keyspace still scans on every
-  operation and fetches nothing, so the rate goes to zero while throughput goes
-  *up*. `bench.py` now runs the probe **and** `check_write_latency_floor` for
+  differencing `pg_stat_user_tables`'s **index** scan and fetched-row counters
+  across each tier -- a workload addressing an empty keyspace still scans on
+  every operation and fetches nothing, so the rate goes to zero while throughput
+  goes *up*. Verified live on all three cases: 200 matching PK lookups gave
+  1.0000, 200 lookups matching nothing gave 0.0000 and failed the check, and a
+  sequential scan failed it for its own reason. `bench.py` now runs the probe **and** `check_write_latency_floor` for
   both engines: Patroni's `synchronous_standby_names: ANY 2 (*)` waits for two
   standby acks, the same geometry as a 3-of-5 Raft quorum, so Phase I's floor
   bounds both. `n_tup_upd` is deliberately not added to the fetched-row count --
-  an UPDATE's index scan already counted the row it found.
+  an UPDATE's index scan already counted the row it found -- and **`seq_tup_read`
+  is deliberately not counted as a match**, which is the difference between a
+  working detector and a decorative one: it counts rows *read* by a sequential
+  scan, not rows matched, so twenty scans matching nothing reported 100,000 rows
+  against a 5,000-row table and yielded a "match rate" of 5000, sailing past the
+  0.99 minimum on exactly the failure the check exists to catch (measured on
+  this testbed). `seq_scan` is read as a separate signal instead: this workload
+  addresses rows by primary key, so a sequential scan of its table means the
+  plan is not the one being measured, and the tier fails for that.
 - **The generator goes through HAProxy; the measurement clients must not.**
   `config.pg_haproxy_dsn` (one host, `127.0.0.1:5000`) is for
   `cockroach workload run`, which has to be given exactly one URL.
@@ -429,6 +450,34 @@ testbed, not something touched by most code changes to `crdblab/`.
   branch already used for these two clients, and safe for the same reason
   (single connections, not `--concurrency`-many, so the serial-dial cost that
   rules multi-host out for the generator does not apply).
+- **Patroni 3.x ignores `bootstrap.users`, so the `root` role has to be created
+  by hand.** It creates only the `superuser` and `replication` roles named under
+  `postgresql.authentication`. Observed on the 2026-09-08 deployment:
+  `pg_roles` held exactly `postgres` and `replicator`, and every connection the
+  harness makes -- all of them as `root`, to match the CockroachDB side --
+  failed with "password authentication failed for user root", on a cluster
+  whose five members were all healthy. The template now creates `root` and
+  `admin` explicitly after bootstrap, as the local `postgres` superuser over the
+  unix socket (`auth-local: trust`), and creates `ycsb`/`bench` owned by `root`.
+  The `bootstrap.users:` block is kept as documentation of intent, with a note
+  saying it does nothing.
+- **The databases are created by whichever node won the election, not by
+  `PEERS[0]`.** Nothing pins Patroni's leader, so naming a node in advance is a
+  guess: on 2026-09-08 the primary was `crdb-azure-1` while `PEERS[0]` is
+  `crdb-gcp-1`, which left gcp-1 waiting out its primary-poll and failing
+  provisioning while `ycsb` was never created at all. Every node now polls its
+  own `:8008/primary` and stops as soon as it sees a peer has won -- exactly one
+  node can answer, so exactly one creates.
+- **HAProxy on the client node needs `init-addr last,libc,none`.** It resolves
+  every `server` hostname once at startup and refuses to start if any fails, and
+  at first boot those are Tailscale MagicDNS names that often do not resolve
+  yet, because the node joins the mesh in the same cloud-init run. The
+  2026-09-08 deployment came up with haproxy dead ("Start request repeated too
+  quickly") while the identical config validated cleanly minutes later. The
+  template now waits for the names, starts haproxy, and **verifies something is
+  listening on :5000** before reporting success -- without which the failure
+  surfaces much later as `connection refused` on `127.0.0.1:5000` in a measured
+  phase.
 - **Patroni's config must be at `/etc/patroni/config.yml`, and a skipped
   systemd condition is not an error.** Ubuntu's packaged `patroni.service`
   declares `ConditionPathExists=/etc/patroni/config.yml` and

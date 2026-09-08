@@ -300,7 +300,7 @@ def test_pg_row_match_passes_when_every_scan_fetches_a_row():
     from crdblab.core.preflight import PreflightReport
 
     report = PreflightReport()
-    probe = _pg_probe([(100.0, 100.0), (1100.0, 1100.0)])
+    probe = _pg_probe([(100.0, 100.0, 0.0), (1100.0, 1100.0, 0.0)])
     probe.start()
     assert probe.finish(report) == 1.0
     assert report.ok
@@ -313,7 +313,7 @@ def test_pg_row_match_catches_a_workload_touching_nothing():
     from crdblab.core.preflight import PreflightReport
 
     report = PreflightReport()
-    probe = _pg_probe([(100.0, 100.0), (1100.0, 100.0)])
+    probe = _pg_probe([(100.0, 100.0, 0.0), (1100.0, 100.0, 0.0)])
     probe.start()
     assert probe.finish(report) == 0.0
     assert not report.ok
@@ -323,7 +323,7 @@ def test_pg_row_match_reports_a_workload_that_never_ran():
     from crdblab.core.preflight import PreflightReport
 
     report = PreflightReport()
-    probe = _pg_probe([(100.0, 100.0), (100.0, 100.0)])
+    probe = _pg_probe([(100.0, 100.0, 0.0), (100.0, 100.0, 0.0)])
     probe.start()
     assert probe.finish(report) == 0.0
     assert not report.ok
@@ -335,13 +335,13 @@ def test_pg_row_match_treats_a_counter_reset_as_evidence_lost_not_as_a_pass():
     from crdblab.core.preflight import PreflightReport
 
     report = PreflightReport()
-    probe = _pg_probe([(1000.0, 1000.0), (5.0, 5.0)])
+    probe = _pg_probe([(1000.0, 1000.0, 0.0), (5.0, 5.0, 0.0)])
     probe.start()
     assert probe.finish(report) == 0.0
     assert not report.ok
 
     report = PreflightReport()
-    probe = _pg_probe([(1000.0, 1000.0), (5.0, 5.0)])
+    probe = _pg_probe([(1000.0, 1000.0, 0.0), (5.0, 5.0, 0.0)])
     probe.start()
     # The write median cleared the quorum floor, which independently shows the
     # operations reached data; the rate itself is unmeasured, hence None.
@@ -371,3 +371,28 @@ def test_row_match_probe_factory_picks_the_detector_per_engine():
     # refuse rather than quietly measure nothing.
     with pytest.raises(PreflightError):
         row_match_probe("postgresql", gateway=gw, table="usertable")
+
+
+def test_pg_row_match_ignores_rows_merely_read_by_a_sequential_scan():
+    """The counter that would have made this detector decorative.
+    `seq_tup_read` counts rows *read*, not matched: measured on the testbed,
+    twenty sequential scans matching nothing reported 100,000 rows read against
+    a 5,000-row table, so counting it gave a "match rate" of 5000 for a workload
+    that touched no data. A sequential scan is reported as its own failure --
+    this workload addresses rows by primary key -- and never as matches."""
+    from crdblab.core.preflight import PreflightReport
+
+    report = PreflightReport()
+    # 20 sequential scans, no index scans, nothing fetched.
+    probe = _pg_probe([(0.0, 0.0, 0.0), (0.0, 0.0, 20.0)])
+    probe.start()
+    assert probe.finish(report) == 0.0
+    assert not report.ok
+    assert any("sequential scan" in c.detail for c in report.checks)
+
+
+def test_the_pg_stats_query_reads_no_sequential_row_counter():
+    from crdblab.core.preflight import _PG_STATS_QUERY
+
+    assert "seq_tup_read" not in _PG_STATS_QUERY
+    assert "idx_tup_fetch" in _PG_STATS_QUERY and "idx_scan" in _PG_STATS_QUERY

@@ -137,17 +137,32 @@ SUDO = "sudo -n"
 #: do so while reporting an RTO far better than CockroachDB's, on a fault that
 #: was never comparable in the first place.
 #:
-#: `Restart=no` is set first (a drop-in under /etc/systemd/system.control/,
-#: which `restore_target` reverses) and the kill is then delivered through
-#: `systemctl kill --kill-who=all`, not `killall`. That matters twice over:
-#: nothing has to guess the process name -- Patroni runs as `/usr/bin/python3
-#: /usr/bin/patroni`, so its `comm` is `python3` and `killall -9 patroni` finds
-#: nothing at all -- and a `pkill -f patroni` written to work around that
-#: matches the very SSH command carrying it. Signalling the unit's cgroup has
-#: neither problem, and takes postgres down with it since Patroni starts the
-#: postmaster as its child.
+#: `Restart=no` is installed first, as a **drop-in file** plus a
+#: `daemon-reload`, and the kill is then delivered through `systemctl kill
+#: --kill-who=all`, not `killall`.
+#:
+#: The drop-in is not stylistic. `systemctl set-property patroni.service
+#: Restart=no` -- the obvious one-liner, and what this did first -- fails with
+#: "Cannot set property Restart, or unknown property": `set-property` only
+#: accepts properties that are settable on a *running* unit, which is
+#: essentially the cgroup resource knobs, and `Restart=` is not one. Measured
+#: against crdb-azure-1 on 2026-09-08: the command returned rc=1, the `&&`
+#: short-circuited, and the primary went on serving. (The harness reported the
+#: fault as not landed, which is what that check is for.) A drop-in under
+#: /etc/systemd/system/ is the supported way, and `restore_target` deletes it.
+#:
+#: `systemctl kill` rather than `killall` matters twice over: nothing has to
+#: guess the process name -- Patroni runs as `/usr/bin/python3 /usr/bin/patroni`,
+#: so its `comm` is `python3` and `killall -9 patroni` finds nothing at all --
+#: and a `pkill -f patroni` written to work around that matches the very SSH
+#: command carrying it. Signalling the unit's cgroup has neither problem, and
+#: takes postgres down with it since Patroni starts the postmaster as its child.
+PG_RESTART_OVERRIDE = "/etc/systemd/system/patroni.service.d/99-crdblab-chaos.conf"
+
 _PG_DEAD_PAYLOAD = (
-    f"{SUDO} systemctl set-property patroni.service Restart=no && "
+    f"{SUDO} mkdir -p {PG_RESTART_OVERRIDE.rsplit('/', 1)[0]} && "
+    f"printf '[Service]\\nRestart=no\\n' | {SUDO} tee {PG_RESTART_OVERRIDE} >/dev/null && "
+    f"{SUDO} systemctl daemon-reload && "
     f"{SUDO} systemctl kill --kill-who=all --signal=SIGKILL patroni.service"
 )
 
@@ -183,11 +198,15 @@ def preflight_payload(mode: str, engine: str) -> str:
     """
     if mode == "dead":
         if engine == "postgresql":
-            # Same rights as the payload (passwordless sudo over systemctl on
-            # this unit), while changing nothing: `show` reads properties and
-            # `--kill-who` is not involved. A unit that does not exist, or a
-            # sudo that prompts, both fail here rather than during the fault.
-            return f"{SUDO} systemctl show patroni.service --property=MainPID"
+            # The same two rights the payload needs -- passwordless sudo over
+            # systemctl, and write access to the unit directory the drop-in
+            # goes in -- while changing nothing. A unit that does not exist, a
+            # sudo that prompts, or a read-only /etc all fail here rather than
+            # during the fault, which is the whole point of asking first.
+            return (
+                f"{SUDO} systemctl show patroni.service --property=MainPID && "
+                f"{SUDO} test -w /etc/systemd/system"
+            )
         return f"{SUDO} killall -0 cockroach"
     elif mode == "recover":
         return f"{SUDO} tailscale status --json >/dev/null"
@@ -498,11 +517,14 @@ def restore_target(
     join = ",".join(f"{n.host}:{n.sql_port}" for n in survivors)
 
     if engine == "postgresql":
-        # Restart=no was set by the fault so systemd could not undo it; putting
-        # it back is part of restoring the node, not an extra courtesy. Doing it
-        # in the other order would let a failed start stay down silently.
+        # The fault installed a drop-in disabling systemd's restart so the kill
+        # could not be undone; removing it is part of restoring the node, not an
+        # extra courtesy -- left behind, the next `dead` run would measure a node
+        # systemd had stopped supervising. `rm -f` and the reload are
+        # unconditional so a re-run of the restore is harmless.
         payload = (
-            "sudo -n systemctl set-property patroni.service Restart=on-failure && "
+            f"sudo -n rm -f {PG_RESTART_OVERRIDE} && "
+            "sudo -n systemctl daemon-reload && "
             "sudo -n systemctl start patroni"
         )
     else:

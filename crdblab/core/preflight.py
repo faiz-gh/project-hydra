@@ -619,9 +619,23 @@ class RowMatchProbe:
 #: does, so both operation types are covered without counting either twice --
 #: ``n_tup_upd`` is deliberately not added in, since the row it reports was
 #: already counted when the update found it.
+#:
+#: ``seq_tup_read`` is deliberately **not** part of the matched count, and this
+#: is the difference between a working detector and a decorative one. It counts
+#: rows *read* by sequential scans, not rows matched: measured on this testbed,
+#: twenty sequential scans matching nothing at all reported ``seq_tup_read``
+#: 100,000 against a 5,000-row table, so folding it in yielded a "match rate"
+#: of 5000 for a workload that touched no data -- comfortably past the 0.99
+#: minimum, on precisely the failure this check exists to catch. Only the index
+#: counters distinguish "found a row" from "looked at a row", and this
+#: workload's operations are primary-key lookups, so index scans are what it
+#: should be producing.
+#:
+#: ``seq_scan`` is therefore read as a *separate* signal rather than as part of
+#: the rate: a sequential scan of the workload's table means the plan is not
+#: the one the measurement assumes, which is its own defect.
 _PG_STATS_QUERY = (
-    "SELECT coalesce(seq_scan, 0) + coalesce(idx_scan, 0), "
-    "coalesce(seq_tup_read, 0) + coalesce(idx_tup_fetch, 0) "
+    "SELECT coalesce(idx_scan, 0), coalesce(idx_tup_fetch, 0), coalesce(seq_scan, 0) "
     "FROM pg_stat_user_tables WHERE relname = '{table}'"
 )
 
@@ -656,7 +670,7 @@ class PostgresRowMatchProbe:
     password: str = ""
     _before: tuple[float, float] | None = field(default=None, init=False, repr=False)
 
-    def _sample(self) -> tuple[float, float]:
+    def _sample(self) -> tuple[float, float, float]:
         query = _PG_STATS_QUERY.format(table=self.table)
         result = ssh.run(
             self.exec_node,
@@ -678,8 +692,8 @@ class PostgresRowMatchProbe:
                 f"pg_stat_user_tables has no row for {self.table!r}: the table does "
                 "not exist on the primary, so the workload cannot have touched it (D8)"
             )
-        scans, rows = lines[-1].split(",")
-        return float(scans), float(rows)
+        scans, rows, seq = lines[-1].split(",")
+        return float(scans), float(rows), float(seq)
 
     def start(self) -> None:
         self._before = self._sample()
@@ -697,10 +711,27 @@ class PostgresRowMatchProbe:
         """
         if self._before is None:
             raise PreflightError("PostgresRowMatchProbe.finish called before start")
-        s0, r0 = self._before
-        s1, r1 = self._sample()
+        s0, r0, q0 = self._before
+        s1, r1, q1 = self._sample()
         scans = s1 - s0
         matched = r1 - r0
+        seq_scans = q1 - q0
+
+        if seq_scans > 0:
+            # Not folded into the rate, and not ignored either. This workload
+            # addresses rows by primary key; a sequential scan of its table
+            # means the plan is not the one being measured -- a dropped index,
+            # a rewritten predicate, or a table that is not what it should be --
+            # and every such scan reads the whole table, which is not the
+            # operation whose latency is being reported.
+            report.add(
+                "row_match", False,
+                f"{seq_scans:.0f} sequential scan(s) of {self.table!r} during the "
+                "tier; this workload should address rows by primary key, so the "
+                "operations measured are not the operations intended",
+                table=self.table, sequential_scans=seq_scans,
+            )
+            return 0.0
 
         if scans < 0 or matched < 0:
             detail = (
@@ -727,8 +758,8 @@ class PostgresRowMatchProbe:
         if scans <= 0:
             report.add(
                 "row_match", False,
-                f"no scans of {self.table!r} were recorded during the window; "
-                "the workload may not have run at all",
+                f"no index scans of {self.table!r} were recorded during the "
+                "window; the workload may not have run at all",
                 table=self.table,
             )
             return 0.0
@@ -737,7 +768,7 @@ class PostgresRowMatchProbe:
         report.add(
             "row_match",
             rate >= MIN_ROW_MATCH_RATE,
-            f"{matched:.0f}/{scans:.0f} scans fetched a row "
+            f"{matched:.0f}/{scans:.0f} index scans fetched a row "
             f"(rate {rate:.4f}, minimum {MIN_ROW_MATCH_RATE})"
             + ("" if rate >= MIN_ROW_MATCH_RATE else "; check that the generator "
                "seed and insert-count match the values the table was loaded with"),

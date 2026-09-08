@@ -86,7 +86,16 @@ frontend db_front
 backend patroni_primary
     option httpchk GET /primary
     http-check expect status 200
-    default-server inter 3s fall 3 rise 2 on-marked-down shutdown-sessions
+    # init-addr is not optional here. HAProxy resolves every `server`
+    # hostname once at startup and refuses to start if any of them fails --
+    # and at first boot these are Tailscale MagicDNS names that frequently do
+    # not resolve yet, because this node joins the mesh in the same cloud-init
+    # run. Observed 2026-09-08: the whole deployment came up with haproxy
+    # dead ("Start request repeated too quickly", `haproxy -c` failing), while
+    # the very same config validated cleanly minutes later once DNS had
+    # settled. `last,libc,none` lets it start with the address unresolved and
+    # pick the peer up on a later health check instead.
+    default-server inter 3s fall 3 rise 2 on-marked-down shutdown-sessions init-addr last,libc,none
 EOF
 
 for peer in "$${PEERS[@]}"; do
@@ -95,7 +104,39 @@ for peer in "$${PEERS[@]}"; do
     fi
 done
 
+# Give MagicDNS a bounded chance to settle before starting, so the common case
+# starts with real addresses rather than relying on init-addr's fallback.
+echo "Waiting for peer names to resolve..."
+for _ in $(seq 1 30); do
+    UNRESOLVED=0
+    for peer in "$${PEERS[@]}"; do
+        [ "$peer" = "${hostname}" ] && continue
+        getent hosts "$peer" >/dev/null 2>&1 || UNRESOLVED=1
+    done
+    [ "$UNRESOLVED" = "0" ] && break
+    sleep 5
+done
+
 systemctl enable haproxy
 systemctl restart haproxy
+
+# Verify rather than assume, for the same reason the Patroni bootstrap does:
+# `systemctl restart` returning 0 is not the same as a listener existing, and
+# a client node whose HAProxy is dead fails every measured phase later with
+# "connection refused" on 127.0.0.1:5000 -- a long way from the cause.
+HAPROXY_UP=0
+for _ in $(seq 1 12); do
+    if ss -lnt 2>/dev/null | grep -q ':5000 '; then
+        HAPROXY_UP=1
+        break
+    fi
+    sleep 5
+done
+if [ "$HAPROXY_UP" != "1" ]; then
+    echo "FAILED: haproxy is not listening on :5000 after 60s." >&2
+    systemctl status haproxy --no-pager >&2 || true
+    /usr/sbin/haproxy -f /etc/haproxy/haproxy.cfg -c >&2 || true
+    exit 1
+fi
 
 echo "✅ Client node provisioned successfully."

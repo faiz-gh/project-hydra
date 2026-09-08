@@ -230,6 +230,18 @@ def test_dead_payload_kills_the_right_process_per_engine():
     assert "patroni" in get_payload("dead", "postgresql")
 
 
+def test_the_postgresql_dead_fault_disables_restart_with_a_drop_in_not_set_property():
+    """`systemctl set-property patroni.service Restart=no` -- the obvious
+    one-liner -- fails with "Cannot set property Restart, or unknown property":
+    set-property only accepts properties settable on a running unit, which
+    Restart= is not. Measured against crdb-azure-1: rc=1, the `&&`
+    short-circuited, and the primary served on untouched. A drop-in file plus
+    daemon-reload is the supported mechanism."""
+    payload = get_payload("dead", "postgresql")
+    assert "set-property" not in payload
+    assert "patroni.service.d" in payload and "daemon-reload" in payload
+
+
 def test_the_postgresql_dead_fault_cannot_be_undone_by_systemd():
     """patroni.service ships Restart=on-failure, so a SIGKILL is a failure by
     systemd's definition and the unit returns within RestartSec (~100 ms). A
@@ -252,15 +264,20 @@ def test_the_postgresql_dead_fault_signals_the_unit_not_a_process_name():
     assert "killall" not in payload and "pkill" not in payload
 
 
-def test_restoring_postgresql_puts_the_restart_policy_back():
-    """Otherwise the node comes back with Restart=no still set and the next
+def test_restoring_postgresql_removes_the_restart_override():
+    """Otherwise the node comes back with Restart=no still in place and the next
     dead run measures a node systemd has stopped supervising."""
     import inspect
 
     from crdblab.phases import p4_chaos
 
     source = inspect.getsource(p4_chaos.restore_target)
-    assert "Restart=on-failure" in source
+    # The path is interpolated from the constant, so the source names the
+    # constant rather than the expanded path -- which is the point: the fault
+    # and the restore cannot drift apart onto two different files.
+    assert "rm -f {PG_RESTART_OVERRIDE}" in source
+    assert "daemon-reload" in source
+    assert p4_chaos.PG_RESTART_OVERRIDE in p4_chaos.get_payload("dead", "postgresql")
 
 
 @pytest.mark.parametrize("mode", ["dead", "recover"])

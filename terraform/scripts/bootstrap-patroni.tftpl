@@ -115,6 +115,14 @@ bootstrap:
     - host all all 0.0.0.0/0 md5
     - host all all ::0/0 md5
 
+  # NOTE: `bootstrap.users` is NOT what creates these. Patroni 3.x ignores the
+  # section entirely -- it creates only the `superuser` and `replication` roles
+  # named under `postgresql.authentication` below -- so the block is kept for
+  # documentation of intent while the roles are created explicitly after
+  # bootstrap (see "Create the harness roles" further down). Observed
+  # 2026-09-08 on a fresh five-node deployment: `pg_roles` contained exactly
+  # `postgres` and `replicator`, and every connection the harness makes, which
+  # is as `root`, failed with "password authentication failed for user root".
   users:
     admin:
       password: adminpassword
@@ -179,31 +187,49 @@ if [ "$PATRONI_UP" != "1" ]; then
     exit 1
 fi
 
-PRIMARY_NODE="$${PEERS[0]}"
-if [ "${hostname}" == "$PRIMARY_NODE" ]; then
-    # Wait to actually BE the primary rather than assuming it after a sleep.
-    # Nothing pins Patroni's leader -- it is an etcd election among all five
-    # nodes -- so PEERS[0] is where the databases are attempted, and if the
-    # election went elsewhere this node must not create them.
-    IS_PRIMARY=0
-    for _ in $(seq 1 36); do
-        if curl -sf -m 5 -o /dev/null http://127.0.0.1:8008/primary; then
-            IS_PRIMARY=1
+# The databases are created by whichever node the election actually made
+# primary -- not by PEERS[0]. Nothing pins Patroni's leader, so naming a node
+# in advance is a guess: on the 2026-09-08 deployment it was crdb-azure-1 while
+# PEERS[0] is crdb-gcp-1, and gating creation on PEERS[0] left gcp-1 waiting out
+# its timeout and failing provisioning while the databases were never created
+# at all. Exactly one node can answer :8008/primary, so exactly one runs the
+# block below; every other node stops looking as soon as it sees that some peer
+# has won, and exits successfully because it has nothing to do.
+IS_PRIMARY=0
+for _ in $(seq 1 36); do
+    if curl -sf -m 5 -o /dev/null http://127.0.0.1:8008/primary; then
+        IS_PRIMARY=1
+        break
+    fi
+    PEER_WON=0
+    for peer in "$${PEERS[@]}"; do
+        [ "$peer" = "${hostname}" ] && continue
+        if curl -sf -m 5 -o /dev/null "http://$peer:8008/primary"; then
+            PEER_WON=1
             break
         fi
-        sleep 5
     done
-    if [ "$IS_PRIMARY" != "1" ]; then
-        echo "FAILED: ${hostname} is not the patroni primary after 180s, so the" >&2
-        echo "  ycsb/bench databases were not created. Create them on whichever" >&2
-        echo "  node answers :8008/primary before benchmarking." >&2
-        exit 1
-    fi
+    [ "$PEER_WON" = "1" ] && break
+    sleep 5
+done
+
+if [ "$IS_PRIMARY" = "1" ]; then
+    # Create the harness roles. Done here, as the local `postgres` superuser
+    # over the unix socket (`auth-local: trust`), because Patroni 3.x does not
+    # create `bootstrap.users` -- see the note in the config above. Everything
+    # the harness connects as is `root`, matching the CockroachDB side, so
+    # without this the deployment comes up healthy and refuses every one of its
+    # connections.
+    echo "Creating the harness roles on the primary..."
+    sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='root'" | grep -q 1 \
+      || sudo -u postgres psql -c "CREATE ROLE root LOGIN SUPERUSER PASSWORD 'rootpassword'"
+    sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='admin'" | grep -q 1 \
+      || sudo -u postgres psql -c "CREATE ROLE admin LOGIN CREATEROLE CREATEDB PASSWORD 'adminpassword'"
 
     echo "Creating databases on the primary..."
     export PGPASSWORD=rootpassword
-    psql -h 127.0.0.1 -U root -d postgres -c "CREATE DATABASE bench;" || true
-    psql -h 127.0.0.1 -U root -d postgres -c "CREATE DATABASE ycsb;" || true
+    psql -h 127.0.0.1 -U root -d postgres -c "CREATE DATABASE bench OWNER root;" || true
+    psql -h 127.0.0.1 -U root -d postgres -c "CREATE DATABASE ycsb OWNER root;" || true
     # Verified, not assumed: `|| true` above tolerates "already exists", which
     # is correct on a re-run and indistinguishable from a failure otherwise.
     psql -h 127.0.0.1 -U root -d ycsb -c "SELECT 1;" >/dev/null \
