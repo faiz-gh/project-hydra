@@ -77,8 +77,11 @@ alongside the session log it was distilled from.
 9. `crdblab report figures` — renders the dissertation figures into `figures/`,
    defaulting to the most recent run of each phase. Every figure resolves through
    the analysis loader, so an unvalidated or manifest-less run cannot reach one,
-   and each figure stamps its source run ids into its own footer. PNGs are
-   exported at >= 4K width with a vector PDF alongside each.
+   and each figure stamps its source run ids into its own footer. Every figure
+   is written twice, as a PNG exported at >= 4K width and as an SVG beside it,
+   and its filename carries the engine, the profile and the run id it was drawn
+   from -- a footer inside the image cannot distinguish two files sitting in the
+   same directory.
 
 All steps are implemented.
 

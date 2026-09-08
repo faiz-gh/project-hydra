@@ -633,5 +633,5 @@ step "Done in $((elapsed / 60))m $((elapsed % 60))s"
 for r in "$P1" "$P2" "$P4R" "$P4D"; do
   [ -n "$r" ] && note "$(basename "$r")"
 done
-note "figures/  (PNG at >=4K, with a vector PDF beside each)"
+note "figures/  (PNG at >=4K, with an SVG beside each; filenames carry engine/profile/run)"
 note "log $LOG"

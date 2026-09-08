@@ -67,7 +67,7 @@ SEQUENTIAL = LinearSegmentedColormap.from_list("crdblab_blue", _BLUE_RAMP)
 
 #: Minimum exported width in pixels. 4K (3840) so a figure survives being scaled
 #: to a full text column in print and still stands up to a reader zooming in on
-#: the PDF.
+#: the printed page.
 #:
 #: Resolution is raised through the *export* DPI, never by enlarging the figure.
 #: Font sizes, line widths and marker sizes are all specified in points, so a
@@ -79,25 +79,67 @@ EXPORT_WIDTH_PX = 3840
 #: Vector companion. A raster figure has a resolution; a vector one does not, so
 #: for anything that will be printed this is the better artefact regardless of
 #: how many pixels the PNG has. Written alongside rather than instead, because
-#: Word handles PNG more predictably than PDF for inline placement.
-EXPORT_VECTOR = True
+#: Word handles PNG more predictably than a vector file for inline placement.
+#:
+#: SVG rather than PDF, at the user's request: both are vector and both are
+#: lossless, but SVG opens in a browser and in every vector editor without a
+#: conversion step. Nothing here depends on the format beyond the extension, so
+#: this is the only line that decides it.
+EXPORT_VECTOR_EXT = ".svg"
 
 
-def _engine_suffix(*runs) -> str:
-    """A filename suffix distinguishing which engine a figure came from.
+def _slug(value: object) -> str:
+    """Filename-safe form of one provenance component."""
+    # ``_`` is kept, not replaced: run ids contain it (``..Z_bench_cluster``)
+    # and rewriting it would make the filename disagree with the run directory
+    # it names, which is the one thing this slug exists to state.
+    text = str(value or "unknown")
+    return "".join(c if c.isalnum() or c in "-._" else "-" for c in text).strip("-") or "unknown"
 
-    Blank for CockroachDB, so filenames written before Postgres runs existed --
-    and any caption already citing them -- keep meaning the same figure. Blank
-    also whenever the runs disagree on engine (an all-engines comparison
-    figure) or there are no runs to ask, rather than guessing which one wins;
-    a filename that silently picked one engine's tag for a mixed figure would
-    misattribute it.
+
+def _manifest_field(run, *path: str, default: str = "unknown") -> str:
+    """One nested manifest value, for either a :class:`Run` or a :class:`NetworkRun`.
+
+    Read from the manifest rather than from a property because the two run types
+    do not share one: ``Run`` exposes ``.engine`` and ``.profile``, ``NetworkRun``
+    exposes neither, and both carry the manifest itself.
     """
-    engines = {getattr(r, "engine", "cockroachdb") for r in runs if r is not None}
-    if len(engines) != 1:
-        return ""
-    (engine,) = engines
-    return "" if engine == "cockroachdb" else f"_{engine}"
+    node = getattr(run, "manifest", None) or {}
+    for key in path:
+        if not isinstance(node, dict):
+            return default
+        node = node.get(key)
+    return str(node) if node else default
+
+
+def _provenance_slug(*runs, engine: bool = True) -> str:
+    """The filename tail naming the engine, profile and run(s) behind a figure.
+
+    Every figure is drawn from a specific run of a specific profile on a
+    specific engine, and until this existed the filename said none of it: a
+    ``smoke`` render and a thesis-scale render produced the same
+    ``fig2_throughput_sweep.png`` in the same directory, and the second silently
+    replaced the first. The footer stamped inside the image already carried the
+    run id, but a file cannot be told apart from its neighbour by a caption
+    printed inside it -- which is exactly how a figure from a pre-redeploy
+    cluster once sat unnoticed beside five from the current one.
+
+    ``engine=False`` for Phase I, whose manifest has no engine to report: the
+    network substrate is measured before and independently of whichever database
+    is deployed on it, so tagging it ``cockroachdb`` would assert a dependency
+    that does not exist. Where several runs disagree on engine or profile the
+    component becomes ``mixed``, rather than picking one and misattributing the
+    figure to it; the run ids that follow always name all of them.
+    """
+    present = [r for r in runs if r is not None]
+    parts: list[str] = []
+    if engine:
+        engines = {_manifest_field(r, "engine", default="cockroachdb") for r in present}
+        parts.append(engines.pop() if len(engines) == 1 else "mixed-engine")
+    profiles = {_manifest_field(r, "profile", "name") for r in present}
+    parts.append(profiles.pop() if len(profiles) == 1 else "mixed-profile")
+    parts.extend(getattr(r, "run_id", "unknown") for r in present)
+    return "".join(f"_{_slug(part)}" for part in parts)
 
 
 def _style() -> None:
@@ -168,10 +210,14 @@ def _finish(fig, ax_or_axes, provenance: Sequence[str], path: Path) -> Path:
     dpi = EXPORT_WIDTH_PX / bbox.width
 
     fig.savefig(path, bbox_inches="tight", dpi=dpi)
-    if EXPORT_VECTOR:
-        fig.savefig(path.with_suffix(".pdf"), bbox_inches="tight")
+    fig.savefig(path.with_suffix(EXPORT_VECTOR_EXT), bbox_inches="tight")
     plt.close(fig)
     return path
+
+
+def _written_formats(png: Path) -> list[Path]:
+    """Every file :func:`_finish` wrote for one figure, for the caller to report."""
+    return [png, png.with_suffix(EXPORT_VECTOR_EXT)]
 
 
 # --- Phase I ---------------------------------------------------------------
@@ -226,7 +272,8 @@ def network_matrix(run: NetworkRun, out_dir: Path) -> Path:
     if floor is not None:
         title += f"\nquorum floor {floor:.1f} ms: no committed write can be faster"
     ax.set_title(title, loc="left")
-    return _finish(fig, ax, [run.run_id], out_dir / "fig1_network_matrix.png")
+    slug = _provenance_slug(run, engine=False)
+    return _finish(fig, ax, [run.run_id], out_dir / f"fig1_network_matrix{slug}.png")
 
 
 # --- Phase II ---------------------------------------------------------------
@@ -278,9 +325,9 @@ def throughput_sweep(runs: Sequence[Run], out_dir: Path) -> Path:
             transform=ax.transAxes, ha="right", va="bottom",
             fontsize=7, color=INK_MUTED,
         )
-    suffix = _engine_suffix(*runs)
+    slug = _provenance_slug(*runs)
     return _finish(
-        fig, ax, [r.run_id for r in runs], out_dir / f"fig2_throughput_sweep{suffix}.png"
+        fig, ax, [r.run_id for r in runs], out_dir / f"fig2_throughput_sweep{slug}.png"
     )
 
 
@@ -324,44 +371,40 @@ def latency_by_operation(run: Run, out_dir: Path) -> Path:
         x=0.02, ha="left", color=INK, fontsize=10, fontweight="bold",
     )
     fig.tight_layout()
-    suffix = _engine_suffix(run)
+    slug = _provenance_slug(run)
     return _finish(
-        fig, axes, [run.run_id], out_dir / f"fig3_latency_by_operation{suffix}.png"
+        fig, axes, [run.run_id], out_dir / f"fig3_latency_by_operation{slug}.png"
     )
 
 
-#: Output filename per fault class. Phases III-IV each run one fault and
+#: Output filename stem per fault class. Phases III-IV each run one fault and
 #: the two timelines are different figures, so the name is keyed on the class
 #: rather than fixed: rendering a second run through a single hard-coded
 #: ``fig5`` filename silently overwrote the first, which is why
 #: ``fig6_resilience_timeline_recover.png`` existed in ``figures/`` with no path
-#: through this module that could produce it. The names are constants, not
-#: derived from the run id, so a caption citing fig5 or fig6 keeps meaning the
-#: same figure across a re-render.
+#: through this module that could produce it. The figure *numbers* are constants
+#: and not derived from the run, so a caption citing fig5 or fig6 keeps meaning
+#: the same figure across a re-render; what varies after the number is the
+#: provenance, which is the point of :func:`_provenance_slug`.
 _RESILIENCE_FIGURES = {
-    "dead": "fig5_resilience_timeline.png",
-    "recover": "fig6_resilience_timeline_recover.png",
+    "dead": "fig5_resilience_timeline",
+    "recover": "fig6_resilience_timeline_recover",
 }
 
 
-def _resilience_filename(mode: str | None, engine_suffix: str = "") -> str:
-    """Filename for one fault class and engine, distinct for any class not yet named.
+def _resilience_filename(mode: str | None, provenance_slug: str = "") -> str:
+    """Filename for one fault class, distinct for any class not yet named.
 
-    ``engine_suffix`` from :func:`_engine_suffix` is inserted before the
-    extension rather than appended after it, so ``fig6_..._recover.png``
-    becomes ``fig6_..._recover_postgresql.png`` and stays sorted next to its
-    CockroachDB sibling rather than falling under an unrelated ``_postgresql``
-    prefix that would also collide with fig2/fig3's own suffix placement.
+    ``provenance_slug`` from :func:`_provenance_slug` is inserted before the
+    extension rather than after it, so the recover timeline stays sorted next to
+    its own siblings under ``fig6_...`` rather than falling under a shared
+    engine or profile prefix.
     """
     if mode in _RESILIENCE_FIGURES:
-        name = _RESILIENCE_FIGURES[mode]
+        stem = _RESILIENCE_FIGURES[mode]
     else:
-        slug = "".join(c if c.isalnum() else "_" for c in str(mode or "unknown"))
-        name = f"fig5_resilience_timeline_{slug}.png"
-    if not engine_suffix:
-        return name
-    stem, _, ext = name.rpartition(".")
-    return f"{stem}{engine_suffix}.{ext}"
+        stem = f"fig5_resilience_timeline_{_slug(mode).replace('-', '_')}"
+    return f"{stem}{provenance_slug}.png"
 
 
 # --- Phases III-IV ----------------------------------------------------------
@@ -445,7 +488,7 @@ def resilience_timeline(run: Run, out_dir: Path) -> Path:
         loc="left",
     )
     ax.legend(labelcolor=INK_SECONDARY, loc="lower right", fontsize=7.5)
-    filename = _resilience_filename(mode, _engine_suffix(run))
+    filename = _resilience_filename(mode, _provenance_slug(run))
     return _finish(fig, ax, [run.run_id], out_dir / filename)
 
 
@@ -464,12 +507,12 @@ def render_all(
     """
     written: list[Path] = []
     if network is not None:
-        written.append(network_matrix(network, out_dir))
+        written += _written_formats(network_matrix(network, out_dir))
     if cluster is not None:
-        written.append(throughput_sweep([cluster], out_dir))
-        written.append(latency_by_operation(cluster, out_dir))
+        written += _written_formats(throughput_sweep([cluster], out_dir))
+        written += _written_formats(latency_by_operation(cluster, out_dir))
     if chaos is not None:
         runs = [chaos] if isinstance(chaos, Run) else list(chaos)
         for run in runs:
-            written.append(resilience_timeline(run, out_dir))
+            written += _written_formats(resilience_timeline(run, out_dir))
     return written

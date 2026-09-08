@@ -583,9 +583,16 @@ than omitting it.
 .venv/bin/crdblab report figures                    # newest run of each phase
 ```
 
-`report figures` writes up to five PNGs (network matrix, throughput sweep,
-latency by operation, and one resilience timeline per fault class) at ≥4K
-with a vector PDF beside each, into `figures/`. The throughput-sweep and
+`report figures` writes up to five figures (network matrix, throughput sweep,
+latency by operation, and one resilience timeline per fault class) into
+`figures/`, each as a PNG at ≥4K and an SVG beside it. Filenames carry their
+own provenance —
+`fig2_throughput_sweep_cockroachdb_thesis_20260908T053558Z_bench_cluster.png` —
+so a smoke render, a thesis render and a PostgreSQL render coexist in one
+directory instead of overwriting each other. Phase I's matrix is tagged with
+the profile and run only: the network substrate is measured independently of
+whichever engine is deployed on it, and naming one there would assert a
+dependency that does not exist. The throughput-sweep and
 latency-by-operation figures are drawn from whichever single benchmark run is
 picked — CockroachDB or PostgreSQL, whichever the `--cluster` run id names or
 was most recently benchmarked — not from both engines at once; there is no

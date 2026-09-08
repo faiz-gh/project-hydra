@@ -346,25 +346,39 @@ testbed, not something touched by most code changes to `crdblab/`.
   the run reports that the fault was never injected instead of hanging.
   `events.json` carries both `at_offset_s` (from the epoch, unchanged) and
   the new `at_steady_state_offset_s`.
-- **`Manifest.engine` and figure filenames are engine-aware.** Nothing
-  recorded which engine produced a run before this -- `manifest.cockroach_version`
-  being null and a note reading "engine: postgresql (patroni HA)" were the only
-  signals, and `report figures` used neither, so a PostgreSQL run's
-  `fig2_throughput_sweep.png` would silently overwrite a CockroachDB run's
-  figure of the same name. `Manifest` now carries an explicit `engine` field
-  (set by `bench.py`/`p4_chaos.py` at construction; defaults to
-  `"cockroachdb"` for every run written before the field existed, since that's
-  what all of them were), exposed as `Run.engine` in the loader.
-  `figures.py`'s `_engine_suffix()` reads it and appends `_postgresql` to
-  fig2/fig3/fig5/fig6's filenames -- blank for `cockroachdb`, so every
-  filename and caption written before Postgres runs existed keeps meaning the
-  same figure. `fig1_network_matrix` is deliberately never suffixed: Phase I
-  measures the network substrate, which doesn't change between engine runs on
-  the same infrastructure. `--cluster` and `--network` still accept one run id
-  each, so comparing both engines means invoking `report figures` twice (once
-  per engine's cluster/chaos run ids) into the same `--out` directory; the
-  suffix is what keeps that safe instead of `--cluster`/`--chaos` needing to
-  become multi-valued.
+- **`Manifest.engine` exists, and every figure filename carries engine,
+  profile and run id.** Nothing recorded which engine produced a run before
+  this -- `manifest.cockroach_version` being null and a note reading
+  "engine: postgresql (patroni HA)" were the only signals, and `report figures`
+  used neither, so a PostgreSQL run's `fig2_throughput_sweep.png` would
+  silently overwrite a CockroachDB run's figure of the same name. `Manifest`
+  now carries an explicit `engine` field (set by `bench.py`/`p4_chaos.py` at
+  construction; defaults to `"cockroachdb"` for every run written before the
+  field existed, since that's what all of them were), exposed as `Run.engine`
+  in the loader. An earlier fix put only a `_postgresql` suffix in the
+  filename, blank for CockroachDB; that closed the cross-engine collision but
+  not the two others of the same shape -- a `smoke` render and a thesis-scale
+  render of the same engine still produced identical names, as did two runs of
+  the same profile. **`figures.py::_provenance_slug()` replaced it** and always
+  names all three, e.g.
+  `fig2_throughput_sweep_cockroachdb_thesis_20260908T053558Z_bench_cluster.png`;
+  `cockroachdb` is no longer the blank case, so an old caption citing a bare
+  `fig2_throughput_sweep.png` no longer matches a file the current code writes.
+  Where several runs disagree the component is `mixed-engine`/`mixed-profile`
+  rather than a guess, and the run ids that follow name all of them. It reads
+  the manifest rather than `Run.engine`/`Run.profile` because `NetworkRun`
+  exposes neither. `fig1_network_matrix` is deliberately given profile and run
+  but **no engine**: Phase I measures the network substrate, which doesn't
+  change between engine runs on the same infrastructure. `--cluster` and
+  `--network` still accept one run id each, so comparing both engines means
+  invoking `report figures` twice into the same `--out` directory; the slug is
+  what keeps that safe instead of `--cluster`/`--chaos` needing to become
+  multi-valued.
+- **Figures are written as PNG + SVG. There is no PDF any more**
+  (`EXPORT_VECTOR_EXT`, at the user's request -- SVG opens in a browser and in
+  every vector editor without a conversion step). Both files come out of one
+  `_finish()` call; `_written_formats()` is what makes `report figures` report
+  both rather than listing only the raster half.
 - **`resilience.write_latency_recovery()` is a second, independent recovery
   axis from `performance()`, on the write operation's own p50 latency rather
   than aggregate TPS.** Added because this workload is 80% reads served
