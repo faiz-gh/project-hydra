@@ -367,9 +367,14 @@ testbed, not something touched by most code changes to `crdblab/`.
   Where several runs disagree the component is `mixed-engine`/`mixed-profile`
   rather than a guess, and the run ids that follow name all of them. It reads
   the manifest rather than `Run.engine`/`Run.profile` because `NetworkRun`
-  exposes neither. `fig1_network_matrix` is deliberately given profile and run
-  but **no engine**: Phase I measures the network substrate, which doesn't
-  change between engine runs on the same infrastructure. `--cluster` and
+  exposes neither. `fig1_network_matrix` is named the same way as the rest, and
+  `p1_network.run` now takes `engine=` (wired from the top-level `--engine` in
+  `_cmd_net_probe`) so that the name is reporting something recorded rather than
+  a field default. Ping does not care which database is listening, but a
+  redeploy to the other engine replaces every cluster node, so a Phase I run
+  belongs to exactly one deployment the same way a benchmark does. Phase I runs
+  recorded before this have no `engine` key and read back as `cockroachdb`,
+  which is what all of them were. `--cluster` and
   `--network` still accept one run id each, so comparing both engines means
   invoking `report figures` twice into the same `--out` directory; the slug is
   what keeps that safe instead of `--cluster`/`--chaos` needing to become

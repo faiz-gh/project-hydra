@@ -112,7 +112,7 @@ def _manifest_field(run, *path: str, default: str = "unknown") -> str:
     return str(node) if node else default
 
 
-def _provenance_slug(*runs, engine: bool = True) -> str:
+def _provenance_slug(*runs) -> str:
     """The filename tail naming the engine, profile and run(s) behind a figure.
 
     Every figure is drawn from a specific run of a specific profile on a
@@ -124,18 +124,20 @@ def _provenance_slug(*runs, engine: bool = True) -> str:
     printed inside it -- which is exactly how a figure from a pre-redeploy
     cluster once sat unnoticed beside five from the current one.
 
-    ``engine=False`` for Phase I, whose manifest has no engine to report: the
-    network substrate is measured before and independently of whichever database
-    is deployed on it, so tagging it ``cockroachdb`` would assert a dependency
-    that does not exist. Where several runs disagree on engine or profile the
-    component becomes ``mixed``, rather than picking one and misattributing the
-    figure to it; the run ids that follow always name all of them.
+    Every figure is named this way, Phase I included. The engine does not change
+    what ping measures, but it does say which deployment the substrate belongs
+    to: switching engines replaces every cluster node, so a network matrix from
+    the CockroachDB deployment and one from the PostgreSQL deployment are two
+    different measurements of two different sets of machines. ``p1_network.run``
+    records the engine for that reason rather than the figure inferring one.
+
+    Where several runs disagree on engine or profile the component becomes
+    ``mixed``, rather than picking one and misattributing the figure to it; the
+    run ids that follow always name all of them.
     """
     present = [r for r in runs if r is not None]
-    parts: list[str] = []
-    if engine:
-        engines = {_manifest_field(r, "engine", default="cockroachdb") for r in present}
-        parts.append(engines.pop() if len(engines) == 1 else "mixed-engine")
+    engines = {_manifest_field(r, "engine", default="cockroachdb") for r in present}
+    parts: list[str] = [engines.pop() if len(engines) == 1 else "mixed-engine"]
     profiles = {_manifest_field(r, "profile", "name") for r in present}
     parts.append(profiles.pop() if len(profiles) == 1 else "mixed-profile")
     parts.extend(getattr(r, "run_id", "unknown") for r in present)
@@ -272,7 +274,7 @@ def network_matrix(run: NetworkRun, out_dir: Path) -> Path:
     if floor is not None:
         title += f"\nquorum floor {floor:.1f} ms: no committed write can be faster"
     ax.set_title(title, loc="left")
-    slug = _provenance_slug(run, engine=False)
+    slug = _provenance_slug(run)
     return _finish(fig, ax, [run.run_id], out_dir / f"fig1_network_matrix{slug}.png")
 
 

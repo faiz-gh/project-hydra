@@ -133,7 +133,7 @@ def _cmd_net_probe(args: argparse.Namespace) -> int:
 
     settings = Settings.from_env()
     profile = Profile.load(args.profile)
-    run_dir, probes = p1_network.run(settings, profile)
+    run_dir, probes = p1_network.run(settings, profile, engine=args.engine)
 
     print(f"run: {run_dir.path}")
     failed = [p for p in probes if p.error]

@@ -589,10 +589,10 @@ latency by operation, and one resilience timeline per fault class) into
 own provenance —
 `fig2_throughput_sweep_cockroachdb_thesis_20260908T053558Z_bench_cluster.png` —
 so a smoke render, a thesis render and a PostgreSQL render coexist in one
-directory instead of overwriting each other. Phase I's matrix is tagged with
-the profile and run only: the network substrate is measured independently of
-whichever engine is deployed on it, and naming one there would assert a
-dependency that does not exist. The throughput-sweep and
+directory instead of overwriting each other. Phase I's matrix is named the same
+way: ping does not care which database is listening, but switching engines
+replaces every cluster node, so the matrix still belongs to one deployment —
+`net probe` records `--engine` in its manifest for that reason. The throughput-sweep and
 latency-by-operation figures are drawn from whichever single benchmark run is
 picked — CockroachDB or PostgreSQL, whichever the `--cluster` run id names or
 was most recently benchmarked — not from both engines at once; there is no

@@ -72,14 +72,21 @@ def test_runs_that_disagree_get_mixed_rather_than_a_guess():
     assert "20260908T053558Z_bench_cluster" in slug
 
 
-def test_phase_one_omits_the_engine_it_does_not_have():
-    """Phase I measures the network substrate, which is the same regardless of
-    which database is deployed on it, and its manifest records no engine."""
+def test_phase_one_is_named_like_every_other_figure():
+    """The network substrate does not depend on the engine, but the deployment
+    it was measured on does: switching engines replaces every cluster node, so
+    a matrix from the CockroachDB deployment and one from the PostgreSQL
+    deployment are measurements of two different sets of machines.
+    `p1_network.run` records the engine so the name can say which."""
     net = SimpleNamespace(
-        manifest={"run_id": "20260908T053439Z_p1-network", "profile": {"name": "thesis"}},
+        manifest={
+            "run_id": "20260908T053439Z_p1-network",
+            "engine": "postgresql",
+            "profile": {"name": "thesis"},
+        },
         run_id="20260908T053439Z_p1-network",
     )
-    assert _provenance_slug(net, engine=False) == "_thesis_20260908T053439Z_p1-network"
+    assert _provenance_slug(net) == "_postgresql_thesis_20260908T053439Z_p1-network"
 
 
 def test_a_run_with_no_recorded_engine_defaults_to_cockroachdb():

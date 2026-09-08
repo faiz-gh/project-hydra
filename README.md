@@ -81,7 +81,9 @@ alongside the session log it was distilled from.
    is written twice, as a PNG exported at >= 4K width and as an SVG beside it,
    and its filename carries the engine, the profile and the run id it was drawn
    from -- a footer inside the image cannot distinguish two files sitting in the
-   same directory.
+   same directory. Phase I's matrix included: ping does not care which engine is
+   deployed, but a redeploy to the other engine replaces every cluster node, so
+   the matrix belongs to one deployment either way.
 
 All steps are implemented.
 

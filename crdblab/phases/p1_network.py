@@ -217,8 +217,19 @@ def run(
     settings: Settings,
     profile: Profile,
     topology: Topology | None = None,
+    engine: str = "cockroachdb",
 ) -> tuple[RunDirectory, list[NodeProbe]]:
-    """Execute Phase I and record it as an immutable run directory."""
+    """Execute Phase I and record it as an immutable run directory.
+
+    ``engine`` does not change the measurement -- ping does not care what is
+    listening on 26257 -- but it does say which deployment the substrate was
+    measured against, and that is not inferable afterwards. Switching engines is
+    a ``terraform apply -var="database_engine=..."`` that replaces every cluster
+    node, so a Phase I run belongs to one deployment as surely as a benchmark
+    does; without this the manifest silently reported whatever the field
+    defaults to, and a figure named from it would have asserted an engine nobody
+    recorded.
+    """
     topo = topology or settings.topology
     nodes = list(topo)
 
@@ -226,6 +237,7 @@ def run(
     manifest = Manifest(
         run_id=run_dir.path.name,
         phase="p1_network",
+        engine=engine,
         profile=profile.to_dict(),
         topology=[
             {
