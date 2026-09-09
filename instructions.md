@@ -26,7 +26,7 @@ analysis and renders the figures. It stops at the first failure rather than
 continuing with a testbed that is not fit to be measured.
 
 ```bash
-./run-experiment.sh --smoke        # ~8 min end-to-end harness self-test
+./run-experiment.sh --smoke        # ~14 min end-to-end harness self-test
 ./run-experiment.sh --skip-load    # working set already loaded
 ./run-experiment.sh --no-chaos     # network substrate and benchmark only
 ./run-experiment.sh --engine postgresql   # the deployed engine is PostgreSQL/Patroni
@@ -50,8 +50,11 @@ replaced by a poll of every member's Patroni REST API on `:8008/health` plus an
 assertion that exactly one member answers `:8008/primary`; the row count is
 taken with `psql` rather than `cockroach sql --url`; and the post-`dead`
 restore sweeps every member with `sudo -n systemctl start patroni` instead of
-restarting `chaos.target`, because Patroni's leader is not pinned and the node
-that was actually killed is resolved at fault time (§6, "Chaos").
+restarting `chaos.target`, because the node that was actually killed is
+resolved at fault time and recorded only in `events.json` (§6, "Chaos"). The
+script then restores the primary to the gateway by `patronictl switchover`,
+which CockroachDB does not need because `lease_preferences` fails back on its
+own and Patroni never does.
 
 The rest of this document explains what each step does and how to run them by
 hand, which is what you want when something fails or when you are changing the
@@ -186,9 +189,58 @@ the gateway's region heads the list, and `crdblab net probe` asserts the placeme
 that actually resulted, so a forgotten re-order aborts the sweep rather than
 reaching a figure.
 
-`terraform/scripts/bootstrap.tftpl` still writes the old order and is outside this
-repository's change scope (it is applied manually). Until that line is re-ordered
-there, **every fresh `terraform apply` needs the statement above re-applied.**
+This no longer needs re-applying by hand.
+`terraform/scripts/bootstrap-cockroachdb.tftpl` (renamed from the former
+`bootstrap.tftpl` when the PostgreSQL path was added) now writes
+`us-east1` first itself, and then asserts the zone configuration actually took,
+failing provisioning rather than reporting success with leaseholders placed
+arbitrarily. The statement above is kept as the manual repair for a cluster
+whose configuration has since been changed.
+
+### Verify a PostgreSQL deployment before loading anything
+
+Do these four checks on `crdb-gcp-1` the moment `terraform apply` finishes. Each
+one has failed silently at least once in this project's history, and each is
+much cheaper to catch now than after a 70–110 minute load.
+
+```bash
+# 1. Exactly one primary, and it is the gateway.
+for h in crdb-gcp-1 crdb-linode-1 crdb-linode-2 crdb-azure-1 crdb-azure-2; do
+  printf '%-16s %s\n' "$h" "$(curl -s -o /dev/null -w '%{http_code}' http://$h:8008/primary)"
+done            # expect 200 on gcp-1 only, 503 elsewhere
+
+# 2. Raft-equivalent synchronous replication is actually in force.
+sudo -u postgres psql -c "SHOW synchronous_standby_names"   # expect: ANY 2 (...)
+patronictl -c /etc/patroni/config.yml show-config | grep -A2 synchronous
+                # expect synchronous_mode: quorum, synchronous_node_count: 2,
+                #        synchronous_mode_strict: true
+
+# 3. The cache budgets match CockroachDB's --cache=0.25.
+sudo -u postgres psql -c "SHOW shared_buffers"    # expect ~978MB, NOT 128MB
+
+# 4. All five members healthy (503 just means still bootstrapping — wait).
+patronictl -c /etc/patroni/config.yml list
+
+# 5. A demoted primary will be able to rejoin after Phase III.
+patronictl -c /etc/patroni/config.yml show-config | grep -E 'wal_keep_size|diverged'
+                # expect wal_keep_size: 4GB and
+                #        remove_data_directory_on_diverged_timelines: true
+```
+
+A 503 on `/health` is **not** a fault on a fresh deployment: it is what a member
+returns while it is still taking its `pg_basebackup`. `run-experiment.sh` waits
+up to 600 s for all five rather than aborting, so give it the same courtesy here.
+
+If a **Linode** node has no Patroni process at all, check
+`/var/log/cloud-init-output.log` on it before suspecting the script. Linode caps
+`user_data` at 16384 bytes decoded and the template renders to ~26 kB, so it is
+sent gzipped (`base64gzip`, ~9.9 kB, 60% of the budget); empty or binary output
+in that log means
+cloud-init did not decompress it, and the fallback is to trim the template.
+
+None of this is optional paranoia — `synchronous_mode` defaulted to `false`
+until 2026-09-09, which meant failover could promote a standby that was never
+in the synchronous set, and no artefact would have recorded it.
 
 ---
 
@@ -202,20 +254,49 @@ The bootstrap creates the `ycsb` database but no tables. Load the cluster,
 from the client node:
 
 ```bash
-# CockroachDB
+# CockroachDB -- bulk init, straight at the gateway.
 ssh ubuntu@crdb-client-1 "cockroach workload init ycsb --drop \
-  --seed=42 --insert-count=125000 \
+  --seed=42 --insert-count=3750000 \
   'postgresql://root@crdb-gcp-1:26257/ycsb?sslmode=disable'"
-
-# PostgreSQL/Patroni, through the client node's local HAProxy
-ssh ubuntu@crdb-client-1 "cockroach workload init ycsb --drop \
-  --seed=42 --insert-count=125000 \
-  'postgresql://root@127.0.0.1:5000/ycsb?sslmode=disable'"
 ```
 
-Load whichever engine (or both) you intend to sweep with; each engine's
-working set is independent, so a CockroachDB run and a PostgreSQL run can
-coexist without reloading between them.
+**PostgreSQL cannot be loaded this way at all.** `cockroach workload init`
+issues `CREATE DATABASE IF NOT EXISTS` as its first statement, which PostgreSQL
+rejects with `syntax error at or near "NOT"`, and nothing suppresses it
+(`--data-loader NONE` issues it too). `--drop` is separately unusable, and
+`--families` defaults to CockroachDB-only DDL. The PostgreSQL working set is
+therefore created with `psql` and loaded by running the **generator itself**
+insert-only, which is what `run-experiment.sh` does:
+
+```bash
+# PostgreSQL/Patroni: create the table, then let the generator write the rows.
+ssh ubuntu@crdb-client-1 "psql 'postgresql://root:rootpassword@127.0.0.1:5000/ycsb' \
+  -v ON_ERROR_STOP=1 -c '<usertable DDL -- see run-experiment.sh>'"
+
+ssh ubuntu@crdb-client-1 "cockroach workload run ycsb --workload=CUSTOM \
+  --insert-freq=1 --read-freq=0 --update-freq=0 \
+  --request-distribution=uniform \
+  --seed=42 --insert-count=0 --insert-start=0 \
+  --concurrency=64 --max-ops=3750000 --duration=0 \
+  --display-every=30s 'postgresql://root:rootpassword@127.0.0.1:6432/ycsb?sslmode=disable'"
+```
+
+Letting the generator write its own keys is the load-bearing part: YCSB keys
+are derived by the generator from the row index
+(`user10092439283625390464`), so a hand-written loader would have to
+reimplement that derivation, and a keyspace that differs from the one the sweep
+addresses is D8 exactly. `--max-ops` overshoots by up to `--concurrency` rows
+because operations in flight still complete; those rows have indices at or above
+`--insert-count`, so the sweep never addresses them.
+
+Note the two DSNs are different on purpose: the DDL goes through HAProxy
+(`:5000`) but the generator must go through **pgbouncer** (`:6432`), which
+strips the `allow_unsafe_internals` startup parameter PostgreSQL would
+otherwise reject at connect.
+
+Only one engine is ever deployed at a time — switching is a `terraform apply
+-var="database_engine=..."` that replaces every cluster node — so load whichever
+engine is currently on the testbed. The two arms cannot coexist.
 
 > **`--seed` and `--insert-count` must equal the values in the profile you are
 > about to sweep with.** This is the single most dangerous parameter in the
@@ -235,7 +316,27 @@ but getting it right here is much cheaper than discovering it after a tier.
 The database must be named literally `ycsb`; `workload init` rejects a URI
 naming anything else.
 
-Each load writes 125,000 rows ≈ 179 MiB and takes about a minute.
+Each load writes 3,750,000 rows ≈ 6.15 GB — about **1.5x the nodes' 4 GB of
+RAM**, deliberately, so that the sweep measures the storage engines rather than
+page-cache residency. Budget accordingly:
+
+| | CockroachDB | PostgreSQL |
+|---|---|---|
+| load mechanism | `workload init` (bulk) | generator, insert-only @ C=64 |
+| load time | minutes | **70-110 min** (~900 rows/s, falling as the index outgrows cache) |
+| on-disk per node | ~9.2-12.3 GB (replica + LSM compaction) | ~8.2 GB (table + index + WAL) |
+
+The PostgreSQL load is latency-bound rather than CPU-bound — 64 concurrent
+against a ~70 ms synchronous-replication commit — so raising `LOAD_CONCURRENCY`
+in `run-experiment.sh` scales it close to linearly (192 puts it near ~23 min,
+and `max_connections` is 500). That path has broken three times historically,
+so change it deliberately rather than as a matter of course.
+
+Every cluster node needs the disk for a full copy. The GCP `boot_disk` and
+Azure `os_disk` set 50 GB explicitly; Linode's `g6-dedicated-2` ships 80 GB.
+Do not drop those back to the image default (10 GB on GCP) — the load will fill
+it, and on both clouds IOPS is sold by capacity, so an undersized volume also
+turns the measurement into a report on a storage tier.
 
 ---
 
@@ -269,8 +370,11 @@ CRDBLAB_RUNS_DIR=runs
 > the write-latency floor check were CockroachDB-only until 2026-09-08; they now
 > run for PostgreSQL too — `pg_stat_user_tables`'s scan and fetched-row counters
 > differenced across each tier, and the same Phase I quorum floor, which applies
-> because Patroni's `synchronous_standby_names: ANY 2 (*)` waits for two standby
-> acks just as a 3-of-5 Raft quorum does. A seed/insert-count mismatch is
+> because Patroni waits for two standby acks just as a 3-of-5 Raft quorum does.
+> Patroni runs in `synchronous_mode: quorum` with `synchronous_node_count: 2`
+> and derives `synchronous_standby_names: ANY 2 (...)` itself — do not set that
+> parameter by hand, and use `quorum` rather than `true`, which would name
+> specific standbys and could put the commit path on the 211-215 ms Azure pair. A seed/insert-count mismatch is
 > therefore caught on both arms of the comparison rather than only one.
 
 > **PostgreSQL needs a password everywhere; CockroachDB needs none.** The
@@ -436,20 +540,48 @@ Phase III is the `recover` fault, Phase IV is `dead`:
 ```
 
 `recover` severs the overlay network of the fault target for 45 s and restores
-it; `dead` kills the process outright. The target is the **primary** — the
+it; `dead` kills the process outright.
+
+**A `recover` run is therefore longer than its profile's `duration_s`, and has
+to be.** `min_post_fault_s` is counted from `inject_at_s + 45 s` rather than
+from the fault, and `p4_chaos.generator_duration_s` extends the run accordingly
+— the extension is recorded as a manifest note, so the run states its own
+length. Before 2026-09-09 it was counted from the fault, which left the `smoke`
+profile unable to measure anything: a 45 s run with the fault at 15 s had both
+instruments still inside the outage when observation ended, and both correctly
+reported the RTO as UNMEASURED rather than as zero. The next run, at the
+corrected length, measured that outage at **37.6 s** after the fault.
+
+Note what the bound is *not*. **Recovery does not wait for the partition to
+lift.** The fault isolates one node; the other four keep quorum and elect a new
+primary, so writes resume at failover — measured at 64.1 s on
+`20260909T040914Z_p4-chaos-recover`, 7.4 s *before* that run's partition healed
+at 71.5 s. The heal delay is used because it is a conservative upper bound on
+that failover, and because Phase IV needs the demoted node back on the network
+in time to finish rewinding and become a switchover candidate. So a `recover`
+RTO is a measurement of Patroni's failover, not of how long the network was
+down — do not describe it as the latter. The target is the **primary** — the
 node genuinely coordinating writes, not a peripheral member — because failing
 a node outside the write path would be a far weaker test.
 
 For CockroachDB, `profiles/*.yaml` name the target explicitly
 (`chaos.target: gcp-1`, the node `lease_preferences` pins the leaseholder to;
 `preflight.check_leaseholder_placement` asserts that placement before the
-fault fires). For PostgreSQL/Patroni, that static name cannot be trusted —
-nothing pins which node wins Patroni's leader election — so
+fault fires). For PostgreSQL/Patroni the target is the same node, by design —
+where the write path is led from is a property of the deployment rather than of
+the engine, so letting the two arms differ would put cloud geography into the
+comparison. `bootstrap-patroni.tftpl` pins the primary onto `gcp-1` at
+bootstrap and `preflight.check_patroni_primary_placement` restores it by
+`patronictl switchover` before each measured phase, because Patroni never fails
+back on its own the way `lease_preferences` does.
+
+It is still never *assumed*.
 `crdblab/phases/p4_chaos.py::resolve_patroni_primary` queries every node's
 Patroni REST API (`:8008/primary`) immediately before scheduling the fault
 and targets whichever one actually answers as primary, overriding
-`chaos.target` if it names a different node. The manifest and `events.json`
-record whichever node was actually faulted.
+`chaos.target` if it names a different node. The pin is what makes the answer
+predictable; the live read is what makes it true. The manifest and
+`events.json` record whichever node was actually faulted.
 
 Each chaos run now also carries a **high-frequency RTO probe**. It is a third
 client, independent of both the generator and the RPO audit writer: its own
@@ -466,8 +598,23 @@ It leaves two files in the run directory:
 | `rto_probe.csv` | One row per canary write: dispatch and completion offsets, duration, and the outcome (`ok`, `timeout`, `conn_error`, `refused`). Written under its own declared schema and checked by `crdblab validate`. |
 | `rto_probe.log` | JSON per line, flushed as it happens: every failure, every connection opened or lost, every successful reconnect, with microsecond timestamps. It survives a run that is killed mid-fault, which the CSV does not. |
 
-Three things to know before quoting a number from it.
+Four things to know before quoting a number from it.
 
+- **Check `coverage_truncated` FIRST, before reading any other key.** The probe
+  answers "was there an outage" by looking for a gap in its own stream of writes,
+  so a probe that stops writing produces no gap and reports a clean run. On
+  2026-09-09 a `recover` fault black-holed the connections its workers already
+  held; a server-side `statement_timeout` cannot arrive when packets cannot, so
+  the workers blocked in `recv()` and neither completed nor failed. The recorded
+  artefact was 515 attempts, **515 `ok`, zero timeouts and zero conn_errors**,
+  spanning 20.3 s of a 45 s run and ending 3.6 s after the fault — and the run
+  reported "no interruption in served writes was detectable" for an outage of
+  roughly 70 seconds. The probe now records how much of the run it watched and
+  returns `rto_s: None` with an UNMEASURED claim where its coverage ends early,
+  and `crdblab analyze resilience` prints an
+  `*** AN INSTRUMENT STOPPED OBSERVING ***` banner. The signature to recognise by
+  eye, in `events.json` → `probe`: every attempt `ok`, no failures of any kind,
+  and `span_s` well short of the run's length.
 - **Read `observed_outage_s`, not just `rto_s`.** The probe writes from your
   workstation, 376 ms round trip from the gateway, so every timestamp it takes
   carries about 188 ms of link. That offset is identical on both edges of an
@@ -546,9 +693,16 @@ measurement.
 > `--cache=0.25 --max-sql-memory=0.25` are **not optional here**. Every node in
 > the comparison must be started with identical memory flags. Omitting them
 > takes CockroachDB's 128 MiB default — a roughly fifteen-fold smaller block
-> cache against a 205 MB working set — and the resulting difference would
-> conflate replication cost with cache residency, which is exactly the defect
-> D9 records. Restarting one node with different flags silently reintroduces
+> cache against the 205 MB working set of the day — and the resulting difference
+> would conflate replication cost with cache residency, which is exactly the
+> defect D9 records. **This matters more now, not less:** the working set is
+> 6.15 GB, ~6.3x either engine's cache and ~1.5x node RAM, so cache size governs
+> the miss rate directly rather than merely deciding how comfortably everything
+> fits. The PostgreSQL counterpart is `shared_buffers`, which
+> `bootstrap-patroni.tftpl` derives as the same quarter of measured RAM
+> (~978 MB, against `--cache=0.25`'s 978.3 MB); it was unset until 2026-09-09
+> and PostgreSQL ran on the 128 MB default, an eightfold asymmetry in
+> CockroachDB's favour. Verify it with `SHOW shared_buffers` after provisioning. Restarting one node with different flags silently reintroduces
 > it.
 
 For PostgreSQL/Patroni, `dead` kills `patroni` and `postgres` on the target
@@ -559,6 +713,68 @@ is needed, has not been characterised here as precisely as the CockroachDB
 path above — check `systemctl status patroni` on the target and Patroni's own
 cluster state (`patronictl list`) before trusting the node is fully rejoined,
 rather than assuming the CockroachDB timeline applies.
+
+> **After a `recover` fault against the PostgreSQL primary, check that the
+> demoted node actually rejoins — historically it could not.** The partition
+> leaves the old primary holding WAL the promoted node's timeline never saw, so
+> it must be rewound before it can stream again. On 2026-09-09 `pg_rewind` failed
+> because `gcp-1` had already recycled the WAL segment it needed to read back
+> (`could not open file ".../pg_wal/00000001000000000000000C"`), the node parked
+> at `start failed` and stayed there for hours, and Phase IV aborted with
+> Patroni's "no good candidates have been found" — on a cluster whose other four
+> members were perfectly healthy. This happens after *every* Phase III run
+> against the primary, not occasionally.
+>
+> `bootstrap-patroni.tftpl` now sets `wal_keep_size: '4GB'` so the rewind can
+> normally succeed, and `remove_data_directory_on_diverged_timelines: true` so a
+> failed rewind falls back to a fresh basebackup instead of a dead node. Both
+> live in `bootstrap.dcs`, which Patroni reads **only at first bootstrap**: on a
+> cluster that is already running they do nothing until you apply them with
+> `patronictl -c /etc/patroni/config.yml edit-config`. Confirm with
+> `patronictl show-config` rather than by reading the template.
+>
+> What you should see after Phase III: the demoted node goes to `Replica` and
+> then back to `Quorum Standby / streaming` on its own, within a basebackup's
+> time — seconds at smoke scale, minutes at thesis scale, where the clone is
+> ~6 GB across a WAN link. `check_patroni_primary_placement` waits for it
+> (`chaos.leaseholder_settle_s`, default 300 s) before attempting the switchover
+> back to the gateway, so a slow re-clone delays Phase IV rather than aborting
+> it. A node still at `start failed` after that window is the failure above, and
+> the remedy is to stop Patroni there, delete its data directory and let it
+> re-clone.
+>
+> **`Replica / running` is not the same state as `Quorum Standby / streaming`,
+> and only the second one can be handed leadership.** On 2026-09-09 the fix
+> above worked as far as it went — `gcp-1` came back up rather than parking at
+> `start failed` — and Phase IV still failed, because the node was `Role:
+> Replica` on **timeline 1** with `Receive LSN: unknown` while the leader and
+> the other three members were streaming on **timeline 2**. It was up, in
+> recovery, and reporting no lag, so Patroni's `/replica` endpoint answered 200
+> and the candidate wait ended after one reading; the switchover it then asked
+> for failed with `503, Switchover failed`. The lesson is that `/replica`
+> reports lag against a position an unattached member cannot advance, so a
+> member attached to nothing looks perfectly healthy through it. The wait now
+> reads the member's own `/patroni` document and requires
+> `replication_state: streaming` on the leader's timeline, which is what
+> `patronictl list` is showing you when it prints `Quorum Standby / streaming`.
+> If you are checking by hand, read that column and the `TL` column — not the
+> `State` column alone.
+>
+> If you need to unstick one by hand:
+>
+> ```bash
+> ssh ubuntu@crdb-gcp-1 'sudo -n systemctl stop patroni \
+>   && sudo -n rm -rf /var/lib/postgresql/16/data \
+>   && sudo -n systemctl start patroni'
+> # then watch it re-clone, and switch the primary back:
+> patronictl -c /etc/patroni/config.yml list
+> patronictl -c /etc/patroni/config.yml switchover \
+>   --leader <current-leader-hostname> --candidate crdb-gcp-1 --force
+> ```
+>
+> Note the hostnames: `patronictl` addresses members by their Patroni `name:`,
+> which is the full hostname (`crdb-gcp-1`), never the short `Node.name`
+> (`gcp-1`) that `profiles/*.yaml` uses for `chaos.target`.
 
 ---
 
@@ -693,10 +909,19 @@ Inspect a resolved profile before running it:
 .venv/bin/crdblab profile thesis-extended
 ```
 
-All three share `seed: 42` and `insert_count: 125000`, matching §3's load
-command. `smoke` shares them deliberately: `workload init ycsb` insists the
-database be named `ycsb`, so a smoke working set and a thesis working set cannot
-coexist.
+All three share `seed: 42`. `thesis` and `thesis-extended` share
+`insert_count: 3750000`, matching §3's load command — they are meant to differ
+in the concurrency ladder, not in the data, or an extended sweep would not be
+comparable with the sweep it extends.
+
+**`smoke` deliberately stays at `insert_count: 125000`.** It is a harness
+self-test whose value is being fast, and a 70-110 minute load would defeat that.
+The consequence is that smoke no longer exercises the disk-bound path at all —
+it verifies wiring, both chaos modes and the switchover repair, not storage
+behaviour. It reloads its own count, and its keyspace is a subset of the thesis
+one, so alternating between them is safe; but the table must be reloaded when
+moving from smoke to a thesis sweep, because `run-experiment.sh` asserts the row
+count is at least the profile's and will refuse to start otherwise.
 
 ---
 

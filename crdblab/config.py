@@ -36,6 +36,29 @@ PG_SQL_PORT = 5432
 #: installed by ``bootstrap-client.tftpl``).
 PG_GENERATOR_HOSTPORT = "127.0.0.1:6432"
 
+#: How long libpq may spend on a single host in a multi-host DSN before moving
+#: on. Only ``pg_direct_dsn`` uses it; see that function for why the bound is a
+#: measurement decision. libpq's minimum is 2 s (it silently raises anything
+#: lower), and the slowest link on this testbed is 230 ms, so 2 s is both the
+#: floor and comfortably clear of a healthy-but-distant node.
+PG_CONNECT_TIMEOUT_S = 2
+
+#: How long an ESTABLISHED connection may go unanswered before libpq's kernel
+#: gives up on it, in milliseconds. Distinct from ``PG_CONNECT_TIMEOUT_S``,
+#: which bounds only the *opening* of a connection, and from the probe's
+#: ``statement_timeout``, which is server-side and therefore cannot arrive when
+#: packets cannot. See ``pg_direct_dsn`` for why this exists and why it is
+#: deliberately looser than that statement timeout.
+PG_TCP_USER_TIMEOUT_MS = 10_000
+
+#: Keepalive geometry for the same purpose: probe an idle-looking connection so
+#: that a black hole is discovered rather than waited on. Idle 2 s so detection
+#: begins promptly relative to the ~70 ms writes these clients issue, and the
+#: interval/count are what ``PG_TCP_USER_TIMEOUT_MS`` then bounds overall.
+PG_KEEPALIVE_IDLE_S = 2
+PG_KEEPALIVE_INTERVAL_S = 2
+PG_KEEPALIVE_COUNT = 3
+
 
 def pg_generator_dsn(database: str, password: str) -> str:
     """Connection string for the generator: one host, the local pgbouncer.
@@ -89,11 +112,74 @@ def pg_direct_dsn(topology: Topology, database: str, password: str) -> str:
     for the same reason: these are single connections (or a small worker pool),
     not ``--concurrency``-many, so the serial-dial cost that rules multi-host
     out for the generator does not apply.
+
+    Two details about the host list are load-bearing.
+
+    **The gateway goes first.** libpq walks the list in order, and every host
+    it tries before the primary costs a full connect attempt. The gateway is
+    the designated Patroni primary (``bootstrap-patroni.tftpl`` pins it and
+    ``preflight.check_patroni_primary_placement`` asserts it), so putting it
+    first normally makes the very first attempt the winning one. In
+    ``topology.nodes`` order it was *last*, behind two Azure nodes measured at
+    204-230 ms RTT on 2026-09-09 -- a cost paid twice per tier by the row-match
+    probe, 24 times across a thesis sweep, for nothing.
+
+    **``connect_timeout`` is bounded, and that is a measurement decision rather
+    than a tuning knob.** In ``recover`` mode the fault is a network partition
+    (``tailscale down``), so the partitioned node does not refuse connections,
+    it swallows them: without a bound, libpq waits out the OS TCP timeout
+    before moving to the next host, and an RTO derived from these clients would
+    be reporting the client library's timeout rather than the cluster's
+    failover. Bounding it keeps the number a property of the database. It is
+    set well above the 230 ms worst-case RTT so a merely-distant node is never
+    mistaken for a dead one, and it is disclosed alongside the two proxy hops
+    on the generator path.
+
+    **An ESTABLISHED connection is bounded too, at the TCP layer, and that is
+    what keeps a silent instrument from reading as a healthy one.**
+    ``connect_timeout`` covers only the opening of a connection. In ``recover``
+    mode the fault is a partition, and the connections these two clients
+    already hold are the ones that matter: ``tailscale down`` does not close
+    them, it black-holes them, and a write in flight over a black-holed socket
+    never returns. On 2026-09-09 that stopped both instruments dead 3.6 s after
+    the fault -- the probe's last attempt completed at offset 28.42 s of a 45 s
+    run with **515 of 515 attempts recorded ``ok`` and not one timeout,
+    conn_error or refusal**, and the audit writer's last acknowledgement landed
+    at 28.49 s and was followed by a single ``ambiguous`` row 48 seconds later.
+    Neither had observed anything after the fault, and the harness reported the
+    resulting silence as an availability RTO of **0.082 s** and "no
+    interruption in served writes was detectable", for an outage the generator
+    recorded as two consecutive ticks of ``tps = 0.0``. Understatement in the
+    flattering direction, from two instruments that are supposed to be
+    independent, agreeing because they had failed the same way.
+
+    **Why TCP and not a tighter statement timeout.** ``rto_probe``'s module
+    docstring states a design commitment this must not break: *a blocked write
+    is the measurement, not a failed one*. During a lease transfer the INSERT
+    waits and then commits, and its completion timestamp is a direct
+    observation of the instant service resumed -- a short client deadline would
+    abort exactly the write whose return times the recovery, and replace a
+    millisecond-accurate edge with a poll at the timeout period. TCP-level
+    bounds leave that case alone: a server genuinely working on a query still
+    has a live kernel that acknowledges keepalives, so the connection survives
+    for as long as the server is reachable. They fire only when the *peer* is
+    unreachable, which is the partition and nothing else. ``tcp_user_timeout``
+    is set to 10 s, deliberately **looser** than the probe's own 5 s
+    server-side ``statement_timeout``, so the client-side bound can only ever
+    fire in the case where the server never received the statement or its
+    answer never came back -- never in preference to the server's own reply.
     """
-    hosts = ",".join(f"{node.host}:{PG_SQL_PORT}" for node in topology.nodes)
+    gateway = topology.gateway
+    ordered = [gateway] + [n for n in topology.nodes if n.host != gateway.host]
+    hosts = ",".join(f"{node.host}:{PG_SQL_PORT}" for node in ordered)
     return (
         f"postgresql://root:{quote(password, safe='')}@{hosts}/{database}"
         "?sslmode=disable&target_session_attrs=read-write"
+        f"&connect_timeout={PG_CONNECT_TIMEOUT_S}"
+        f"&keepalives=1&keepalives_idle={PG_KEEPALIVE_IDLE_S}"
+        f"&keepalives_interval={PG_KEEPALIVE_INTERVAL_S}"
+        f"&keepalives_count={PG_KEEPALIVE_COUNT}"
+        f"&tcp_user_timeout={PG_TCP_USER_TIMEOUT_MS}"
     )
 DEFAULT_ENV_FILE = PROJECT_ROOT / ".env"
 
@@ -168,10 +254,14 @@ class ChaosSpec:
     concurrency: int = 100
     #: For CockroachDB: the node ``lease_preferences`` pins as leaseholder,
     #: asserted by ``preflight.check_leaseholder_placement`` before the fault
-    #: fires. For PostgreSQL: informational only -- nothing pins Patroni's
-    #: leader to any specific node, so ``p4_chaos.resolve_patroni_primary``
-    #: queries the cluster live and faults whichever node actually holds the
-    #: lease, overriding this value if it disagrees.
+    #: fires. For PostgreSQL: the node ``bootstrap-patroni.tftpl`` pins as
+    #: primary and ``preflight.check_patroni_primary_placement`` restores by
+    #: switchover before the fault fires -- the same node, deliberately, since
+    #: where the write path is led from is a property of the deployment rather
+    #: than of the engine. It is still never *assumed*:
+    #: ``p4_chaos.resolve_patroni_primary`` reads the live cluster and faults
+    #: whichever node actually answers as primary, overriding this value if it
+    #: disagrees.
     target: str = "gcp-1"
     recovery_threshold: float = 0.80
     recovery_hold_s: int = 10
@@ -182,6 +272,11 @@ class ChaosSpec:
     #: post-fault series -- and the post-fault series is the measurement. The
     #: run is extended to ``inject_at_s + min_post_fault_s`` when
     #: ``duration_s`` is shorter than that; it is never shortened.
+    #:
+    #: In ``recover`` mode it is counted from the instant the partition heals
+    #: rather than from the fault, because until then there is no recovery to
+    #: observe -- see ``p4_chaos.generator_duration_s``, which adds
+    #: ``RECOVER_HEAL_DELAY_S`` for that mode only.
     min_post_fault_s: int = 60
     #: How long pre-flight may wait for ``ycsb``'s leaseholders to return to the
     #: gateway's region before refusing to measure. A chaos run that follows
@@ -190,7 +285,9 @@ class ChaosSpec:
     #: leaseholders to Linode and Phase IV, starting immediately afterwards,
     #: read that and aborted. The assertion is unchanged -- placement must be
     #: correct before anything is measured -- this only lets the cluster finish
-    #: converging first. CockroachDB only; nothing pins Patroni's leader.
+    #: converging first. CockroachDB only -- Patroni's primary is restored by an
+    #: explicit switchover rather than by waiting, because it never fails back
+    #: on its own (see ``preflight.check_patroni_primary_placement``).
     leaseholder_settle_s: int = 300
     #: Cadence of the RPO audit writer, which writes one sequence at a time on
     #: one connection. It bounds the resolution of the availability RTO derived
@@ -233,10 +330,29 @@ class ChaosSpec:
 
 
 @dataclass
+class HardwareMetricsSpec:
+    """Per-node CPU/memory/disk/network polling during Phase II-IV.
+
+    A profile-declared tradeoff, not a hardcoded constant, for the same reason
+    ``probe_workers``/``probe_interval_s`` above are: it trades resolution
+    against overhead, and a run must record which way that dial was set. It
+    lands in the manifest with the rest of the profile via ``Profile.to_dict``.
+    """
+
+    enabled: bool = True
+    #: Polling cadence across all 6 nodes (5 cluster + client). 5s keeps
+    #: aggregate scrape traffic light (6 requests/5s) while resolving load
+    #: transitions well inside the 15s LIVENESS_SETTLE_S window
+    #: crdblab/analysis/resilience.py already excludes from settling analysis.
+    sample_interval_s: float = 5.0
+
+
+@dataclass
 class Profile:
     name: str
     workload: WorkloadSpec = field(default_factory=WorkloadSpec)
     chaos: ChaosSpec = field(default_factory=ChaosSpec)
+    hardware_metrics: HardwareMetricsSpec = field(default_factory=HardwareMetricsSpec)
     tps_ceiling: float = 20_000.0
 
     def to_dict(self) -> dict[str, Any]:
@@ -253,10 +369,14 @@ class Profile:
         workload = WorkloadSpec(**{**asdict(WorkloadSpec()), **raw.get("workload", {})})
         workload.concurrencies = tuple(workload.concurrencies)
         chaos = ChaosSpec(**{**asdict(ChaosSpec()), **raw.get("chaos", {})})
+        hardware_metrics = HardwareMetricsSpec(
+            **{**asdict(HardwareMetricsSpec()), **raw.get("hardware_metrics", {})}
+        )
         return cls(
             name=raw.get("name", path.stem),
             workload=workload,
             chaos=chaos,
+            hardware_metrics=hardware_metrics,
             tps_ceiling=float(raw.get("tps_ceiling", 20_000.0)),
         )
 

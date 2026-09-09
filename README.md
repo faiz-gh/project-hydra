@@ -27,13 +27,24 @@ alongside the session log it was distilled from.
    generator creates them either:
 
    ```
-   cockroach workload init ycsb --drop --seed=42 --insert-count=125000 \
+   cockroach workload init ycsb --drop --seed=42 --insert-count=3750000 \
      'postgresql://root@crdb-gcp-1:26257/ycsb?sslmode=disable'
    ```
 
    The seed and row count **must** match the profile you intend to
    sweep with (`profiles/thesis-extended.yaml` for the dissertation's runs). They
    are not incidental — see the seed commitment below.
+
+   This is the CockroachDB path only. **PostgreSQL cannot be loaded with
+   `workload init`** — its first statement is `CREATE DATABASE IF NOT EXISTS`,
+   which PostgreSQL rejects — so that arm creates the table with `psql` and
+   loads the rows by running the generator insert-only. `run-experiment.sh`
+   does both; see `instructions.md` §3.
+
+   3,750,000 rows is ~6.15 GB, about **1.5x the nodes' RAM**, so the working
+   set deliberately does not fit in memory: the sweep is meant to measure the
+   storage engines, not page-cache residency. The PostgreSQL load takes 70-110
+   minutes at that size, and every node needs ~8-12 GB of disk for its copy.
 3. `.venv/bin/crdblab capture --node gcp-1 --pty --duration 15`
    Pins the column layout emitted by the CockroachDB version actually
    installed. Nothing else should be run until the reported operation types and
@@ -52,11 +63,19 @@ alongside the session log it was distilled from.
    (`crdblab --engine postgresql bench ...`) to benchmark the PostgreSQL/Patroni
    cluster instead of the CockroachDB default. Run once per engine.
 6. `crdblab chaos run --mode recover|dead` — Phase III (`recover`) and Phase IV
-   (`dead`), fault injection against the primary. A `dead` fault leaves the
-   target down and the harness does **not** restore it. CockroachDB is launched by
-   cloud-init with `--background`, not as a systemd unit, so there is no service
-   to start and a reboot will not bring it back; replay the start command, keeping
-   `--cache=0.25 --max-sql-memory=0.25` (see `instructions.md`).
+   (`dead`), fault injection against the node leading the write path: for
+   CockroachDB the leaseholder `lease_preferences` pins to `gcp-1`, for
+   PostgreSQL the Patroni primary pinned to the same node, resolved live before
+   the fault. A `dead` fault **is** restored by the harness, but only after
+   every artefact is derived, and the restart is recorded separately in
+   `events.json` so a reader can tell what was measured from what was repaired.
+   `recover` never comes through that path — its payload heals itself, and
+   restarting a node that was never stopped would be a second fault.
+   If a restore fails, note that CockroachDB is launched by cloud-init with
+   `--background` rather than as a systemd unit, so there is no service to start
+   and a reboot will not bring it back; replay the start command, keeping
+   `--cache=0.25 --max-sql-memory=0.25` (see `instructions.md`). PostgreSQL is a
+   systemd unit, so `sudo -n systemctl start patroni` suffices there.
    Each chaos run also carries a **high-frequency RTO probe** on a background
    path: a pool of canary writers on their own connections and their own table,
    dispatching every 2 ms, recording when the database stopped and resumed
@@ -159,3 +178,40 @@ All steps are implemented.
   incomparable. The race is handled instead: a flushed window is accepted only
   where the quorum-floor check independently covers the same tier, which is a
   corroboration an unreplicated system cannot have (D12).
+- **An instrument that stopped observing is not an instrument that observed
+  nothing wrong.** Both RTO clients answer "was there an outage" by looking for
+  a gap in their own stream of writes, and an instrument that goes silent
+  produces no gap at all — its silence is therefore reported as health, in the
+  flattering direction, by the two measurements the design deliberately keeps
+  independent. This is not hypothetical: on 2026-09-09 a partition black-holed
+  the connections both clients already held, they blocked in `recv()` and
+  stopped sampling 3.6 s after the fault, and the run reported an availability
+  RTO of 0.082 s and "no interruption detectable" for an outage the generator
+  recorded as two consecutive ticks of zero throughput. Both now record how much
+  of the run they actually watched, and refuse to state an RTO where their
+  coverage ends before the run does — an unmeasured outage is reported as
+  unmeasured, never as absent. Two corollaries. Coverage on the RPO audit stream
+  is judged on acknowledgements rather than attempts, because a writer blocked
+  inside a single statement is still attempting while observing nothing. And the
+  bound that stops the blocking is at the TCP layer (`keepalives`,
+  `tcp_user_timeout`) rather than a shorter `statement_timeout`: a blocked write
+  *is* the measurement — its completion timestamp is a direct observation of the
+  instant service resumed — so a tight client deadline would abort exactly the
+  write whose return times the recovery. A reachable server answers keepalives
+  even while busy, so the TCP bound fires only for an unreachable peer, and it
+  is set looser than the server-side statement timeout so it can never pre-empt
+  a real reply.
+- **A fault the harness injects must leave a testbed the next phase can use.**
+  Phase III partitions the PostgreSQL primary, which diverges its timeline; the
+  demoted node then cannot rejoin without `pg_rewind`, and `pg_rewind` cannot
+  run once the node has recycled the WAL it needs to read back. Left alone the
+  node parks at `start failed` indefinitely and Phase IV aborts on a cluster
+  that will never recover on its own — so Patroni is configured both to retain
+  that WAL (`wal_keep_size`) and to fall back to a fresh basebackup when the
+  rewind is impossible anyway (`remove_data_directory_on_diverged_timelines`).
+  The harness half is that the primary-placement repair *waits for the candidate
+  to become eligible* before asking for a switchover, since a node re-cloning
+  6 GB across a WAN link is not a failure, only slow. That wait is for the
+  candidate and never for the primary: Patroni never fails back on its own, so
+  waiting for the primary to return would be waiting for something that cannot
+  happen.

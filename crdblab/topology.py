@@ -31,10 +31,17 @@ class Node:
     gateway: bool = False
     sql_port: int = 26257
     http_port: int = 8080
+    #: node_exporter's default port. Every node in this testbed runs the
+    #: Ubuntu-packaged prometheus-node-exporter, unmodified.
+    node_exporter_port: int = 9100
 
     @property
     def http_base(self) -> str:
         return f"http://{self.host}:{self.http_port}"
+
+    @property
+    def node_exporter_url(self) -> str:
+        return f"http://{self.host}:{self.node_exporter_port}/metrics"
 
 
 @dataclass(frozen=True)

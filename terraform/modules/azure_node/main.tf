@@ -97,6 +97,7 @@ resource "azurerm_linux_virtual_machine" "this" {
   os_disk {
     caching              = "ReadWrite"
     storage_account_type = "Premium_LRS"
+    disk_size_gb         = 50
   }
 
   source_image_reference {

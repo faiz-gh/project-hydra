@@ -29,11 +29,19 @@ chaos:
   target: gcp-1
   recovery_threshold: 0.80
 
-  # The self-test only has to prove the post-fault path runs; it is not
-  # resolving a recovery, so it does not pay for the thesis profile's 60s of
-  # post-fault observation. Left explicit rather than inherited so that this
-  # run staying short is a decision, not an accident of the default.
-  min_post_fault_s: 20
+  # Counted from the point there is something to observe, which in `recover`
+  # mode is when the partition heals (inject_at_s + 45s), not when the fault
+  # lands -- see p4_chaos.generator_duration_s. So the recover run is
+  # 15+45+45 = 105s and the dead run 15+45 = 60s.
+  #
+  # 45 rather than the 20 this was until 2026-09-09. 20 was set on the theory
+  # that the self-test only has to prove the post-fault path runs, but the
+  # thesis-scale recover run of 2026-09-08 (20260908T232245Z_p4-chaos-recover)
+  # measured a 68.96s outage against a 45s partition -- i.e. writes resumed
+  # ~24s AFTER the heal, because Patroni still has to finish promoting and the
+  # clients have to reconnect. A 20s window would have ended inside that and
+  # produced the same UNMEASURED verdict the length fix exists to remove.
+  min_post_fault_s: 45
 
   # The probe runs in the self-test too, and deliberately so: it opens
   # connections and issues DDL against the cluster, and a smoke test that skipped

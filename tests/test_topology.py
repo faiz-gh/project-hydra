@@ -152,6 +152,40 @@ def test_the_generator_gets_one_host_and_the_measurement_clients_get_all_five():
     assert "target_session_attrs=read-write" in direct
 
 
+def test_the_measurement_clients_bound_established_connections_not_just_new_ones():
+    """A black-holed socket must fail, not block forever.
+
+    ``connect_timeout`` covers only the opening of a connection, and in
+    ``recover`` mode the connections that matter are the ones the clients
+    already hold: ``tailscale down`` does not close them, it swallows them. On
+    2026-09-09 both the RPO audit writer and the RTO probe blocked in ``recv()``
+    on such a socket and stopped observing 3.6 s after the fault, and the
+    harness reported their silence as a 0.082 s RTO for a ~70 s outage.
+
+    The bound is at the TCP layer on purpose. ``rto_probe``'s design turns on a
+    blocked write being *the measurement* -- its completion times the recovery
+    -- so a tighter statement timeout would abort exactly the write worth
+    keeping. A server that is merely busy still answers keepalives; only an
+    unreachable peer does not. And the bound is deliberately looser than the
+    probe's own 5 s server-side ``statement_timeout``, so it can never fire in
+    preference to the server's own reply.
+    """
+    from crdblab.config import PG_TCP_USER_TIMEOUT_MS, pg_direct_dsn, pg_generator_dsn
+
+    direct = pg_direct_dsn(DEFAULT_TOPOLOGY, "chaos_audit", "pw")
+    assert f"tcp_user_timeout={PG_TCP_USER_TIMEOUT_MS}" in direct
+    assert "keepalives=1" in direct
+    assert PG_TCP_USER_TIMEOUT_MS > 5000, (
+        "must be looser than the probe's server-side statement_timeout, or it "
+        "would pre-empt the server's own answer"
+    )
+    # The generator's path is loopback to pgbouncer and is not touched: there is
+    # no partition to survive between two processes on the same host, and the
+    # generator is the one client whose connection behaviour must stay
+    # byte-identical across the two engines' arms.
+    assert "tcp_user_timeout" not in pg_generator_dsn("ycsb", "pw")
+
+
 def test_dsn_passwords_are_escaped_in_both_builders():
     from crdblab.config import pg_direct_dsn, pg_generator_dsn
 

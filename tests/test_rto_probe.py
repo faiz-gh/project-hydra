@@ -359,6 +359,53 @@ def test_an_interval_shorter_than_the_sampling_gap_is_not_quoted_as_a_number():
     assert "not a recovery time of zero" in result["detail"]
 
 
+def test_a_probe_that_stopped_observing_does_not_claim_nothing_was_detectable():
+    """The 2026-09-09 regression, at the real run's shape.
+
+    ``runs/20260909T012233Z_p4-chaos-recover``: the probe's two workers blocked
+    on connections ``tailscale down`` had black-holed. A server-side
+    ``statement_timeout`` cannot arrive when packets cannot, so the attempts
+    neither completed nor failed -- the recorded artefact is 515 attempts, 515
+    ``ok``, zero timeouts and zero conn_errors, spanning 20.3 s of a 45 s run
+    and ending 3.6 s after the fault. Every gap in that series is healthy,
+    because every gap in it predates the outage, so the probe reported "no
+    interruption in served writes was detectable" for an interruption of roughly
+    70 seconds.
+
+    The existing ``truncated`` branch does not catch this: it looks for a gap
+    still open when the probe stopped, and here there is none -- the probe
+    served its last dispatched write and then simply stopped dispatching.
+    """
+    attempts = _attempts([(t * 0.04, t * 0.04 + 0.075, "ok") for t in range(515)])
+    result = measure_rto(attempts, fault_offset_s=20.7, observation_end_s=45.0)
+
+    assert result["rto_s"] is None
+    assert result["measurable"] is False
+    assert result["coverage_truncated"] is True
+    assert "UNMEASURED" in result["claim"]
+    # Distinct from below_resolution, which says the outage was shorter than the
+    # instrument can resolve. That is a result; this is the absence of one.
+    assert result["below_resolution"] is False
+    assert "no interruption" not in result["claim"]
+
+
+def test_a_probe_that_watched_to_the_end_still_reports_nothing_detectable():
+    """The control: full coverage and a quiet cluster is a measurement."""
+    attempts = _attempts([(t / 10, t / 10 + 0.05, "ok") for t in range(20)])
+    result = measure_rto(attempts, fault_offset_s=1.02, observation_end_s=1.95)
+    assert result["coverage_truncated"] is False
+    assert result["measurable"] is True
+    assert "no interruption" in result["claim"]
+
+
+def test_coverage_is_not_judged_when_the_run_end_is_unknown():
+    """Runs recorded before the field existed must read exactly as before."""
+    attempts = _attempts([(t / 10, t / 10 + 0.05, "ok") for t in range(20)])
+    result = measure_rto(attempts, fault_offset_s=1.02)
+    assert result["coverage_truncated"] is None
+    assert "no interruption" in result["claim"]
+
+
 def test_a_run_that_ended_during_the_outage_reports_no_rto_rather_than_a_bound():
     """The probe cannot see a recovery that happened after it stopped.
 
@@ -1061,3 +1108,51 @@ def test_the_agent_ships_only_stdlib_only_modules():
         "crdblab/core/recorder.py",
         "crdblab/core/rto_probe.py",
     }
+
+
+def test_the_outage_is_the_largest_post_fault_gap_not_the_first_over_the_floor():
+    """A short blip right after the fault must not mask the real interruption.
+
+    This reproduces the shape of runs/20260908T232245Z_p4-chaos-recover, the
+    2026-09-08 PostgreSQL Phase III run, where taking the *first* qualifying gap
+    reported a 72-second outage as 348 milliseconds -- understating it 208-fold,
+    and in the flattering direction.
+
+    Two things conspire. The noise floor is calibrated on pre-fault gaps only,
+    so post-fault jitter -- reconnecting clients, a pool completing in bursts --
+    routinely clears it. And the fault does not take effect when the injection
+    command returns: ``tailscale down`` exits 0 while established flows keep
+    working, so the interval just after the fault is still healthy and its
+    jitter is what a first-match latches onto.
+
+    Healthy cadence 0.10 s, so the floor is 0.20 s (longest healthy gap plus one
+    sampling period). Fault at 1.00 s. A 0.30 s blip clears that floor at 1.35 s
+    while writes are still flowing, then the real 20 s outage opens at 1.45 s.
+    """
+    healthy = [(round(0.10 * i, 2), round(0.10 * i + 0.05, 2), "ok") for i in range(1, 10)]
+    attempts = _attempts(
+        [
+            *healthy,                    # ... steady to 0.95, gaps of 0.10
+            (1.00, 1.05, "ok"),          # served after the fault: onset is delayed
+            (1.30, 1.35, "ok"),          # 0.30 s gap -- clears the floor, pure noise
+            (1.40, 1.45, "ok"),          # normal again; the fault has now bitten
+            (1.50, 21.40, "timeout"),    # the real outage
+            (21.30, 21.45, "ok"),
+            (21.50, 21.55, "ok"),
+        ]
+    )
+    result = measure_rto(attempts, fault_offset_s=1.00)
+
+    assert result["measurable"] is True
+    # The 0.16 s blip cleared the floor and was considered...
+    assert result["qualifying_gap_count"] >= 2
+    assert result["qualifying_gaps_s"][0] == pytest.approx(20.0, abs=0.01)
+    assert pytest.approx(0.30, abs=0.01) in result["qualifying_gaps_s"]
+    # ...but the reported outage is the real one, not the blip.
+    assert result["outage"]["started_s"] == pytest.approx(1.45)
+    assert result["outage"]["ended_s"] == pytest.approx(21.45)
+    assert result["outage"]["duration_s"] == pytest.approx(20.0, abs=0.01)
+    # RTO is fault -> service restored, so it spans the healthy tail as well.
+    assert result["rto_s"] == pytest.approx(20.45, abs=0.01)
+    # The specific regression: never the blip.
+    assert result["rto_s"] > 1.0, "the first gap over the floor was reported as the outage"

@@ -76,8 +76,27 @@ defaults
     option  dontlognull
     retries 3
     timeout connect 5s
-    timeout client  300s
-    timeout server  300s
+    # 300s was too short: it is an IDLE timeout, and pgbouncer (session mode)
+    # opens each of the generator's --concurrency backend connections one at a
+    # time rather than in parallel -- observed 2026-09-08 at ~5.9s/connection,
+    # so a 64-connection load took 6m10s just to finish "creating load
+    # generator", and every connection opened in roughly the first 5 minutes
+    # of that window sat completely idle (no traffic yet -- the generator was
+    # still busy opening the rest) long enough to hit the old 300s timeout and
+    # get silently killed before the generator ever got to use it. The first
+    # real query issued once setup finished landed on an already-dead socket
+    # and pgbouncer reported it to the client as "server conn crashed?"
+    # (SQLSTATE 08P01), which killed the whole insert-only load since it does
+    # not run with --tolerate-errors. This is not a database fault: Patroni's
+    # own log shows uninterrupted leadership throughout, and HAProxy never
+    # logged a backend down/up transition -- confirmed against
+    # /var/log/postgresql/pgbouncer.log, where every crashed connection died
+    # at exactly age=305s. The largest concurrency tier in profiles/ is 200
+    # (see pgbouncer.ini's default_pool_size comment); at the same
+    # per-connection rate that is ~20 minutes of warm-up, so 3600s is chosen
+    # with real margin rather than matching the observed case exactly.
+    timeout client  3600s
+    timeout server  3600s
 
 frontend db_front
     bind *:5000
@@ -207,5 +226,33 @@ if [ "$PGBOUNCER_UP" != "1" ]; then
     exit 1
 fi
 
+# ==========================================
+# 5. node_exporter -- hardware metrics polled directly by the harness
+# ==========================================
+# Not a standalone Prometheus server and nothing else on this testbed scrapes
+# it -- crdblab/core/hardware_metrics.py polls :9100/metrics directly over
+# the Tailscale mesh, the same way it already polls Patroni's :8008 REST API.
+# No firewall change needed for the same reason neither of those needed one:
+# every cross-node service here rides the tailnet, never the cloud provider's
+# public/VPC network. Installed on the client node too, not just the cluster
+# nodes: it runs the generator, HAProxy and pgbouncer, and is a plausible
+# bottleneck in its own right during a failover reconnection storm.
+apt-get install -yq prometheus-node-exporter
+systemctl enable prometheus-node-exporter
+systemctl restart prometheus-node-exporter
+
+NODE_EXPORTER_UP=0
+for _ in $(seq 1 12); do
+    if ss -lnt 2>/dev/null | grep -q ':9100 '; then
+        NODE_EXPORTER_UP=1
+        break
+    fi
+    sleep 5
+done
+if [ "$NODE_EXPORTER_UP" != "1" ]; then
+    echo "FAILED: node_exporter is not listening on :9100 after 60s." >&2
+    systemctl status prometheus-node-exporter --no-pager >&2 || true
+    exit 1
+fi
 
 echo "✅ Client node provisioned successfully."

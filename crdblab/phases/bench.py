@@ -47,12 +47,14 @@ import re
 import threading
 import time
 import urllib.request
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
 
 from ..config import Profile, Settings, pg_direct_dsn, pg_generator_dsn
 from ..core import preflight, ssh
+from ..core.hardware_metrics import HardwareMetricsSampler
 from ..core.recorder import (
     COLUMNS,
     Manifest,
@@ -403,28 +405,64 @@ def run(
     # Pre-flight runs before any measurement, not after: the point is to refuse
     # to spend half an hour producing a run that will have to be discarded.
     quorum_floor: float | None = None
+
+    def _resolve_quorum_floor() -> None:
+        """Derive Phase I's write floor and record whether it is available.
+
+        Hoisted out of the CockroachDB branch because it applies to *both*
+        engines, and living inside that branch is why it silently applied to
+        neither on the PostgreSQL arm: ``quorum_floor`` stayed ``None``, so the
+        per-tier ``check_write_latency_floor`` below was skipped for every
+        PostgreSQL tier. The 2026-09-08 thesis-scale pg run
+        (20260908T230430Z_bench_cluster) recorded twelve ``row_match`` checks
+        and not one ``write_latency_floor``, while the CockroachDB run it is
+        compared against recorded twelve of each -- so the two arms of the
+        comparison were not held to the same gate.
+
+        The floor is engine-independent because the geometry is: Patroni's
+        ``synchronous_standby_names: ANY 2 (*)`` waits for the two fastest
+        standby acks, which is the same wait as a 3-of-5 Raft quorum from the
+        same node. One number bounds both.
+        """
+        nonlocal quorum_floor
+        if network_run is None:
+            report.add(
+                "quorum_floor_available",
+                False,
+                "no Phase I run supplied; run `crdblab net probe` first so the "
+                "write-latency floor can be asserted",
+            )
+            return
+        rtts = preflight.gateway_rtts(network_run, settings.topology.gateway.host)
+        quorum_floor = preflight.quorum_floor_ms(rtts, target.voters)
+        report.add(
+            "quorum_floor_available",
+            True,
+            f"quorum floor {quorum_floor:.1f} ms from {network_run}",
+            quorum_floor_ms=round(quorum_floor, 3),
+        )
+
     if not skip_checks and target.engine == "cockroachdb":
         preflight.check_clock_offset(report, [target.exec_node])
         if target.voters > 1:
             preflight.check_leaseholder_placement(
                 report, settings.topology.gateway, target.database, settings.topology.gateway.region
             )
-            if network_run is None:
-                report.add(
-                    "quorum_floor_available",
-                    False,
-                    "no Phase I run supplied; run `crdblab net probe` first so the "
-                    "write-latency floor can be asserted",
-                )
-            else:
-                rtts = preflight.gateway_rtts(network_run, settings.topology.gateway.host)
-                quorum_floor = preflight.quorum_floor_ms(rtts, target.voters)
-                report.add(
-                    "quorum_floor_available",
-                    True,
-                    f"quorum floor {quorum_floor:.1f} ms from {network_run}",
-                    quorum_floor_ms=round(quorum_floor, 3),
-                )
+            _resolve_quorum_floor()
+        report.raise_if_failed()
+    elif not skip_checks and target.engine == "postgresql":
+        # The PostgreSQL counterpart of the leaseholder-placement assertion
+        # above. Where the write path is led from is a property of the
+        # deployment rather than of the engine, so it has to hold on both arms
+        # or the comparison measures cloud geography: with the primary left
+        # where an unpinned election put it (crdb-azure-2, eastasia, 199 ms from
+        # the client on 2026-09-09) a single connection cost 1.02 s against
+        # 0.05 s to the gateway, and the generator opens --concurrency of them
+        # serially, per tier.
+        preflight.check_clock_offset(report, [target.exec_node])
+        preflight.check_patroni_primary_placement(report, settings.topology)
+        if target.voters > 1:
+            _resolve_quorum_floor()
         report.raise_if_failed()
 
     run_dir = RunDirectory(settings.runs_dir, new_run_id(target.phase))
@@ -470,60 +508,78 @@ def run(
     manifest.note(f"server: {server.get('start_command', '')}")
     manifest.note(f"host: {preflight.format_hardware(server.get('hardware', {}))}")
 
+    # All 5 cluster nodes plus the client node the generator runs from --
+    # node_exporter is OS-level, not database-level, so it's polled on every
+    # node regardless of which one the generator happens to be driven from.
+    all_nodes = list(target.nodes) + [target.exec_node]
+    hw_cm = (
+        HardwareMetricsSampler(
+            all_nodes, t_zero, interval_s=profile.hardware_metrics.sample_interval_s
+        )
+        if profile.hardware_metrics.enabled
+        else nullcontext()
+    )
+
     tiers: list[dict[str, Any]] = []
-    with HostSampler(target.metrics_url) as sampler:
-        with MetricsWriter(run_dir.metrics_csv, COLUMNS) as writer:
-            for index, (concurrency, repetition) in enumerate(plan):
-                # Both engines, since 2026-09-08. These two checks are the only
-                # detectors of D8 -- a workload addressing an empty keyspace,
-                # which reports ~20x the throughput at ~1/25th the latency and
-                # reads as the best result the testbed has produced -- and while
-                # they were CockroachDB-only, the PostgreSQL arm of the
-                # comparison had none. The floor applies to Patroni for the same
-                # reason it applies to CockroachDB: `synchronous_standby_names:
-                # ANY 2 (*)` makes a commit wait for two standby acks, the same
-                # geometry as a 3-of-5 Raft quorum, so Phase I's floor bounds
-                # both engines' writes.
-                probe = preflight.row_match_probe(
-                    target.engine,
-                    gateway=settings.topology.gateway,
-                    table="usertable",
-                    exec_node=target.exec_node,
-                    dsn=pg_direct_dsn(settings.topology, target.database, settings.pg_password),
-                    password=settings.pg_password,
-                )
-                if not skip_checks:
-                    probe.start()
-
-                raw_path = run_dir.raw(f"c{concurrency}_rep{repetition}.txt")
-                tier = _run_tier(
-                    target, profile, concurrency, repetition,
-                    raw_path, writer, sampler, manifest, t_zero,
-                    tier_index=index + 1, tier_total=len(plan),
-                )
-
-                if not skip_checks:
-                    floor_ok = False
-                    if quorum_floor is not None:
-                        write_p50 = tier["mean_p50_ms"].get("update")
-                        if write_p50 is not None:
-                            floor_ok = preflight.check_write_latency_floor(
-                                report, write_p50, quorum_floor
-                            )
-                    tier["row_match_rate"] = probe.finish(
-                        report, corroborated=floor_ok
+    with hw_cm as hw_sampler:
+        with HostSampler(target.metrics_url) as sampler:
+            with MetricsWriter(run_dir.metrics_csv, COLUMNS) as writer:
+                for index, (concurrency, repetition) in enumerate(plan):
+                    # Both engines, since 2026-09-08. These two checks are the only
+                    # detectors of D8 -- a workload addressing an empty keyspace,
+                    # which reports ~20x the throughput at ~1/25th the latency and
+                    # reads as the best result the testbed has produced -- and while
+                    # they were CockroachDB-only, the PostgreSQL arm of the
+                    # comparison had none. The floor applies to Patroni for the same
+                    # reason it applies to CockroachDB: `synchronous_standby_names:
+                    # ANY 2 (*)` makes a commit wait for two standby acks, the same
+                    # geometry as a 3-of-5 Raft quorum, so Phase I's floor bounds
+                    # both engines' writes.
+                    probe = preflight.row_match_probe(
+                        target.engine,
+                        gateway=settings.topology.gateway,
+                        table="usertable",
+                        exec_node=target.exec_node,
+                        dsn=pg_direct_dsn(settings.topology, target.database, settings.pg_password),
+                        password=settings.pg_password,
                     )
-                tiers.append(tier)
+                    if not skip_checks:
+                        probe.start()
 
-                if index < len(plan) - 1 and spec.cooldown_s:
-                    # Monotonic, so a clock adjustment mid-sweep cannot shorten or
-                    # extend the interval that lets range rebalancing quiesce.
-                    deadline = time.monotonic() + spec.cooldown_s
-                    while (remaining := deadline - time.monotonic()) > 0:
-                        time.sleep(min(remaining, 0.5))
+                    raw_path = run_dir.raw(f"c{concurrency}_rep{repetition}.txt")
+                    tier = _run_tier(
+                        target, profile, concurrency, repetition,
+                        raw_path, writer, sampler, manifest, t_zero,
+                        tier_index=index + 1, tier_total=len(plan),
+                    )
+
+                    if not skip_checks:
+                        floor_ok = False
+                        if quorum_floor is not None:
+                            write_p50 = tier["mean_p50_ms"].get("update")
+                            if write_p50 is not None:
+                                floor_ok = preflight.check_write_latency_floor(
+                                    report, write_p50, quorum_floor
+                                )
+                        tier["row_match_rate"] = probe.finish(
+                            report, corroborated=floor_ok
+                        )
+                    tiers.append(tier)
+
+                    if index < len(plan) - 1 and spec.cooldown_s:
+                        # Monotonic, so a clock adjustment mid-sweep cannot shorten or
+                        # extend the interval that lets range rebalancing quiesce.
+                        deadline = time.monotonic() + spec.cooldown_s
+                        while (remaining := deadline - time.monotonic()) > 0:
+                            time.sleep(min(remaining, 0.5))
 
     if sampler.failures:
         manifest.note(f"host metric scrape failed {sampler.failures} time(s)")
+    if hw_sampler is not None:
+        hw_sampler.write(run_dir.hardware_metrics_csv)
+        failed = {n: c for n, c in hw_sampler.scrape_failures.items() if c}
+        if failed:
+            manifest.note(f"hardware metrics: scrape failures {failed}")
     manifest.finished_utc = utcnow()
     manifest.validation = {"preflight": report.to_dict()}
     run_dir.write_manifest(manifest)

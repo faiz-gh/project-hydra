@@ -74,6 +74,7 @@ from typing import Any, Iterator
 
 from ..config import Profile, Settings, pg_direct_dsn, pg_generator_dsn
 from ..core import preflight, ssh
+from ..core.hardware_metrics import HardwareMetricsSampler
 from ..core.recorder import (
     AUDIT_COLUMNS,
     COLUMNS,
@@ -113,18 +114,11 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 #: before the workload it is observing had finished.
 PROBE_OVERRUN_S = 600.0
 
-#: Every fault payload is privileged, and on most of this testbed the SSH user
-#: is *not* root: ``crdb-gcp-1`` and the Azure nodes are reached as ``ubuntu``
-#: while ``cockroach``/``patroni`` run as root and ``tailscale down`` needs the
-#: daemon socket. Without this prefix ``killall -9 cockroach`` returns
-#: ``Operation not permitted`` (rc=1) and ``tailscale down`` returns
-#: ``Access denied`` -- in both cases the node under test carries on serving and
-#: the run silently measures a fault that never happened. That is exactly what
-#: the 2026-09-07/08 chaos runs recorded (``"detail": "rc=1"``, and the target's
-#: ``cockroach`` pid unchanged across the whole run). ``-n`` keeps it
-#: non-interactive: if passwordless sudo is not available we want a hard,
-#: immediate failure rather than a hung prompt eating the injection window.
-SUDO = "sudo -n"
+#: Every fault payload is privileged; see ``core.ssh.SUDO`` for why, and for the
+#: chaos runs that recorded a fault which never landed without it. Defined in
+#: ``core.ssh`` because ``core.preflight`` needs it too, and re-exported here
+#: because this module is where the fault payloads that use it live.
+SUDO = ssh.SUDO
 
 
 #: PostgreSQL's process death has to be arranged around systemd; CockroachDB's
@@ -159,6 +153,13 @@ SUDO = "sudo -n"
 #: takes postgres down with it since Patroni starts the postmaster as its child.
 PG_RESTART_OVERRIDE = "/etc/systemd/system/patroni.service.d/99-crdblab-chaos.conf"
 
+#: How long the ``recover`` partition lasts before it heals itself. This is not
+#: a free parameter of the payload: it is the length of the outage the run has
+#: to observe, so :func:`generator_duration_s` reads it too, and the two must
+#: never be able to drift apart. Named for that reason rather than written twice.
+RECOVER_HEAL_DELAY_S = 45
+
+
 _PG_DEAD_PAYLOAD = (
     f"{SUDO} mkdir -p {PG_RESTART_OVERRIDE.rsplit('/', 1)[0]} && "
     f"printf '[Service]\\nRestart=no\\n' | {SUDO} tee {PG_RESTART_OVERRIDE} >/dev/null && "
@@ -179,7 +180,8 @@ def get_payload(mode: str, engine: str) -> str:
         # once sshd tears the session down.
         return (
             f"{SUDO} nohup setsid bash -c "
-            f"'tailscale down && sleep 45 && tailscale up' >/dev/null 2>&1 &"
+            f"'tailscale down && sleep {RECOVER_HEAL_DELAY_S} && tailscale up' "
+            f">/dev/null 2>&1 &"
         )
     raise ValueError(f"Unknown mode: {mode}")
 
@@ -213,55 +215,13 @@ def preflight_payload(mode: str, engine: str) -> str:
     raise ValueError(f"Unknown mode: {mode}")
 
 
-#: Patroni's own REST endpoint, port 8008, answers 200 on the primary and a
-#: non-2xx status everywhere else -- the same check
-#: ``terraform/scripts/bootstrap-client.tftpl`` configures HAProxy's
-#: ``patroni_primary`` backend to poll. Unlike CockroachDB, nothing in
-#: ``bootstrap-patroni.tftpl`` biases which node wins Patroni's etcd-based
-#: leader election, so a profile's static ``chaos.target`` cannot be trusted to
-#: name the primary the way it can for CockroachDB (where
-#: ``preflight.check_leaseholder_placement`` asserts the gateway holds the
-#: lease). The primary is therefore resolved here, live, immediately before the
-#: fault is scheduled, rather than assumed from configuration.
-PATRONI_PRIMARY_PORT = 8008
-PATRONI_PRIMARY_TIMEOUT_S = 3.0
-
-
-def resolve_patroni_primary(topo: Topology, timeout_s: float = PATRONI_PRIMARY_TIMEOUT_S) -> Node:
-    """Query every cluster member's Patroni REST API and return the primary.
-
-    Raises if zero or more than one node claims to be primary: zero means the
-    cluster has no leader right now (mid-failover, or Patroni is down), and more
-    than one means a split-brain the harness must not paper over by picking
-    one arbitrarily.
-    """
-    import urllib.error
-    import urllib.request
-
-    primaries: list[Node] = []
-    unreachable: list[str] = []
-    for node in topo.nodes:
-        url = f"http://{node.host}:{PATRONI_PRIMARY_PORT}/primary"
-        try:
-            with urllib.request.urlopen(url, timeout=timeout_s) as response:
-                if response.status == 200:
-                    primaries.append(node)
-        except (urllib.error.URLError, OSError) as exc:
-            unreachable.append(f"{node.name} ({exc})")
-
-    if len(primaries) == 1:
-        return primaries[0]
-    if not primaries:
-        raise ValueError(
-            "no cluster member's Patroni REST API (port "
-            f"{PATRONI_PRIMARY_PORT}) reports itself primary; the cluster may be "
-            f"mid-failover or unreachable. Unreachable: {unreachable or 'none'}"
-        )
-    raise ValueError(
-        "more than one cluster member's Patroni REST API reports itself "
-        f"primary ({', '.join(n.name for n in primaries)}); this is a "
-        "split-brain and the harness refuses to guess which one to fault"
-    )
+#: Patroni primary resolution lives in ``core.preflight`` because the pre-flight
+#: gate needs it too, and ``core`` may not import ``phases``. Re-exported here
+#: because this is where it was defined and where callers (and tests) look for
+#: it -- there is exactly one implementation, not a copy on each side.
+PATRONI_PRIMARY_PORT = preflight.PATRONI_PRIMARY_PORT
+PATRONI_PRIMARY_TIMEOUT_S = preflight.PATRONI_PRIMARY_TIMEOUT_S
+resolve_patroni_primary = preflight.resolve_patroni_primary
 
 
 @dataclass
@@ -322,6 +282,17 @@ class AuditWriter:
         #: recovering, and conflating the two is what makes a reported RTO
         #: unfalsifiable.
         self.attempts: list[tuple[float, int, str]] = []
+        #: Monotonic instant the observation window closed, set when the writer
+        #: is stopped. :func:`availability_rto` compares the last attempt
+        #: against it to tell "the cluster was quiet" from "this instrument
+        #: stopped watching" -- two states that were indistinguishable in the
+        #: artefact until 2026-09-09, when the second was reported as the first.
+        self.stopped_at: float | None = None
+        #: Monotonic instant the most recent attempt was *started*. A writer
+        #: blocked inside `cur.execute` on a black-holed socket keeps this
+        #: advancing past its last acknowledgement by the length of the block,
+        #: which is how a stuck write is told from an abandoned one.
+        self.last_attempt_started: float | None = None
 
     def _loop(self) -> None:
         import psycopg
@@ -330,6 +301,7 @@ class AuditWriter:
         conn = None
         while not self._stop.is_set():
             seq += 1
+            self.last_attempt_started = time.monotonic()
             try:
                 if conn is None or conn.closed:
                     conn = psycopg.connect(self._dsn, autocommit=True, connect_timeout=5)
@@ -376,6 +348,11 @@ class AuditWriter:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=10)
+        # Taken after the join so it is genuinely the end of the window. The
+        # join is bounded, so a thread still wedged on a black-holed socket does
+        # not hold the run open -- it simply leaves a coverage gap, which is now
+        # recorded rather than silently read as health.
+        self.stopped_at = time.monotonic()
 
     def collect(self, dsn: str) -> AuditResult:
         """Compare the client's record against what the database actually holds."""
@@ -457,7 +434,7 @@ def check_fault_authorisation(
     )
 
 
-def generator_duration_s(chaos: Any) -> int:
+def generator_duration_s(chaos: Any, mode: str = "dead") -> int:
     """How long the generator must run to leave a usable post-fault series.
 
     ``duration_s`` alone does not guarantee one. ``inject_at_s`` is measured
@@ -466,10 +443,36 @@ def generator_duration_s(chaos: Any) -> int:
     shrinks the interval the run exists to observe -- and if it shrinks to
     nothing there is no recovery to find, only a collapse.
 
+    **``recover`` mode needs a longer run than that arithmetic gives, and did
+    not get one until 2026-09-09.** The run of that date
+    (experiment-20260909T031334Z.log) was 45 s with the fault at 15 s: both
+    independent instruments were still inside the outage when observation
+    ended, and the harness correctly reported the RTO as UNMEASURED. The
+    following run, at the length this function now returns, measured it at
+    **37.6 s** after the fault -- so the old window was short by roughly eight
+    seconds and no amount of instrument correctness could have recovered it.
+
+    The bound is ``inject_at_s + RECOVER_HEAL_DELAY_S + min_post_fault_s``, and
+    it is worth being precise about *why*, because the obvious reason is wrong.
+    Recovery here is **not** gated on the partition lifting. The fault isolates
+    one node; the other four keep quorum and elect a new primary, so writes
+    resume at failover -- measured at 64.1 s on
+    ``20260909T040914Z_p4-chaos-recover``, which is **7.4 s before** that run's
+    partition healed at 71.5 s. What the heal delay actually buys is a
+    conservative upper bound (failover has consistently been faster than it) and
+    a second thing the next phase depends on: the demoted node is back on the
+    network, and can therefore finish rewinding or re-cloning, in time for Phase
+    IV's switchover to have a candidate at all. ``min_post_fault_s`` then covers
+    the settling *after* whichever of the two happened last.
+
     Extended, never shortened: a profile asking for longer than the minimum
     keeps what it asked for.
     """
-    return max(chaos.duration_s, chaos.inject_at_s + chaos.min_post_fault_s)
+    settle_s = RECOVER_HEAL_DELAY_S if mode == "recover" else 0
+    return max(
+        chaos.duration_s,
+        chaos.inject_at_s + settle_s + chaos.min_post_fault_s,
+    )
 
 
 def restore_target(
@@ -630,9 +633,22 @@ def inject_fault(node: Node, mode: str, engine: str) -> dict[str, Any]:
     }
 
 
+#: How far short of the run's end an instrument's last observation may fall
+#: before its silence is treated as loss of coverage rather than as a quiet
+#: cluster, as a multiple of the observed inter-attempt cadence.
+#:
+#: A margin is needed because the last attempt legitimately precedes the end of
+#: the window by up to one cadence, and the writer is stopped between attempts.
+#: Ten cadences is far outside that and far inside the failure this catches: on
+#: 2026-09-09 the audit writer went quiet 25 s before the run ended, against a
+#: 0.39 s cadence -- roughly sixty-four cadences.
+COVERAGE_SLACK_CADENCES = 10.0
+
+
 def availability_rto(
     attempts: list[tuple[float, int, str]],
     fault_monotonic: float,
+    observation_end: float | None = None,
 ) -> dict[str, Any]:
     """Time from the fault until the database accepted a write again.
 
@@ -651,6 +667,14 @@ def availability_rto(
     ``audit_interval_s``. A figure from this function should not be quoted to a
     precision finer than the observed inter-attempt gap, which is returned
     alongside it so the claim can be qualified honestly.
+
+    ``observation_end`` is when the measurement window closed, on the same clock
+    as ``attempts``. It exists because **an instrument that stopped observing
+    must not be reported as an instrument that observed nothing wrong.** Given
+    it, this function checks that the attempt stream actually reaches the end of
+    the run and refuses to state an RTO when it does not; given ``None`` -- a
+    run recorded before the field existed -- the check is skipped rather than
+    guessed at, so old runs read exactly as they did before.
     """
     acked = [t for t, _, outcome in attempts if outcome == "ack"]
     before = [t for t in acked if t < fault_monotonic]
@@ -659,24 +683,145 @@ def availability_rto(
     gaps = [b - a for a, b in zip(acked, acked[1:])] if len(acked) > 1 else []
     typical_gap = sorted(gaps)[len(gaps) // 2] if gaps else None
 
+    # How much of the run this instrument actually watched.
+    #
+    # Judged on the last *acknowledgement*, not the last attempt, and that is
+    # the load-bearing choice. A writer blocked inside a single `cur.execute` on
+    # a black-holed socket has not stopped trying -- its next attempt eventually
+    # resolves, minutes later, as `ambiguous` -- so "did it make an attempt
+    # recently" answers yes across a window in which it observed nothing at all.
+    # On 2026-09-09 the last acknowledgement landed 3.7 s after the fault and
+    # the next attempt resolved 48 s later, after the run had already ended: one
+    # observation in fifty seconds, from an instrument nominally sampling at
+    # 2.5/s. Acknowledgements are what this function measures gaps between, so
+    # they are what its coverage has to be measured in.
+    last_attempt = max((t for t, _, _ in attempts), default=None)
+    last_acked = max(acked, default=None)
+    coverage: dict[str, Any] = {
+        "last_ack_offset_s": (
+            round(last_acked - fault_monotonic, 3) if last_acked is not None else None
+        ),
+        "last_attempt_offset_s": (
+            round(last_attempt - fault_monotonic, 3) if last_attempt is not None else None
+        ),
+        "observation_end_offset_s": (
+            round(observation_end - fault_monotonic, 3)
+            if observation_end is not None
+            else None
+        ),
+    }
+    coverage_gap = (
+        (observation_end - last_acked)
+        if (observation_end is not None and last_acked is not None)
+        else None
+    )
+    slack = (typical_gap or 0.0) * COVERAGE_SLACK_CADENCES
+    truncated = coverage_gap is not None and coverage_gap > slack
+    coverage["coverage_gap_s"] = round(coverage_gap, 3) if coverage_gap is not None else None
+    coverage["coverage_truncated"] = truncated if coverage_gap is not None else None
+
     if not after:
         return {
             "availability_rto_s": None,
             "detail": "no write was acknowledged after the fault",
             "writes_acknowledged_after_fault": 0,
             "resolution_s": round(typical_gap, 4) if typical_gap else None,
+            **coverage,
         }
 
     first_after = min(after)
     last_before = max(before) if before else None
+
+    # The interruption is the LARGEST gap in the acknowledged-write stream that
+    # closes at or after the fault -- not the interval to the first write that
+    # happened to be acknowledged after it. Those are the same number only when
+    # the fault takes effect the instant the injection command returns, and it
+    # frequently does not: `tailscale down` exits 0 while established flows keep
+    # working for seconds afterwards. During that tail the audit writer is still
+    # being served, so `first_after` is a few milliseconds and the function
+    # concludes the database never stopped accepting writes.
+    #
+    # Measured on runs/20260908T232245Z_p4-chaos-recover: this reported an
+    # availability RTO of 0.039 s across an interruption the independent RTO
+    # probe puts at 68.96 s, because a write was acknowledged 39 ms after the
+    # injection returned and the real outage did not open until ~3.5 s later.
+    # The same defect, in the same run, as the probe's own first-gap selection
+    # (see rto_probe.measure_rto) -- and it fails the same flattering way, so
+    # the two artefacts corroborated each other's understatement instead of
+    # catching it.
+    #
+    # The floor is characterised from gaps that closed *before* the fault, for
+    # the same reason it is there: using the whole run would let the outage
+    # raise the very threshold meant to detect it.
+    acked_gaps = [(a, b, b - a) for a, b in zip(acked, acked[1:])]
+    healthy = [gap for _, b, gap in acked_gaps if b < fault_monotonic]
+    floor = (max(healthy) + typical_gap) if (healthy and typical_gap) else None
+
+    outage = None
+    if floor is not None:
+        qualifying = [
+            (a, b, gap)
+            for a, b, gap in acked_gaps
+            if b >= fault_monotonic and gap > floor
+        ]
+        if qualifying:
+            outage = max(qualifying, key=lambda t: t[2])
+
+    if outage is not None:
+        gap_start, gap_end, gap_len = outage
+        rto = gap_end - fault_monotonic
+        write_gap = gap_len
+    elif truncated:
+        # No *closed* gap cleared the floor, but the acknowledgement stream
+        # stops well before the end of the run: whatever gap opened at the last
+        # acknowledgement never closed while anyone was watching. That is the
+        # audit writer's counterpart of `measure_rto`'s `truncated` case, and it
+        # is the branch that was missing on 2026-09-09. Falling through to the
+        # `else` below reported the interval to the next acknowledged write --
+        # 0.082 s -- for a fault the generator recorded as two consecutive ticks
+        # of zero throughput. The last acknowledgement came 3.7 s after the
+        # fault over a connection that was already black-holed, the writer then
+        # blocked on one INSERT for 48 s, and nothing observed the intervening
+        # 25 s of run at all.
+        #
+        # Whether the database stopped serving or the client stopped asking is
+        # not decidable from this stream, and the honest report says so rather
+        # than picking the flattering reading.
+        return {
+            "availability_rto_s": None,
+            "detail": (
+                "the last acknowledged write was "
+                f"{coverage['last_ack_offset_s']}s after the fault and none "
+                f"followed for the remaining {coverage['coverage_gap_s']}s of "
+                "the run, so the interruption never closed while it was being "
+                "observed; its length is unmeasured, not zero"
+            ),
+            "write_gap_s": None,
+            "writes_acknowledged_after_fault": len(after),
+            "resolution_s": round(typical_gap, 4) if typical_gap else None,
+            "detection_floor_s": round(floor, 4) if floor is not None else None,
+            "outage_observed": None,
+            **coverage,
+        }
+    else:
+        # No gap distinguishable from the healthy cadence, over a window that
+        # did reach the end of the run: the write stream was not observably
+        # interrupted, and the honest figure is the interval to the next
+        # acknowledged write.
+        rto = first_after - fault_monotonic
+        write_gap = (first_after - last_before) if last_before else None
+
     return {
-        "availability_rto_s": round(first_after - fault_monotonic, 3),
+        "availability_rto_s": round(rto, 3),
         # The observed outage in the write stream. Distinct from the RTO above:
         # the last pre-fault success may predate the fault by up to one cadence.
-        "write_gap_s": round(first_after - last_before, 3) if last_before else None,
+        "write_gap_s": round(write_gap, 3) if write_gap is not None else None,
         "writes_acknowledged_after_fault": len(after),
         # Anything below this is indistinguishable from no interruption at all.
         "resolution_s": round(typical_gap, 4) if typical_gap else None,
+        "detection_floor_s": round(floor, 4) if floor is not None else None,
+        "outage_observed": outage is not None,
+        **coverage,
     }
 
 
@@ -770,13 +915,33 @@ def run(
     chaos = profile.chaos
     topo = settings.topology
     gateway = CLIENT_NODE
+    report = preflight.PreflightReport()
     if engine == "postgresql":
-        # chaos.target names the intended primary for CockroachDB, where it is
-        # pinned by lease_preferences and checked below -- but nothing pins
-        # Patroni's leader, so the profile's static value cannot be trusted
-        # here. Resolve who actually holds the lease live instead.
+        # Put the primary back on the designated node *before* choosing the
+        # target, so that the fault lands on the same node CockroachDB's fault
+        # lands on. Patroni never fails back on its own, so after Phase III the
+        # primary is wherever that failover left it; without this repair Phase
+        # IV would fault a different node than Phase III did, and a different
+        # node than either CockroachDB phase did.
+        # The window is for the *candidate* to become eligible, not for the
+        # primary to drift back: after Phase III's partition the expected node
+        # has a diverged timeline and has to be rewound or re-cloned before
+        # Patroni will hand the leadership back to it. See the check's
+        # docstring.
+        placement = preflight.check_patroni_primary_placement(
+            report, topo, settle_timeout_s=chaos.leaseholder_settle_s
+        )
+        # Still resolved live rather than assumed. The check above is what makes
+        # the answer predictable; this is what makes it *true*. If the
+        # switchover did not take, the check has already failed the report and
+        # raise_if_failed() below stops the run -- this never silently faults
+        # the wrong node.
         fault_target = resolve_patroni_primary(topo)
-        if fault_target.name != chaos.target:
+        # Only worth saying when the run is going to proceed. Printed
+        # unconditionally it announced "faulting the actual primary" on the line
+        # immediately before the placement failure aborted the sweep
+        # (experiment-20260909T011615Z.log), which reads as a contradiction.
+        if placement.passed and fault_target.name != chaos.target:
             print(
                 f"  note: profile names {chaos.target!r} as chaos.target, but "
                 f"{fault_target.name!r} is the Patroni primary right now; "
@@ -792,7 +957,6 @@ def run(
             "the node under test"
         )
 
-    report = preflight.PreflightReport()
     preflight.check_clock_offset(report, [gateway, fault_target])
     check_fault_authorisation(report, fault_target, mode, engine)
     if chaos.probe_enabled:
@@ -816,6 +980,11 @@ def run(
             settle_timeout_s=chaos.leaseholder_settle_s,
         )
     else:
+        # The PostgreSQL counterpart, check_patroni_primary_placement, already
+        # ran above -- it has to, because its repair decides which node becomes
+        # the fault target. This records only what that target resolved to, and
+        # deliberately no longer asserts a hardcoded True: the assertion is the
+        # placement check's, and it can fail.
         report.add(
             "patroni_primary_resolved",
             True,
@@ -934,12 +1103,16 @@ def run(
         f"dispatch into {audit_database}.{chaos.probe_table}"
     )
 
-    run_duration_s = generator_duration_s(chaos)
+    run_duration_s = generator_duration_s(chaos, mode)
     if run_duration_s > chaos.duration_s:
+        after = (
+            f"the partition heals at {chaos.inject_at_s + RECOVER_HEAL_DELAY_S}s"
+            if mode == "recover"
+            else f"a fault at {chaos.inject_at_s}s"
+        )
         manifest.note(
             f"generator run extended from {chaos.duration_s}s to {run_duration_s}s "
-            f"to keep {chaos.min_post_fault_s}s of observation after a fault at "
-            f"{chaos.inject_at_s}s"
+            f"to keep {chaos.min_post_fault_s}s of observation after {after}"
         )
 
     generator = (
@@ -1095,51 +1268,73 @@ def run(
         else None
     )
 
-    with _optional(probe):
-        with AuditWriter(audit_dsn, chaos.audit_interval_s) as audit:
-            # The same instant `t_zero` was taken at, not a fresh one: this is
-            # the origin the probe agent's offsets were rebased onto, and a
-            # second, later stamp here would silently shift every figure drawn
-            # against it.
-            events["t_start_utc"] = t_zero_utc
-            manifest.clock_epoch_utc = t_zero_utc
-            timer_thread = threading.Thread(target=timer, args=(t_zero,), daemon=True)
-            timer_thread.start()
+    # All 5 cluster nodes plus the client node the generator/audit/probe run
+    # from -- node_exporter is OS-level, polled the same way regardless of
+    # which node ends up being the fault target. Started alongside the probe
+    # and audit writer, on the same t_zero, so pre-fault baseline utilisation
+    # is captured too.
+    hw_sampler = (
+        HardwareMetricsSampler(
+            list(topo.nodes) + [gateway],
+            t_zero,
+            interval_s=profile.hardware_metrics.sample_interval_s,
+        )
+        if profile.hardware_metrics.enabled
+        else None
+    )
 
-            with open(raw_path, "w") as tee:
-                with ssh.StreamingRemote(gateway, ssh.force_tty(generator), tee=tee) as stream:
-                    def feed() -> Iterator[tuple[float, Sample]]:
-                        for line in stream:
-                            sample = parser.feed(line)
-                            if sample is not None:
-                                samples.append(sample)
-                                yield time.monotonic(), sample
+    with _optional(hw_sampler):
+        with _optional(probe):
+            with AuditWriter(audit_dsn, chaos.audit_interval_s) as audit:
+                # The same instant `t_zero` was taken at, not a fresh one: this is
+                # the origin the probe agent's offsets were rebased onto, and a
+                # second, later stamp here would silently shift every figure drawn
+                # against it.
+                events["t_start_utc"] = t_zero_utc
+                manifest.clock_epoch_utc = t_zero_utc
+                timer_thread = threading.Thread(target=timer, args=(t_zero,), daemon=True)
+                timer_thread.start()
 
-                    for arrived, tick in group_timed_ticks(feed()):
-                        offset = arrived - t_zero
-                        if not first_sample_seen.is_set():
-                            # Steady state has begun; the injection timer starts
-                            # counting from here, not from the harness's epoch.
-                            steady_state_at[0] = arrived
-                            first_sample_seen.set()
-                        observed_at[tick.elapsed_s] = offset
-                        series.append((offset, tick.total_tps))
-                        if tick.errors_cum > 0 and first_error_at is None:
-                            first_error_at = offset
-                            events["t_first_error_offset_s"] = round(offset, 3)
-                        if int(tick.elapsed_s) % 15 == 0:
-                            print(
-                                f"  [{offset:6.1f}s] tps={tick.total_tps:8.1f} "
-                                f"errors={tick.errors_cum}",
-                                flush=True,
-                            )
+                with open(raw_path, "w") as tee:
+                    with ssh.StreamingRemote(gateway, ssh.force_tty(generator), tee=tee) as stream:
+                        def feed() -> Iterator[tuple[float, Sample]]:
+                            for line in stream:
+                                sample = parser.feed(line)
+                                if sample is not None:
+                                    samples.append(sample)
+                                    yield time.monotonic(), sample
 
-            stop_timer.set()
-            # Also release the timer if it is still blocked waiting for a first
-            # sample that is never going to arrive, so the join below cannot
-            # hang for the whole setup budget.
-            first_sample_seen.set()
-            timer_thread.join(timeout=5)
+                        for arrived, tick in group_timed_ticks(feed()):
+                            offset = arrived - t_zero
+                            if not first_sample_seen.is_set():
+                                # Steady state has begun; the injection timer starts
+                                # counting from here, not from the harness's epoch.
+                                steady_state_at[0] = arrived
+                                first_sample_seen.set()
+                            observed_at[tick.elapsed_s] = offset
+                            series.append((offset, tick.total_tps))
+                            if tick.errors_cum > 0 and first_error_at is None:
+                                first_error_at = offset
+                                events["t_first_error_offset_s"] = round(offset, 3)
+                            if int(tick.elapsed_s) % 15 == 0:
+                                print(
+                                    f"  [{offset:6.1f}s] tps={tick.total_tps:8.1f} "
+                                    f"errors={tick.errors_cum}",
+                                    flush=True,
+                                )
+
+                stop_timer.set()
+                # Also release the timer if it is still blocked waiting for a first
+                # sample that is never going to arrive, so the join below cannot
+                # hang for the whole setup budget.
+                first_sample_seen.set()
+                timer_thread.join(timeout=5)
+
+    if hw_sampler is not None:
+        hw_sampler.write(run_dir.hardware_metrics_csv)
+        failed = {n: c for n, c in hw_sampler.scrape_failures.items() if c}
+        if failed:
+            manifest.note(f"hardware metrics: scrape failures {failed}")
 
     audit_result = audit.collect(audit_dsn)
 
@@ -1153,7 +1348,11 @@ def run(
     )
 
     avail = (
-        availability_rto(audit.attempts, injected["at_monotonic"])
+        availability_rto(
+            audit.attempts,
+            injected["at_monotonic"],
+            observation_end=audit.stopped_at or audit.last_attempt_started,
+        )
         if injected.get("at_monotonic") is not None
         else {"availability_rto_s": None, "detail": "fault was never injected"}
     )
@@ -1181,8 +1380,14 @@ def run(
         probe_summary["error"] = probe.error
         probe_summary["log"] = run_dir.probe_log.name
         probe_summary["attempts_csv"] = run_dir.probe_csv.name
+        # The probe's offsets are on the run's clock (rebased by the epoch
+        # skew), so the audit writer's stop instant converts directly and is the
+        # same "when did the window close" both instruments are judged against.
+        probe_observation_end = (
+            (audit.stopped_at - t_zero) if audit.stopped_at is not None else None
+        )
         probe_summary["rto"] = (
-            probe.rto(injected["at_offset_s"])
+            probe.rto(injected["at_offset_s"], probe_observation_end)
             if injected.get("at_offset_s") is not None
             else {"measurable": False, "detail": "fault was never injected"}
         )

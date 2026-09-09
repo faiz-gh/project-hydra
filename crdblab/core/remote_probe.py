@@ -396,5 +396,7 @@ class RemoteRtoProbe:
             summary["agent_stderr"] = self._stderr[-10:]
         return summary
 
-    def rto(self, fault_offset_s: float) -> dict[str, Any]:
-        return measure_rto(self.attempts, fault_offset_s)
+    def rto(
+        self, fault_offset_s: float, observation_end_s: float | None = None
+    ) -> dict[str, Any]:
+        return measure_rto(self.attempts, fault_offset_s, observation_end_s)

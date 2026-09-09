@@ -280,6 +280,17 @@ def _cmd_chaos(args: argparse.Namespace) -> int:
     )
     if avail.get("write_gap_s") is not None:
         print(f"     write outage   {avail['write_gap_s']:.2f} s between acknowledged writes")
+    # Printed adjacent to the figure it disqualifies, not in a footer. An
+    # instrument that stopped observing reports the same "nothing happened" as
+    # one that watched a healthy cluster, and on 2026-09-09 that difference was
+    # invisible in the terminal, in events.json and in the figures alike.
+    if avail.get("coverage_truncated"):
+        print(
+            f"     ⚠ coverage     the audit writer stopped observing "
+            f"{avail['coverage_gap_s']:.1f} s before the run ended; "
+            "the outage is UNMEASURED, not absent",
+            file=sys.stderr,
+        )
 
     # The probe measures the same thing as `RTO availability` above, from a
     # separate client at a finer resolution. Both are printed, and printed
@@ -315,6 +326,14 @@ def _cmd_chaos(args: argparse.Namespace) -> int:
                     f"after the fault vs {attribution.get('expected_post_fault_exceedances')} "
                     "expected from the pre-fault rate -- not a recovery time)"
                 )
+        if p_rto.get("coverage_truncated"):
+            print(
+                f"     ⚠ coverage     the probe stopped observing "
+                f"{p_rto['coverage_gap_s']:.1f} s before the run ended "
+                f"(last attempt at {p_rto.get('last_observation_offset_s')} s); "
+                "the outage is UNMEASURED, not absent",
+                file=sys.stderr,
+            )
         if p_rto.get("detection_lag_s") is not None:
             print(
                 f"     detection      {p_rto['detection_lag_s'] * 1000:.0f} ms from the "
@@ -516,6 +535,35 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
                 "  Every figure below therefore describes an undisturbed cluster "
                 "and is not a resilience result.\n"
                 "  See events.json -> injected.detail, and the manifest note."
+            )
+        # The fault landing and the instruments watching are two separate
+        # preconditions for an RTO, and until 2026-09-09 only the first was
+        # checked. A run can have a fault that landed perfectly and still
+        # produce no RTO, because the clients measuring it stopped observing --
+        # and that failure reads in every artefact as an excellent result.
+        stalled = [
+            (name, section)
+            for name, section in (
+                ("the audit writer", summary.get("availability_rto") or {}),
+                ("the RTO probe", summary.get("probe_rto") or {}),
+            )
+            if section.get("coverage_truncated")
+        ]
+        if stalled:
+            lines = "\n".join(
+                f"  {name} stopped observing {section.get('coverage_gap_s')} s "
+                f"before the run ended."
+                for name, section in stalled
+            )
+            print(
+                "\n*** AN INSTRUMENT STOPPED OBSERVING ***\n"
+                f"{lines}\n"
+                "  Any outage after that point is UNMEASURED, not absent, and no "
+                "RTO below is a resilience result.\n"
+                "  The usual cause is a client blocked on a connection the "
+                "partition black-holed; check the probe's outcome counts in\n"
+                "  events.json -> probe.outcomes. All 'ok' with no timeouts or "
+                "conn_errors is the signature."
             )
         clock = summary["clock_alignment"]
         print(f"\nclock alignment: {clock['method']}")

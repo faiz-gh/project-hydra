@@ -61,6 +61,7 @@ resource "google_compute_instance" "this" {
     initialize_params {
       image = data.google_compute_image.ubuntu.self_link
       type  = "pd-ssd" # Upgraded to SSD
+      size  = 50
     }
   }
 

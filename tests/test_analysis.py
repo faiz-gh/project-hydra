@@ -1329,6 +1329,56 @@ def test_a_fault_on_the_leaseholder_is_reported_as_a_range_not_a_false_point(tmp
     assert "displaces it" in geom["detail"]
 
 
+def test_the_consequence_text_is_engine_aware_about_the_read_path(tmp_path):
+    """The claim "the read share is unaffected" is true for CockroachDB and
+    false for PostgreSQL, and it was stated engine-blind.
+
+    On the PostgreSQL arm the generator reaches the cluster through HAProxy,
+    which follows the primary, so a promotion into another region moves every
+    operation and not just the write path. Measured on
+    20260909T040914Z_p4-chaos-recover after Patroni promoted azure-2
+    (eastasia): read p50 0.92 ms -> 209.7 ms, against a write-floor change of
+    2.1x. Quoting the CockroachDB sentence there explains a 228x effect with a
+    2.1x cause -- and it is quoted directly under a resilience figure.
+    """
+    network_csv = _write_network_csv(tmp_path, _TESTBED_RTTS)
+    events = dict(_EVENTS, target="gcp-1")
+
+    def _geom(name, manifest_extra):
+        run = load_run(
+            _write_run(
+                tmp_path, name,
+                _rows([(10, 800, 1.0, 200, 40.0)]),
+                phase="p4_chaos", events=events, manifest_extra=manifest_extra,
+            )
+        )
+        return resilience.quorum_geometry(run, network_csv, _FIVE_NODES)
+
+    pg = _geom("chaos_pg_consequence", {"engine": "postgresql"})
+    assert "read" in pg["consequence"].lower()
+    assert "client-to-primary distance" in pg["consequence"]
+    assert "unaffected" not in pg["consequence"], (
+        "the PostgreSQL read path is the opposite of unaffected when the "
+        "pinned primary is the fault target"
+    )
+    # Vocabulary: a Patroni cluster has no leaseholder and no CockroachDB
+    # allocator, and this text is printed verbatim under the figure.
+    assert "leaseholder" not in pg["detail"]
+    assert "CockroachDB" not in pg["detail"]
+    assert "primary" in pg["detail"]
+    assert "Patroni promotes" in pg["detail"]
+
+    crdb = _geom("chaos_crdb_consequence", {"engine": "cockroachdb"})
+    assert "unaffected by which candidate takes the lease" in crdb["consequence"]
+    assert "leaseholder" in crdb["detail"]
+
+    # The geometry itself is engine-neutral and must NOT have moved: leader
+    # plus the two fastest surviving acks is 3-of-5 Raft quorum and Patroni's
+    # `ANY 2 (...)` alike.
+    assert pg["surviving_quorum_floor_range_ms"] == crdb["surviving_quorum_floor_range_ms"]
+    assert pg["candidate_floors_ms"] == crdb["candidate_floors_ms"]
+
+
 def test_the_displaced_case_evaluates_every_survivor_as_a_candidate(tmp_path):
     network_csv = _write_network_csv(tmp_path, _TESTBED_RTTS)
     events = dict(_EVENTS, target="gcp-1")

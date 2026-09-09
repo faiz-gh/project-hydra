@@ -54,7 +54,13 @@ workload:
   # twenty times the throughput at a twenty-fifth of the latency
   # (D8).
   seed: 42
-  insert_count: 125000
+  # Raised 30x with profiles/thesis.yaml on 2026-09-09 and kept equal to it on
+  # purpose: these two profiles are meant to differ in the concurrency ladder,
+  # not in the data. A different working set here would make an extended sweep
+  # incomparable with the thesis sweep it is supposed to extend. ~6.15 GB, which
+  # exceeds node RAM -- see thesis.yaml for the sizing rationale and for the
+  # disk capacity, disk IOPS and load-time preconditions it now carries.
+  insert_count: 3750000
   cycle_length: 1000000
   block_bytes: 256
 
@@ -64,6 +70,38 @@ chaos:
   concurrency: 100
   target: gcp-1
   recovery_threshold: 0.80
+
+  # Raised from the 60s default so post_fault_steady_state's CV<0.25 test
+  # (crdblab/analysis/resilience.py) can definitively classify the tail as
+  # `degraded_steady_state` or `unsettled_within_run`, rather than resolving
+  # neither. At the 60s default the two most recent thesis-scale PostgreSQL
+  # runs (20260909T171455Z_p4-chaos-recover, 20260909T172425Z_p4-chaos-dead)
+  # already had 104-105 post-settle ticks and still reported cv=0.86-0.87,
+  # unsettled_within_run -- NOT a shortage of ticks (display_every_s=1, so
+  # ticks land every ~1s, not every ~15s), but a window that always starts at
+  # fault+15s and therefore always includes the zero-throughput/reconnect-storm
+  # transition alongside whatever comes after. Sweeping the recover run's own
+  # window start showed it actually plateaus (cv=0.03-0.04) by ~150-160s wall
+  # (~73-80s after the fault), but the fixed window's CV doesn't cross 0.25
+  # until roughly 800-850 total post-settle ticks are in it -- deterministically
+  # confirmed by repeating that run's own settled tail. 900s clears that with
+  # margin for both modes. The dead run was still trending with no inflection
+  # at its last recorded sample, so this value is inferred from recover's
+  # dynamics, not measured for dead -- it may still report unsettled_within_run,
+  # which is itself the correct, honest answer if so.
+  min_post_fault_s: 900
+
+  # How long pre-flight may wait for the demoted primary to become a switchover
+  # candidate again before refusing to run. Raised from the 300 s default for
+  # the thesis-scale working set: after Phase III partitions the primary its
+  # timeline diverges, and if pg_rewind cannot fix it Patroni re-clones the node
+  # from the leader -- ~6.15 GB here against ~205 MB at smoke scale, and the
+  # leader it clones from may be in eastasia. Measured 2026-09-09 at smoke
+  # scale, that whole cycle took ~57 s; 30x the data does not fit in 300 s at
+  # any plausible WAN rate. The wait exits the moment the candidate reports
+  # streaming, so a healthy cluster pays nothing for the larger ceiling, and a
+  # node that is genuinely stuck still fails the check rather than hanging.
+  leaseholder_settle_s: 900
   recovery_hold_s: 10
   audit_interval_s: 0.02
 

@@ -181,6 +181,46 @@ PROBE_COLUMNS: tuple[str, ...] = (
 PROBE_OUTCOMES: tuple[str, ...] = ("ok", "timeout", "conn_error", "refused")
 
 
+#: Schema for per-node hardware utilisation, polled directly from each node's
+#: node_exporter (``:9100/metrics``) during Phase II-IV. One row per (node,
+#: poll) -- long, like :data:`COLUMNS`, and for the same reason: a wide row
+#: with one column per node would force the analysis layer to know the node
+#: list in advance, and would break the moment the topology changes shape.
+#:
+#: Every rate column is paired with the raw cumulative counter(s) it was
+#: derived from -- mirroring ``tps``/``tps_cum`` in :data:`COLUMNS` -- because
+#: the derivation needs two scrapes paired at collection time, which no other
+#: column here captures raw; a reader who doubts a rate can re-derive it
+#: instead of trusting it blindly. The six rate columns are ``""`` (not ``0``,
+#: not ``nan``) on a node's first observed poll, since there is no prior
+#: scrape to difference against -- distinguishing "not yet measured" from
+#: "measured as zero" is exactly the discipline ``gateway_rss_bytes`` above
+#: exists to enforce, on a project that has already lost an entire
+#: dissertation's worth of runs to that distinction going unmade once (D5).
+HARDWARE_METRICS_COLUMNS: tuple[str, ...] = (
+    "ts_utc",
+    "wall_offset_s",
+    "node",
+    "host",
+    "cpu_busy_pct",
+    "cpu_seconds_idle_cum",
+    "cpu_seconds_total_cum",
+    "mem_total_bytes",
+    "mem_available_bytes",
+    "disk_read_bytes_per_s",
+    "disk_write_bytes_per_s",
+    "disk_busy_pct",
+    "disk_read_bytes_cum",
+    "disk_write_bytes_cum",
+    "disk_io_time_seconds_cum",
+    "net_rx_bytes_per_s",
+    "net_tx_bytes_per_s",
+    "net_rx_bytes_cum",
+    "net_tx_bytes_cum",
+    "load1",
+)
+
+
 def utcnow() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -311,6 +351,16 @@ class RunDirectory:
     def preflight_json(self) -> Path:
         """Pre-flight assertions and their observed values for this run."""
         return self.path / "preflight.json"
+
+    @property
+    def hardware_metrics_csv(self) -> Path:
+        """Per-node CPU/memory/disk/network utilisation, one row per (node, poll).
+
+        Written under :data:`HARDWARE_METRICS_COLUMNS`. Absent from runs
+        recorded before this existed, and from any run whose profile disabled
+        collection (``profile.hardware_metrics.enabled``).
+        """
+        return self.path / "hardware_metrics.csv"
 
     def write_preflight(self, report: dict[str, Any]) -> None:
         self.preflight_json.write_text(json.dumps(report, indent=2))

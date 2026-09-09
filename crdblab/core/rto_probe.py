@@ -641,8 +641,10 @@ class RtoProbe:
             workers=self.workers,
         )
 
-    def rto(self, fault_offset_s: float) -> dict[str, Any]:
-        return measure_rto(self.attempts, fault_offset_s)
+    def rto(
+        self, fault_offset_s: float, observation_end_s: float | None = None
+    ) -> dict[str, Any]:
+        return measure_rto(self.attempts, fault_offset_s, observation_end_s)
 
 
 # --- analysis, as free functions so the same code reads a recorded CSV -------
@@ -883,8 +885,17 @@ def tail_attribution(
     }
 
 
+#: How far short of the run's end the probe's last observation may fall before
+#: its silence counts as loss of coverage, as a multiple of the observed
+#: sampling period. See :data:`crdblab.phases.p4_chaos.COVERAGE_SLACK_CADENCES`
+#: -- the same judgement, applied to the other instrument.
+COVERAGE_SLACK_PERIODS = 20.0
+
+
 def measure_rto(
-    attempts: list[ProbeAttempt], fault_offset_s: float
+    attempts: list[ProbeAttempt],
+    fault_offset_s: float,
+    observation_end_s: float | None = None,
 ) -> dict[str, Any]:
     """How long the database could not serve a write, and when that began.
 
@@ -929,6 +940,22 @@ def measure_rto(
     and ``truncated``, never the time remaining: the probe cannot see a recovery
     that happened after it stopped, and reporting the truncation as a measurement
     would put a floor into the figure that is an artefact of the run's duration.
+
+    ``observation_end_s`` is when the run ended, on the probe's own offset
+    clock, and it guards a *different* hole from ``truncated``. ``truncated``
+    catches a gap that is still open when the probe stops -- there is a missing
+    closing observation, so the trouble is visible in the series. This catches
+    the case where nothing is missing from the series because the probe stopped
+    producing one: every attempt it made succeeded, and it simply made no more.
+    On 2026-09-09 that is exactly what happened. The probe's workers blocked on
+    connections the partition had black-holed, and because a server-side
+    ``statement_timeout`` cannot arrive when packets cannot, they never returned
+    and never errored. The recorded artefact was 515 attempts, 515 ``ok``, zero
+    failures of any kind, spanning 20.3 s of a 45 s run and ending 3.6 s after
+    the fault -- and this function, finding no qualifying gap in it, reported
+    "no interruption in served writes was detectable" for an outage of roughly
+    70 s. ``None`` skips the check, so runs recorded before the field existed
+    read exactly as they did before.
     """
     served = sorted(served_attempts(attempts), key=lambda a: a.complete_offset_s)
     gaps = [
@@ -965,12 +992,32 @@ def measure_rto(
         else None
     )
 
+    # How much of the run the probe actually watched. Judged on the last
+    # attempt of any outcome, not the last success, so a probe that was still
+    # failing loudly at the end counts as having covered the run.
+    last_offset = max((a.complete_offset_s for a in attempts), default=None)
+    coverage_gap = (
+        observation_end_s - last_offset
+        if (observation_end_s is not None and last_offset is not None)
+        else None
+    )
+    coverage_truncated = (
+        coverage_gap is not None
+        and coverage_gap > (resolution or 0.0) * COVERAGE_SLACK_PERIODS
+    )
+
     base: dict[str, Any] = {
         "resolution_s": round(resolution, 6) if resolution else None,
         "detection_lag_s": detection_lag,
         "next_write_after_fault_s": next_after,
         "served_after_fault": len(after_fault),
         "served_before_fault": len(served) - len(after_fault),
+        "last_observation_offset_s": (
+            round(last_offset, 6) if last_offset is not None else None
+        ),
+        "observation_end_offset_s": observation_end_s,
+        "coverage_gap_s": round(coverage_gap, 3) if coverage_gap is not None else None,
+        "coverage_truncated": coverage_truncated if coverage_gap is not None else None,
     }
 
     if len(served) < 2:
@@ -1019,14 +1066,42 @@ def measure_rto(
     base["noise_floor_s"] = round(floor, 6)
     base["noise_floor_source"] = floor_source
 
-    outage = next(
-        (
-            (a, b, gap)
-            for a, b, gap in gaps
-            if b.complete_offset_s >= fault_offset_s and gap > floor
-        ),
-        None,
-    )
+    # The outage is the LARGEST qualifying gap after the fault, not the first
+    # one. Taking the first was a defect that reported a 72-second interruption
+    # as 348 milliseconds -- a 208x understatement, and understating in the
+    # flattering direction, which is the exact class of failure this harness
+    # exists to prevent.
+    #
+    # It fails because the noise floor is calibrated on pre-fault gaps only,
+    # while the gaps that follow a fault are drawn from a *worse* distribution:
+    # the cluster is failing over, the client is reconnecting, and the pool is
+    # completing in bursts. The floor is therefore routinely exceeded by
+    # post-fault jitter that is not an outage at all. Compounding it, a fault
+    # need not take effect when the injection command returns -- `tailscale
+    # down` exits 0 while established flows keep working for seconds -- so the
+    # interval right after the fault is often still healthy, and its jitter is
+    # what a first-match latches onto.
+    #
+    # Measured on runs/20260908T232245Z_p4-chaos-recover (Phase III, PostgreSQL,
+    # fault at 72.076s): nine post-fault gaps cleared the 0.148s floor. The
+    # first was 0.152s -- four milliseconds over the floor -- opening 0.196s
+    # after the fault, while writes were still being served normally. The real
+    # interruption was the second: 68.963s, opening 3.530s after the fault, with
+    # service restored 72.49s after it. Six of the remaining seven were between
+    # 0.156s and 0.307s, i.e. ordinary noise that would each have been picked
+    # ahead of the true outage had they landed earlier.
+    #
+    # Maximum is the right estimator because RTO is a claim about the worst
+    # interruption the fault caused, and every gap considered here has already
+    # passed the floor and the `heavier_after_fault` attribution test below.
+    # Where several genuine outages occur, the largest is the defensible figure
+    # to quote and the rest are disclosed in `qualifying_gaps`.
+    qualifying = [
+        (a, b, gap)
+        for a, b, gap in gaps
+        if b.complete_offset_s >= fault_offset_s and gap > floor
+    ]
+    outage = max(qualifying, key=lambda t: t[2]) if qualifying else None
 
     # A gap that is still open when the probe stops does not appear in `gaps` at
     # all -- there is no closing observation -- so it is looked for separately.
@@ -1050,6 +1125,37 @@ def measure_rto(
                 f"into the run and had not resumed {open_gap:.3f}s later when the "
                 "probe stopped. The recovery, if any, happened outside the "
                 "observation window and this is not a measurement of it"
+            ),
+        }
+
+    if outage is None and coverage_truncated:
+        # Kept ahead of the "nothing detectable" branch below, and distinct from
+        # `below_resolution`: that one says the outage was shorter than the
+        # instrument can resolve, which is a result. This one says the
+        # instrument was not there, which is not. Conflating them is what let a
+        # ~70 s outage be reported as undetectable -- see the docstring.
+        return {
+            **base,
+            "rto_s": None,
+            "measurable": False,
+            "outage": None,
+            "truncated": False,
+            "below_resolution": False,
+            "quotable_value_s": None,
+            "claim": (
+                f"the probe stopped observing {last_offset:.1f}s into the run, "
+                f"{coverage_gap:.1f}s before it ended; any outage after that "
+                "point is UNMEASURED, not absent"
+            ),
+            "detail": (
+                "no gap between served writes cleared the detection floor, but "
+                "the probe's own observations stop well short of the end of the "
+                "run, so that says nothing about the cluster. The usual cause is "
+                "workers blocked on connections a partition black-holed: a "
+                "server-side statement_timeout cannot arrive when packets "
+                "cannot, so the attempts neither complete nor fail and the "
+                "series simply ends. Check the outcome counts -- all `ok` with "
+                "no timeouts or conn_errors is the signature"
             ),
         }
 
@@ -1086,6 +1192,14 @@ def measure_rto(
         }
 
     before, after, duration = outage
+    # Every post-fault gap that cleared the floor, longest first, so a reader can
+    # see what the maximum was chosen against rather than taking it on trust. A
+    # long list of sub-second entries beside one long one is the signature of a
+    # floor that is barely separating signal from noise.
+    base["qualifying_gaps_s"] = sorted(
+        (round(g, 6) for _, _, g in qualifying), reverse=True
+    )[:10]
+    base["qualifying_gap_count"] = len(qualifying)
     rto = after.complete_offset_s - fault_offset_s
     # The write that closes the gap can be dispatched before the gap even
     # opens -- workers run concurrently, so `after` need not wait for `before`

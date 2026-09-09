@@ -23,9 +23,45 @@ workload:
   randomise_tier_order: true   # controls for thermal and background drift across a sweep
   cooldown_s: 15           # allows range rebalancing to quiesce between tiers
 
-  # Working set: 125k ycsb rows ~= 205 MB, sized to stay resident in page cache
-  # on a 3 GB node so throughput remains CPU- and network-bound and failover is
-  # not confounded by storage I/O.
+  # Working set: 3.75M ycsb rows ~= 6.15 GB at the ~1.64 kB/row this schema
+  # measures (125k rows was ~205 MB).
+  #
+  # Raised 30x from 125k on 2026-09-09, in two steps, and the original sizing
+  # rationale is deliberately reversed. It read "sized to stay resident in page
+  # cache on a 3 GB node so throughput remains CPU- and network-bound and
+  # failover is not confounded by storage I/O". At 205 MB both engines served
+  # the whole dataset from memory, so the sweep measured CPU cost per operation
+  # and never touched the storage engines -- which is a large part of what
+  # separates CockroachDB's LSM from PostgreSQL's heap, and was invisible.
+  #
+  # 6.15 GB against ~4 GB nodes (measured MemTotal 4,007,004 kB) is ~1.5x RAM,
+  # so the working set no longer fits in memory at all, let alone in either
+  # engine's declared cache (shared_buffers and --cache are both a quarter of
+  # RAM, ~978 MB). This is a genuinely disk-bound operating point: reads miss,
+  # and storage becomes a first-order variable rather than an absent one.
+  #
+  # THREE THINGS THIS BREAKS IF NOT CHECKED FIRST.
+  #
+  # 1. Disk capacity. Every node holds a full copy: ~6.2 GB of table and index
+  #    for PostgreSQL plus WAL, and for CockroachDB a full replica plus LSM
+  #    compaction headroom that transiently runs 1.5-2x. Neither the GCP
+  #    boot_disk nor the Azure os_disk sets an explicit size, so both inherit
+  #    the image default -- 10 GB on GCP, which this will fill.
+  # 2. Disk IOPS, which is now the measurement. GCP pd-ssd IOPS scale with
+  #    capacity (~30/GB, so a default 10 GB volume is ~300 IOPS) and Azure
+  #    Premium_LRS is tiered by size (30 GB = P4 = 120 IOPS). Undersized, the
+  #    figure produced is a cloud storage tier, not a database. Size the disks
+  #    explicitly and record what they are.
+  # 3. Load time. The PostgreSQL load runs through the generator at
+  #    LOAD_CONCURRENCY=64 against a ~70 ms synchronous-replication commit, so
+  #    ~900 rows/s and falling as the index outgrows cache: budget 70-110
+  #    minutes, against ~2 minutes at 125k. Raising LOAD_CONCURRENCY is the
+  #    mitigation -- the load is latency-bound, not CPU-bound -- but that path
+  #    has failed three times historically, so change it deliberately.
+  #
+  # Every previously recorded run, on both engines, was taken at 125k rows and
+  # is NOT comparable against this setting. The comparability gate will not
+  # catch it: insert_count lives in the profile, not in the server config.
   #
   # seed MUST be identical when loading the table and when running against it.
   # The generator picks a fresh seed per invocation by default, which decouples
@@ -34,7 +70,7 @@ workload:
   # so the broken configuration reads as an excellent result (D8). Verified:
   # matching the seed moves the row-match rate 0.0000 -> 1.0000.
   seed: 42
-  insert_count: 125000
+  insert_count: 3750000
   cycle_length: 1000000     # kv only
   block_bytes: 256
 
@@ -44,6 +80,29 @@ chaos:
   concurrency: 100
   target: gcp-1
   recovery_threshold: 0.80 # single definition, shared by runner and evaluator
+
+  # Raised from the 60s default for the same reason as thesis-extended.yaml's
+  # (900s) -- see that file's comment for the full derivation: replaying real
+  # thesis-scale PostgreSQL chaos runs against resilience.py's CV<0.25
+  # settling test showed the window needs several hundred additional
+  # post-fault ticks before it can tell "still trending" from "genuinely
+  # plateaued low", not the ~10-15 the tick spacing alone would suggest.
+  # 450s -- half of thesis-extended's 900s -- deliberately by request, since
+  # this is the canonical cross-engine comparability profile and its overall
+  # run budget matters more here than in the extended variant.
+  min_post_fault_s: 450
+
+  # How long pre-flight may wait for the demoted primary to become a switchover
+  # candidate again before refusing to run. Raised from the 300 s default for
+  # the thesis-scale working set: after Phase III partitions the primary its
+  # timeline diverges, and if pg_rewind cannot fix it Patroni re-clones the node
+  # from the leader -- ~6.15 GB here against ~205 MB at smoke scale, and the
+  # leader it clones from may be in eastasia. Measured 2026-09-09 at smoke
+  # scale, that whole cycle took ~57 s; 30x the data does not fit in 300 s at
+  # any plausible WAN rate. The wait exits the moment the candidate reports
+  # streaming, so a healthy cluster pays nothing for the larger ceiling, and a
+  # node that is genuinely stuck still fails the check rather than hanging.
+  leaseholder_settle_s: 900
   recovery_hold_s: 10
   audit_interval_s: 0.02
 

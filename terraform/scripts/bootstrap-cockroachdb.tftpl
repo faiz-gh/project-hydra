@@ -169,3 +169,30 @@ if [ "${hostname}" == "$PRIMARY_NODE" ]; then
 else
     echo "I am a secondary node. Skipping initialization; waiting for $PRIMARY_NODE to orchestrate."
 fi
+
+# ==========================================
+# 7. node_exporter -- hardware metrics polled directly by the harness
+# ==========================================
+# Not a standalone Prometheus server and nothing else on this testbed scrapes
+# it -- crdblab/core/hardware_metrics.py polls :9100/metrics directly over
+# the Tailscale mesh, the same way it already polls Patroni's :8008 REST API.
+# No firewall change needed for the same reason neither of those needed one:
+# every cross-node service here rides the tailnet, never the cloud provider's
+# public/VPC network.
+apt-get install -yq prometheus-node-exporter
+systemctl enable prometheus-node-exporter
+systemctl restart prometheus-node-exporter
+
+NODE_EXPORTER_UP=0
+for _ in $(seq 1 12); do
+    if ss -lnt 2>/dev/null | grep -q ':9100 '; then
+        NODE_EXPORTER_UP=1
+        break
+    fi
+    sleep 5
+done
+if [ "$NODE_EXPORTER_UP" != "1" ]; then
+    echo "FAILED: node_exporter is not listening on :9100 after 60s." >&2
+    systemctl status prometheus-node-exporter --no-pager >&2 || true
+    exit 1
+fi

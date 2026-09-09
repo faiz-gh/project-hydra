@@ -12,7 +12,7 @@
 # so a run that limps past a failed check is worse than no run at all.
 #
 #   ./run-experiment.sh                     # full sweep, ~75 min
-#   ./run-experiment.sh --smoke             # harness self-test, ~8 min
+#   ./run-experiment.sh --smoke             # harness self-test, ~14 min
 #   ./run-experiment.sh --skip-load         # working set already loaded
 #   ./run-experiment.sh --no-chaos          # phases I-II only, no fault injection
 #   ./run-experiment.sh --engine postgresql # measure the PostgreSQL/Patroni deployment
@@ -161,6 +161,23 @@ patroni_code() {  # patroni_code <host> <endpoint>
   code="$(remote "$CL_USER" "$CL_HOST" \
     "curl -s -m 5 -o /dev/null -w '%{http_code}' http://$1:8008/$2" 2>/dev/null)"
   printf '%s' "${code:-000}"
+}
+
+# Is <host> a member Patroni would actually accept as a switchover candidate?
+#
+# NOT the same question as `patroni_code <host> replica` = 200, and the
+# difference cost a phase on 2026-09-09: after Phase III's partition, gcp-1
+# answered /replica 200 while sitting on timeline 1 with no replication
+# connection, and the switchover that followed failed with "503, Switchover
+# failed". /replica reports lag against a position an unattached member cannot
+# advance, so an unattached member looks perfectly healthy through it. The
+# member's own /patroni document is where `replication_state` lives, and
+# `streaming` is the observable form of "already holds the current history and
+# is receiving the rest". Mirrors preflight.patroni_candidate_ready().
+patroni_streaming() {  # patroni_streaming <host>
+  remote "$CL_USER" "$CL_HOST" \
+    "curl -s -m 5 http://$1:8008/patroni" 2>/dev/null \
+    | grep -q '"replication_state": *"streaming"'
 }
 
 started_at=$(date -u +%s)
@@ -362,20 +379,66 @@ else
 # :8008, which is also what p4_chaos.resolve_patroni_primary() consults
 # immediately before scheduling a fault. Asked from the client node so that a
 # node unreachable from the workstation is not mistaken for a node that is down.
-PG_LIVE=0
-PG_PRIMARIES=""
-while read -r _u h; do
-  [ -n "$h" ] || continue
-  code="$(patroni_code "$h" health)"
-  if [ "$code" = "200" ]; then
-    PG_LIVE=$((PG_LIVE + 1))
-  else
-    note "$h: patroni /health returned $code"
-  fi
-  [ "$(patroni_code "$h" primary)" = "200" ] && PG_PRIMARIES="$PG_PRIMARIES $h"
-done <<< "$CLUSTER_NODES"
+# This is a bounded *wait*, not a single reading, and the difference is the
+# whole point. A Patroni member answers :8008/health with 503 for as long as it
+# is still coming up -- taking its pg_basebackup from the primary, replaying
+# WAL, catching up as a streaming replica -- and only flips to 200 once it is a
+# healthy member of the cluster. On a freshly provisioned testbed that is a
+# perfectly normal transient state, not a fault: the five nodes boot on three
+# different clouds' schedules, and the four replicas cannot even begin their
+# basebackup until the designated primary has taken the leader lock.
+# Read once, the gate caught the cluster mid-bootstrap and aborted the sweep --
+# experiment-20260908T225729Z.log died with "1 healthy member(s), expected 5"
+# and all four replicas reporting 503, on a deployment that was coming up
+# correctly and would have been complete minutes later. Waiting costs nothing
+# when the cluster is already up (the first pass breaks immediately) and is the
+# difference between a sweep that starts and one that has to be relaunched by
+# hand. The bound still fails the run rather than hanging: a node that is
+# genuinely dead never reaches 200 and PG_HEALTH_WAIT_S caps the wait.
+PG_HEALTH_WAIT_S=600
+PG_HEALTH_POLL_S=10
+pg_health_deadline=$(( $(date -u +%s) + PG_HEALTH_WAIT_S ))
+pg_waited=0
+while :; do
+  PG_LIVE=0
+  PG_PRIMARIES=""
+  PG_UNHEALTHY=""
+  while read -r _u h; do
+    [ -n "$h" ] || continue
+    code="$(patroni_code "$h" health)"
+    if [ "$code" = "200" ]; then
+      PG_LIVE=$((PG_LIVE + 1))
+    else
+      PG_UNHEALTHY="$PG_UNHEALTHY $h:$code"
+    fi
+    [ "$(patroni_code "$h" primary)" = "200" ] && PG_PRIMARIES="$PG_PRIMARIES $h"
+  done <<< "$CLUSTER_NODES"
 
-[ "$PG_LIVE" = "5" ] || die "patroni reports $PG_LIVE healthy member(s), expected 5.
+  [ "$PG_LIVE" = "5" ] && break
+  [ "$(date -u +%s)" -ge "$pg_health_deadline" ] && break
+
+  if [ "$pg_waited" = "0" ]; then
+    note "patroni:$PG_UNHEALTHY not healthy yet (503 = still bootstrapping);"
+    note "waiting up to ${PG_HEALTH_WAIT_S}s for all 5 members"
+    pg_waited=1
+  else
+    note "  $PG_LIVE/5 healthy;$PG_UNHEALTHY"
+  fi
+  sleep "$PG_HEALTH_POLL_S"
+done
+
+# Report what the wait cost, so a slow bootstrap is visible in the log rather
+# than silently absorbed -- a cluster that needed 8 minutes to converge is
+# worth knowing about even though it did converge.
+[ "$pg_waited" = "1" ] && [ "$PG_LIVE" = "5" ] \
+  && note "all 5 members healthy after waiting"
+
+[ "$PG_LIVE" = "5" ] || die "patroni reports $PG_LIVE healthy member(s), expected 5,
+  and did not reach 5 within ${PG_HEALTH_WAIT_S}s of waiting.
+  Still unhealthy (host:http_code):$PG_UNHEALTHY
+  A 503 that never clears is a member stuck in bootstrap -- check
+  'journalctl -u patroni' on it; 000 means it is unreachable from the client
+  node at all.
   If a previous 'dead' run left a node down, bring it back with
   'sudo -n systemctl start patroni' on that node (see instructions.md).
   If NO member is healthy on a freshly provisioned testbed, check that the
@@ -384,13 +447,16 @@ done <<< "$CLUSTER_NODES"
   /etc/patroni/config.yml, which is the only path the packaged unit reads."
 ok "5 patroni members healthy"
 
-# Nothing in bootstrap-patroni.tftpl pins the leader the way CockroachDB's
-# lease_preferences biases the leaseholder onto gcp-1, so which node is primary
-# is not knowable in advance and is deliberately not asserted to be any
-# particular one. What must hold is that there is exactly one: zero means no
+# bootstrap-patroni.tftpl now pins the primary onto the gateway, the same node
+# CockroachDB's lease_preferences biases its leaseholder onto. What is asserted
+# *here* is only that exactly one member claims to be primary: zero means no
 # leader has been elected and every write fails, more than one means the REST
 # answers disagree and the fault target cannot be resolved -- the same condition
-# resolve_patroni_primary() refuses to guess through.
+# resolve_patroni_primary() refuses to guess through. Which node it is is
+# repaired rather than asserted, further down ("Restoring the patroni primary
+# to the gateway") and again by preflight.check_patroni_primary_placement, so a
+# primary that has merely drifted after a chaos run is fixed instead of
+# aborting the sweep.
 PG_PRIMARY_COUNT="$(printf '%s' "$PG_PRIMARIES" | wc -w | tr -d ' ')"
 case "$PG_PRIMARY_COUNT" in
   1) ok "patroni primary:$PG_PRIMARIES" ;;
@@ -541,7 +607,7 @@ load_data() {
     return
   fi
 
-  note "loading $INSERT_COUNT rows @ seed $SEED on database (~1-2 min)"
+  note "loading $INSERT_COUNT rows @ seed $SEED on database (bulk init; minutes, scales with the row count)"
   try_each_host "workload init" \
     "cockroach workload init ycsb --drop --seed=$SEED --insert-count=$INSERT_COUNT '$URI_PLACEHOLDER'" \
     >/dev/null \
@@ -660,12 +726,13 @@ if [ "$RUN_CHAOS" -eq 1 ]; then
 
   else
 
-  # PostgreSQL/Patroni. The chaos target is NOT $CT_HOST here: nothing pins
-  # Patroni's leader, so p4_chaos.resolve_patroni_primary() picks whichever node
-  # actually answered as primary immediately before the fault, and that node is
-  # only recorded in the run's events.json. This backstop therefore sweeps every
-  # member rather than one named node -- which is also what makes it a no-op
-  # when the phase already restored the target itself.
+  # PostgreSQL/Patroni. The chaos target should be $CT_HOST now that the primary
+  # is pinned there, but this backstop still sweeps every member rather than one
+  # named node: p4_chaos.resolve_patroni_primary() resolves the target live and
+  # records it only in the run's events.json, so a run that faulted somewhere
+  # else -- because a switchover had not taken, or the profile was edited --
+  # must still be cleaned up. Sweeping is also what makes it a no-op when the
+  # phase already restored the target itself.
   step "Confirming every patroni member is back"
   while read -r u h; do
     [ -n "$h" ] || continue
@@ -694,6 +761,69 @@ if [ "$RUN_CHAOS" -eq 1 ]; then
   [ "$PG_LIVE" = "5" ] \
     && ok "all 5 patroni members healthy" \
     || warn "$PG_LIVE/5 patroni members healthy. Restart the rest before measuring again."
+
+  # Put the primary back on the gateway. CockroachDB does this for itself --
+  # lease_preferences pulls the leaseholder back to gcp-1, which is what
+  # check_leaseholder_placement's settle window waits for -- but Patroni has no
+  # equivalent: failover_priority biases who *wins* an election and never
+  # starts one, so after a chaos run the primary stays wherever the failover
+  # left it, indefinitely. Left alone, the next phase would fault a different
+  # node than this one did, and than either CockroachDB phase did.
+  #
+  # This duplicates preflight.check_patroni_primary_placement deliberately: the
+  # harness repairs it too, and would catch this, but repairing here means the
+  # cluster is left in the state the next run expects rather than the next run
+  # having to fix it -- the same reason the dead-mode restore backstop above
+  # exists alongside p4_chaos.restore_target().
+  step "Restoring the patroni primary to the gateway"
+  # The user is captured with the host, not read from the loop variable after
+  # the loop: the SSH user differs per provider (root on Linode, ubuntu on GCP
+  # and Azure), so a trailing $u would name the last node's user against the
+  # primary's host -- the mismatch CLUSTER_NODES is paired at the source to
+  # prevent.
+  PG_PRIMARY=""
+  PG_PRIMARY_USER=""
+  while read -r u h; do
+    [ -n "$h" ] || continue
+    if [ "$(patroni_code "$h" primary)" = "200" ]; then
+      PG_PRIMARY="$h"
+      PG_PRIMARY_USER="$u"
+    fi
+  done <<< "$CLUSTER_NODES"
+
+  GW_LINE="$(printf '%s\n' "$CLUSTER_NODES" | head -1)"
+  GW_U="$(printf '%s' "$GW_LINE" | awk '{print $1}')"
+  GW_H="$(printf '%s' "$GW_LINE" | awk '{print $2}')"
+
+  if [ -z "$PG_PRIMARY" ]; then
+    warn "no patroni member reports itself primary; cannot restore placement."
+  elif [ "$PG_PRIMARY" = "$GW_H" ]; then
+    ok "patroni primary is already $GW_H"
+  else
+    note "patroni primary is $PG_PRIMARY, not $GW_H; switching over"
+    # Wait for the candidate to be streaming first. After a `recover` fault
+    # against the primary the demoted node has to be rewound or re-cloned
+    # before it holds the current timeline, and asking for a handover it will
+    # refuse achieves nothing but a confusing error. Bounded, and a candidate
+    # that never arrives leaves the warning below rather than hanging: this is
+    # a backstop, and the next run's pre-flight repairs placement properly.
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+      patroni_streaming "$GW_H" && break
+      sleep 10
+    done
+    patroni_streaming "$GW_H" \
+      || note "$GW_H is not streaming yet; asking anyway, the pre-flight will retry"
+    # A switchover is a controlled handover, not a fault: Patroni demotes the
+    # old primary only once the candidate has caught up, so no writes are lost.
+    # Named --candidate so Patroni cannot promote some other node instead.
+    remote "$PG_PRIMARY_USER" "$PG_PRIMARY" \
+      "sudo -n patronictl -c /etc/patroni/config.yml switchover \
+         --leader $PG_PRIMARY --candidate $GW_H --force" >/dev/null 2>&1 || true
+    sleep 10
+    [ "$(patroni_code "$GW_H" primary)" = "200" ] \
+      && ok "patroni primary restored to $GW_H" \
+      || warn "switchover to $GW_H did not take; the next run's pre-flight will retry."
+  fi
 
   fi
 fi

@@ -396,6 +396,416 @@ def _read_leaseholder_placement(
     )
 
 
+# --- Patroni primary placement (the PostgreSQL counterpart) ----------------
+
+#: Patroni's own REST endpoint, port 8008, answers 200 on the primary and a
+#: non-2xx status everywhere else -- the same check
+#: ``terraform/scripts/bootstrap-client.tftpl`` configures HAProxy's
+#: ``patroni_primary`` backend to poll.
+PATRONI_PRIMARY_PORT = 8008
+PATRONI_PRIMARY_TIMEOUT_S = 3.0
+
+#: How long a ``patronictl switchover`` is given to complete. A switchover is a
+#: controlled handover -- the old primary is demoted only once the candidate has
+#: caught up -- so it is bounded by replication lag, not by a failure detector's
+#: timeout.
+PATRONI_SWITCHOVER_TIMEOUT_S = 120
+
+#: How often the candidate's eligibility is re-read while waiting for it. Well
+#: under Patroni's own ``loop_wait`` of 10 s, so the wait ends promptly once the
+#: node flips rather than on the next multiple of a coarse interval.
+PATRONI_CANDIDATE_POLL_S = 5.0
+
+
+def patroni_member_state(
+    node: Node, timeout_s: float = PATRONI_PRIMARY_TIMEOUT_S
+) -> dict[str, Any]:
+    """Read one member's ``/patroni`` document, or ``{}`` if it cannot be read.
+
+    This is the same data ``patronictl list`` renders -- ``role``, ``timeline``,
+    ``replication_state``, ``xlog`` -- and it is the only place the harness can
+    see the two facts that ``/replica`` does not expose: whether the member is
+    actually attached to the leader's replication stream, and which timeline it
+    is on. Read as a separate function so both the candidate check and its
+    failure message can use it.
+    """
+    import urllib.error
+    import urllib.request
+
+    url = f"http://{node.host}:{PATRONI_PRIMARY_PORT}/patroni"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout_s) as response:
+            body = response.read()
+    except (urllib.error.URLError, OSError) as exc:
+        # HTTPError is a subclass of URLError and carries a body, so a member
+        # answering 503 is still readable -- which matters, because 503 is
+        # exactly the state whose reason we want to report.
+        body = exc.read() if hasattr(exc, "read") else None
+        if not body:
+            return {}
+    try:
+        state = json.loads(body)
+    except (ValueError, TypeError):
+        return {}
+    return state if isinstance(state, dict) else {}
+
+
+def patroni_candidate_ready(
+    node: Node,
+    timeout_s: float = PATRONI_PRIMARY_TIMEOUT_S,
+    leader_timeline: int | None = None,
+) -> tuple[bool, str]:
+    """Is ``node`` a replica Patroni would actually accept as a candidate?
+
+    Two gates, and the second one exists because the first is not sufficient.
+
+    ``/replica`` answers 200 for a member that is up, in recovery, not tagged
+    ``noloadbalance``, and within ``maximum_lag_on_failover``. This code once
+    stopped there, on the stated theory that 200 was "exactly the condition
+    ``patronictl switchover --candidate`` tests". **That was wrong**, and the
+    run of 2026-09-09 (experiment-20260909T031334Z.log) is the counterexample:
+    after Phase III's partition ``gcp-1`` came back up and answered ``/replica``
+    200, this check declared "running replica, lag within bounds", and the
+    switchover it then asked for failed with ``503, Switchover failed``. The
+    reason is visible in the cluster table the failure printed -- ``gcp-1`` was
+    ``Role: Replica`` (not ``Quorum Standby``) on **timeline 1** with
+    ``Receive LSN: unknown``, while the leader and the other three members were
+    streaming on **timeline 2**. It was a replica that was up and not lagging
+    because it was not connected to anything at all, and ``/replica`` cannot
+    tell that case from a healthy one: it reports lag against a position the
+    member has not been able to advance.
+
+    So the second gate reads ``/patroni`` and requires the member to be
+    ``replication_state: streaming`` and, when the leader's timeline is known,
+    to be on that same timeline. Both are the observable form of the thing the
+    switchover actually needs -- a candidate that already holds the current
+    history and is receiving the rest of it. A node mid-rewind or mid-re-clone
+    fails this and is *waited* for, which is what ``settle_timeout_s`` is for;
+    before this fix the wait ended early on a node that would never have been
+    accepted, and the phase failed on a condition it had been given 300 s to
+    clear.
+
+    ``leader_timeline`` is optional and the check degrades safely without it:
+    the streaming requirement alone catches the observed failure. It is passed
+    when the primary's own document could be read, because a member can be
+    streaming from a leader and still be behind a timeline switch.
+
+    **Even that was not enough.** Both gates passed on
+    ``experiment-20260909T043036Z.log`` -- gcp-1 streaming on the leader's
+    timeline 6, zero lag on both Receive and Replay LSN -- and the switchover
+    still answered ``503, Switchover failed``. The cluster table the failure
+    printed named the reason: gcp-1 was ``Role: Replica``, not ``Quorum
+    Standby``, while every other survivor was. In ``synchronous_mode: quorum``
+    Patroni refuses a switchover candidate that is not currently one of the
+    nodes named in ``synchronous_standby_names``, and that membership is
+    decided by the leader on its own ``loop_wait`` cadence -- a node can start
+    streaming on the right timeline one poll before the leader admits it to the
+    synchronous set, which is exactly the gap this run's candidate wait ended
+    inside of. The third gate is ``GET :8008/quorum``, which Patroni documents
+    as answering 200 only when "this node is listed as a quorum node in
+    synchronous_standby_names on the primary" -- the same fact ``patronictl
+    list`` renders as the Role column, read the same bespoke-endpoint way
+    ``/replica`` already is.
+
+    Returns the verdict and a human-readable reason, because the reason is what
+    goes in the pre-flight report when the wait times out: "still taking its
+    basebackup" and "the process is dead" are the same boolean and very
+    different situations.
+    """
+    import urllib.error
+    import urllib.request
+
+    url = f"http://{node.host}:{PATRONI_PRIMARY_PORT}/replica"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout_s) as response:
+            if response.status != 200:
+                return False, f"/replica answered {response.status}"
+    except urllib.error.HTTPError as exc:
+        # 503 is the normal answer while a member is coming up -- taking its
+        # pg_basebackup, replaying WAL, catching up -- and after a diverged
+        # rejoin that is minutes, not seconds. It is not a fault.
+        return False, f"/replica answered {exc.code}"
+    except (urllib.error.URLError, OSError) as exc:
+        return False, f"/replica unreachable ({exc})"
+
+    state = patroni_member_state(node, timeout_s=timeout_s)
+    if not state:
+        return False, "/replica answered 200 but /patroni could not be read"
+
+    replication_state = state.get("replication_state")
+    timeline = state.get("timeline")
+    if replication_state != "streaming":
+        return False, (
+            f"/replica answered 200 but the member is not streaming "
+            f"(replication_state={replication_state!r}, timeline={timeline!r}); "
+            f"it is up and not lagging because it is not attached to the leader"
+        )
+    if leader_timeline is not None and timeline != leader_timeline:
+        return False, (
+            f"streaming but on timeline {timeline!r}, not the leader's "
+            f"{leader_timeline!r}"
+        )
+
+    quorum_url = f"http://{node.host}:{PATRONI_PRIMARY_PORT}/quorum"
+    try:
+        with urllib.request.urlopen(quorum_url, timeout=timeout_s) as response:
+            is_quorum_member = response.status == 200
+    except urllib.error.HTTPError:
+        is_quorum_member = False
+    except (urllib.error.URLError, OSError) as exc:
+        return False, (
+            f"streaming on timeline {timeline!r} but /quorum unreachable ({exc})"
+        )
+    if not is_quorum_member:
+        return False, (
+            f"streaming on timeline {timeline!r} but not yet in "
+            f"synchronous_standby_names (/quorum did not answer 200); "
+            f"a switchover would be refused"
+        )
+
+    return True, f"streaming on timeline {timeline!r}, lag within bounds, quorum member"
+
+
+def resolve_patroni_primary(topo: Topology, timeout_s: float = PATRONI_PRIMARY_TIMEOUT_S) -> Node:
+    """Query every cluster member's Patroni REST API and return the primary.
+
+    Raises if zero or more than one node claims to be primary: zero means the
+    cluster has no leader right now (mid-failover, or Patroni is down), and more
+    than one means a split-brain the harness must not paper over by picking
+    one arbitrarily.
+
+    This is the single source of truth for which node is primary. Nothing in
+    the harness infers it from configuration -- ``bootstrap-patroni.tftpl``
+    pins the leader and :func:`check_patroni_primary_placement` asserts it, but
+    both are verified against this live reading rather than assumed.
+    """
+    import urllib.error
+    import urllib.request
+
+    primaries: list[Node] = []
+    unreachable: list[str] = []
+    for node in topo.nodes:
+        url = f"http://{node.host}:{PATRONI_PRIMARY_PORT}/primary"
+        try:
+            with urllib.request.urlopen(url, timeout=timeout_s) as response:
+                if response.status == 200:
+                    primaries.append(node)
+        except (urllib.error.URLError, OSError) as exc:
+            unreachable.append(f"{node.name} ({exc})")
+
+    if len(primaries) == 1:
+        return primaries[0]
+    if not primaries:
+        raise ValueError(
+            "no cluster member's Patroni REST API (port "
+            f"{PATRONI_PRIMARY_PORT}) reports itself primary; the cluster may be "
+            f"mid-failover or unreachable. Unreachable: {unreachable or 'none'}"
+        )
+    raise ValueError(
+        "more than one cluster member's Patroni REST API reports itself "
+        f"primary ({', '.join(n.name for n in primaries)}); this is a "
+        "split-brain and the harness refuses to guess which one to fault"
+    )
+
+
+def check_patroni_primary_placement(
+    report: PreflightReport,
+    topology: Topology,
+    expected: Node | None = None,
+    repair: bool = True,
+    settle_timeout_s: float = 0.0,
+) -> Check:
+    """The PostgreSQL primary must be where the CockroachDB leaseholder is.
+
+    This is :func:`check_leaseholder_placement`'s counterpart, and it exists for
+    the same reason: the workload is driven from ``CLIENT_NODE`` (GCP
+    us-east1), so where the write path is led from is a property of the
+    *deployment*, not of the engine, and letting it differ between the two arms
+    puts cloud geography into the comparison. Measured on this testbed
+    2026-09-09, an unpinned Patroni election put the primary on ``crdb-azure-2``
+    (Azure eastasia, 199 ms from the client): a fresh connection cost 1.02 s
+    against 0.05 s to ``crdb-gcp-1``, a 20x penalty on every connection the
+    generator opens, none of which is attributable to PostgreSQL.
+
+    Where the two checks differ is in what restores the condition.
+    CockroachDB's ``lease_preferences`` pulls the lease back on its own, so its
+    check only has to *wait*. Patroni has no equivalent: ``failover_priority``
+    biases who wins an election but never triggers one, so after a chaos run
+    the primary simply stays where the failover put it, forever. Waiting for
+    the primary to come back would be waiting for something that cannot happen,
+    and the repair therefore has to be explicit -- ``patronictl switchover``,
+    not a settle window.
+
+    ``settle_timeout_s`` does not weaken that. It waits for a different thing:
+    the **candidate** becoming eligible, after which the explicit switchover
+    still runs. A switchover to a node Patroni will not accept fails outright
+    -- "no good candidates have been found" -- and after a ``recover`` fault
+    against the primary the expected node is exactly such a node for a while.
+    Its timeline diverged, so it must either be rewound or (with
+    ``remove_data_directory_on_diverged_timelines``, which
+    ``bootstrap-patroni.tftpl`` sets for this reason) re-cloned from the leader,
+    and at thesis scale re-cloning is ~6 GB across a WAN link. Phase IV starts
+    the instant Phase III returns, so with no wait the repair asks for a
+    handover to a member that is still taking its basebackup and the sweep
+    aborts on a condition that would have cleared itself in minutes. Observed
+    2026-09-09 (experiment-20260909T011615Z.log) in its permanent form, before
+    the template could fall back to a re-clone at all.
+
+    The default is 0 -- one reading, fail fast -- so ``bench`` and ``net probe``
+    are unchanged; only the chaos phases pass a window, from
+    ``chaos.leaseholder_settle_s``. This mirrors
+    :func:`check_leaseholder_placement` exactly. The condition that must hold is
+    not loosened by any of it: an ineligible candidate still fails the check
+    when the window expires, and the reason Patroni last gave is reported
+    rather than a bare timeout.
+
+    What counts as eligible is :func:`patroni_candidate_ready`'s business, and
+    it is stricter than it was: a ``/replica`` 200 alone let this wait end on a
+    node that was up, unlagged and not connected to anything, after which the
+    switchover failed outright (2026-09-09 -- see that function). Streaming on
+    the leader's timeline was not sufficient either -- a later run the same day
+    showed the candidate can hold both and still not be in Patroni's
+    synchronous set yet, and the switchover fails just the same. The candidate
+    must now be streaming on the leader's timeline *and* answer its own
+    ``/quorum`` endpoint 200, which is why the leader's timeline is read here,
+    once, before the wait begins.
+
+    The switchover is a controlled handover, not a fault: Patroni demotes the
+    old primary only once the candidate has caught up, so it does not lose
+    writes. It runs between phases and never inside a measurement window, and
+    it is recorded in the report so a reader can separate what was measured
+    from what was repaired.
+    """
+    expected = expected or topology.gateway
+
+    try:
+        primary = resolve_patroni_primary(topology)
+    except ValueError as exc:
+        return report.add(
+            "patroni_primary_placement", False, str(exc), expected=expected.name
+        )
+
+    if primary.host == expected.host:
+        return report.add(
+            "patroni_primary_placement",
+            True,
+            f"patroni primary is {primary.name}, as required",
+            expected=expected.name,
+            observed=primary.name,
+            repaired=False,
+        )
+
+    if not repair:
+        return report.add(
+            "patroni_primary_placement",
+            False,
+            f"patroni primary is {primary.name}, expected {expected.name}",
+            expected=expected.name,
+            observed=primary.name,
+            repaired=False,
+        )
+
+    print(
+        f"  patroni primary is {primary.name}, not {expected.name}; "
+        f"switching over (Patroni does not fail back on its own)",
+        flush=True,
+    )
+
+    # Wait for the candidate to become eligible before asking for the handover.
+    # See the docstring: this waits for the candidate, never for the primary,
+    # and the switchover below is still what does the repair.
+    #
+    # The leader's timeline is read once here rather than per poll: it is what
+    # the candidate has to converge *onto*, and it does not move while the
+    # current leader keeps the lock. None if it could not be read, which
+    # degrades the check to its streaming half rather than failing the phase on
+    # a missing field.
+    leader_timeline = patroni_member_state(primary).get("timeline")
+    ready, reason = patroni_candidate_ready(expected, leader_timeline=leader_timeline)
+    if not ready and settle_timeout_s > 0:
+        print(
+            f"  {expected.name} is not yet a switchover candidate ({reason}); "
+            f"waiting up to {settle_timeout_s:.0f}s",
+            flush=True,
+        )
+        deadline = time.monotonic() + settle_timeout_s
+        while not ready and time.monotonic() < deadline:
+            time.sleep(PATRONI_CANDIDATE_POLL_S)
+            ready, reason = patroni_candidate_ready(
+                expected, leader_timeline=leader_timeline
+            )
+        if ready:
+            print(f"  {expected.name} is a candidate now: {reason}", flush=True)
+
+    if not ready:
+        return report.add(
+            "patroni_primary_placement",
+            False,
+            f"patroni primary is {primary.name}, and {expected.name} is not a "
+            f"switchover candidate ({reason})"
+            + (
+                f" after waiting {settle_timeout_s:.0f}s"
+                if settle_timeout_s > 0
+                else ""
+            ),
+            expected=expected.name,
+            observed=primary.name,
+            repaired=False,
+        )
+
+    # Run from the current primary: it is by definition reachable and holds the
+    # leader lock. --force skips the interactive confirmation; the candidate is
+    # named explicitly so Patroni cannot pick a different one.
+    #
+    # ``node.host``, NOT ``node.name``. Patroni identifies its members by the
+    # ``name:`` in its own config, which ``bootstrap-patroni.tftpl`` sets to the
+    # node's *hostname* (``crdb-gcp-1``) -- while this harness's ``Node.name``
+    # is the short label (``gcp-1``) that ``profiles/*.yaml`` uses for
+    # ``chaos.target``. The two differ on every node in the topology, so naming
+    # members by ``.name`` addresses members that do not exist. Observed
+    # 2026-09-08 (experiment-20260908T225939Z.log): the Phase IV repair ran
+    # ``switchover --leader linode-2 --candidate gcp-1`` and Patroni answered
+    # "Member linode-2 is not the leader of cluster postgres-cluster", the
+    # placement check failed, and Phase IV never ran -- on a cluster that was
+    # healthy and where the switchover it was asking for was entirely possible.
+    result = ssh.run(
+        primary,
+        f"{ssh.SUDO} patronictl -c /etc/patroni/config.yml switchover "
+        f"--leader {primary.host} --candidate {expected.host} --force",
+        timeout=PATRONI_SWITCHOVER_TIMEOUT_S,
+    )
+
+    try:
+        now = resolve_patroni_primary(topology)
+    except ValueError as exc:
+        return report.add(
+            "patroni_primary_placement",
+            False,
+            f"switchover to {expected.name} left no single primary: {exc}",
+            expected=expected.name,
+            observed=primary.name,
+            repaired=True,
+        )
+
+    passed = now.host == expected.host
+    detail = (
+        f"switched over from {primary.name} to {now.name}"
+        if passed
+        else (
+            f"switchover to {expected.name} did not take; primary is {now.name}. "
+            f"{result.stderr.strip() or result.stdout.strip()}"
+        )
+    )
+    return report.add(
+        "patroni_primary_placement",
+        passed,
+        detail,
+        expected=expected.name,
+        observed=now.name,
+        repaired=True,
+    )
+
+
 # --- row match (D8) -------------------------------------------------------
 
 #: ``crdb_internal`` is gated behind a session variable on the redeployed

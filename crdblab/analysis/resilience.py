@@ -275,6 +275,30 @@ def degradation_profile(run: Run, alignment: Alignment) -> pd.DataFrame:
     return ticks
 
 
+def _observation_end(run: Run) -> float | None:
+    """When the measurement window demonstrably was still open, in wall offset.
+
+    Taken from the generator's own last tick rather than from the profile's
+    ``duration_s``, because it has to be a fact about the run rather than an
+    intention: the generator emitted that sample, so the run had certainly not
+    ended before it. That makes this a *lower* bound on the end of the window,
+    which is the conservative direction -- an instrument judged to have stopped
+    early against this bound really did stop early.
+
+    ``None`` when the run has no usable tick series, in which case the coverage
+    check downstream is skipped rather than guessed.
+    """
+    metrics = getattr(run, "metrics", None)
+    if metrics is None or len(metrics) == 0:
+        return None
+    for column in ("wall_offset_s", "elapsed_s"):
+        if column in metrics.columns:
+            values = metrics[column].dropna()
+            if len(values):
+                return float(values.max())
+    return None
+
+
 def availability(run: Run) -> dict[str, Any]:
     """Availability RTO, re-derived from the audit log where it survives.
 
@@ -300,7 +324,9 @@ def availability(run: Run) -> dict[str, Any]:
             (float(r.wall_offset_s), int(r.seq_id), str(r.outcome))
             for r in attempts_df.itertuples()
         ]
-        measured = availability_rto(attempts, float(injected))
+        measured = availability_rto(
+            attempts, float(injected), observation_end=_observation_end(run)
+        )
         measured["source"] = "re-derived from audit.csv"
     else:
         measured = dict(events.get("availability") or {})
@@ -320,7 +346,19 @@ def availability(run: Run) -> dict[str, Any]:
     resolution = measured.get("resolution_s")
     out: dict[str, Any] = {"available": True, **measured}
 
-    if rto is None:
+    if rto is None and measured.get("coverage_truncated"):
+        # Distinct from "no write was acknowledged after the fault", which is a
+        # statement about the cluster. This one is a statement about the
+        # instrument, and the difference is the whole point of tracking
+        # coverage: the run below has an unmeasured outage, not a measured
+        # absence of one.
+        out["claim"] = (
+            "the audit writer stopped observing "
+            f"{measured.get('coverage_gap_s')} s before the run ended; the "
+            "outage is UNMEASURED, not absent"
+        )
+        out["quotable_value_s"] = None
+    elif rto is None:
         out["claim"] = "no write was acknowledged after the fault within the run"
         out["quotable_value_s"] = None
     elif resolution and rto < resolution:
@@ -394,7 +432,9 @@ def probe_availability(run: Run) -> dict[str, Any]:
         return {"available": False, "detail": "no fault was injected"}
 
     attempts = attempts_from_rows(pd.read_csv(probe_csv).to_dict("records"))
-    measured = measure_rto(attempts, float(injected))
+    measured = measure_rto(
+        attempts, float(injected), observation_end_s=_observation_end(run)
+    )
     windows = outage_windows(attempts)
     out: dict[str, Any] = {
         "available": True,
@@ -708,12 +748,29 @@ def quorum_geometry(
     that while sharing a target: the ``dead`` run at C=50 settled at 0.67 of baseline
     and never recovered, while the ``recover`` run at C=100 regained the threshold
     in about 9 s with the same node partitioned. A closed workload can absorb
-    higher per-operation latency by keeping more operations outstanding, and 80%
-    of this workload's operations are reads served by the local leaseholder and
-    unaffected by the change. So the floor is a hard statement about the write
-    path and a soft one about aggregate throughput, and it is reported that way:
-    the ratio below explains why a performance RTO *may* be undefined for a fault
-    on this member, and is not on its own a prediction that it will be.
+    higher per-operation latency by keeping more operations outstanding. So the
+    floor is a hard statement about the write path and a soft one about aggregate
+    throughput, and it is reported that way: the ratio below explains why a
+    performance RTO *may* be undefined for a fault on this member, and is not on
+    its own a prediction that it will be.
+
+    **The read half of that reasoning is engine-dependent, and stating it
+    engine-blind was wrong.** This function used to assert flatly that 80% of the
+    workload's operations are reads served by the local leaseholder and therefore
+    unaffected. That holds for CockroachDB. It is false for PostgreSQL/Patroni,
+    where there is one primary and the generator reaches it through HAProxy, so
+    *every* operation follows the primary when it moves -- and the primary moves
+    to another continent precisely when the pinned one is the fault target.
+    Measured on ``20260909T040914Z_p4-chaos-recover`` (smoke, PostgreSQL): after
+    Patroni promoted ``azure-2`` (eastasia), read p50 went from **0.92 ms to
+    209.7 ms** and update p50 from 75.5 ms to 369.1 ms, and throughput settled at
+    ~43 ops/s -- C=10 divided by a ~230 ms round trip, which is arithmetic, not
+    recovery. Attributing that to the write-path floor below would credit a 2.1x
+    write-floor change for a 228x change on the operation class this function
+    called unaffected. The consequence text therefore branches on the engine; the
+    floor computation itself does not, because the quorum geometry is genuinely
+    the same shape on both arms (leader plus the two fastest acks of the
+    survivors).
 
     Computed from the Phase I matrix rather than asserted, so "the target was in
     the fast quorum" is a measurement.
@@ -736,9 +793,12 @@ def quorum_geometry(
     from the metrics table rather than from this RTT matrix, disagreed with it
     on a live run (1.38x settled shift, reported here as "unaffected").
 
-    Which surviving node CockroachDB promotes to leaseholder is an allocator
-    decision this static matrix cannot predict -- ``lease_preferences`` names
-    only the dead node's region, so there is no configured fallback to read.
+    Which surviving node is promoted is not something this static matrix can
+    predict on either arm -- CockroachDB's allocator decides it, and
+    ``lease_preferences`` names only the dead node's region, so there is no
+    configured fallback to read; Patroni holds an election, and
+    ``failover_priority`` likewise ranks only the pinned node above the rest,
+    leaving the other four equal.
     Every survivor is therefore evaluated as a candidate leader, using *its
     own* RTT row, and the result is reported as the range across candidates
     rather than a single value dressed up as a prediction of which one wins.
@@ -750,6 +810,17 @@ def quorum_geometry(
             "available": False,
             "detail": "no Phase I network matrix supplied; run `crdblab net probe`",
         }
+
+    # Vocabulary only. The geometry is the same on both arms -- leader plus the
+    # two fastest acknowledgements of the survivors, which is 3-of-5 Raft quorum
+    # and Patroni's `ANY 2 (...)` alike -- but calling a Patroni primary "the
+    # leaseholder", and naming CockroachDB's allocator as the thing that promotes
+    # it, put a false claim in front of every PostgreSQL resilience figure. The
+    # dict KEYS keep their original names (`leaseholder_displaced`) so existing
+    # run artefacts and figures stay readable; only the prose branches.
+    is_pg = run.engine == "postgresql"
+    leader_word = "primary" if is_pg else "leaseholder"
+    promoter = "Patroni" if is_pg else "CockroachDB's allocator"
 
     from ..core.preflight import gateway_rtts
 
@@ -856,22 +927,45 @@ def quorum_geometry(
         "floor_ratio_range_x": [ratio_min, ratio_max],
         "target_in_fast_quorum": bool(after_min > before + 1e-9),
         "detail": (
-            f"{target.name} ({target.region}) was the leaseholder, so its loss "
+            f"{target.name} ({target.region}) was the {leader_word}, so its loss "
             "displaces it rather than merely removing a follower. Depending on "
-            f"which survivor CockroachDB promotes, the write path's floor rises "
+            f"which survivor {promoter} promotes, the write path's floor rises "
             f"from {before:.1f} ms to somewhere between {after_min:.1f} ms "
             f"({best}, best case) and {after_max:.1f} ms ({worst}, worst case) -- "
             f"{ratio_min:.2f}x to {ratio_max:.2f}x. Writes continue -- a quorum "
             "survives among any three of the four remaining voters -- so this is "
             "a latency change, not an outage, in every candidate"
         ),
+        # The two arms differ in what the client keeps paying after the failover,
+        # and that difference dominates the write-floor change above. See the
+        # docstring: on PostgreSQL every operation follows the primary through
+        # HAProxy, so a promotion into another region moves the READ path too --
+        # measured 0.92 ms -> 209.7 ms on 2026-09-09, against a 2.1x write-floor
+        # change. Quoting the CockroachDB sentence on a Patroni run would explain
+        # a 228x effect with a 2.1x cause.
         "consequence": (
-            "whether aggregate throughput regains the recovery threshold depends on "
-            "how much of the added write latency the offered concurrency can hide, "
-            "and on the read share, which is unaffected regardless of which "
-            "candidate takes the lease. A performance RTO that comes back undefined "
-            "is explained by this geometry at every candidate in the range; one "
-            "that comes back defined is not contradicted by it"
+            (
+                "whether aggregate throughput regains the recovery threshold "
+                "depends on far more than the write floor above. The generator "
+                "reaches PostgreSQL through HAProxy, which follows the primary, "
+                f"so a promotion onto {worst} or {best} moves the READ path as "
+                "well -- and reads are 80% of this workload. A performance RTO "
+                "that comes back undefined after the pinned primary was faulted "
+                "is expected, and is dominated by client-to-primary distance "
+                "rather than by this quorum geometry: compare the post-fault read "
+                "p50 against its baseline before attributing any of it to the "
+                "write path"
+            )
+            if is_pg
+            else (
+                "whether aggregate throughput regains the recovery threshold "
+                "depends on how much of the added write latency the offered "
+                "concurrency can hide, and on the read share, which is served by "
+                "the surviving leaseholder and is unaffected by which candidate "
+                "takes the lease. A performance RTO that comes back undefined is "
+                "explained by this geometry at every candidate in the range; one "
+                "that comes back defined is not contradicted by it"
+            )
         ),
     }
 

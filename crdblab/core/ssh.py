@@ -33,6 +33,23 @@ SSH_OPTIONS: tuple[str, ...] = (
     "-o", "ServerAliveCountMax=3",
 )
 
+#: Prefix for any remote command that needs privilege. The SSH user is *not*
+#: root on most of this testbed: ``crdb-gcp-1`` and the Azure nodes are reached
+#: as ``ubuntu`` while ``cockroach``/``patroni`` run as root, ``tailscale down``
+#: needs the daemon socket, and ``patronictl`` needs to read Patroni's config.
+#: Without this prefix ``killall -9 cockroach`` returns ``Operation not
+#: permitted`` (rc=1) and ``tailscale down`` returns ``Access denied`` -- in both
+#: cases the node under test carries on serving and the run silently measures a
+#: fault that never happened. That is exactly what the 2026-09-07/08 chaos runs
+#: recorded (``"detail": "rc=1"``, and the target's ``cockroach`` pid unchanged
+#: across the whole run). ``-n`` keeps it non-interactive: if passwordless sudo
+#: is unavailable we want a hard, immediate failure rather than a hung prompt
+#: eating the injection window.
+#:
+#: Lives here rather than in ``phases.p4_chaos`` because ``core.preflight``
+#: needs it too and ``core`` may not import ``phases``.
+SUDO = "sudo -n"
+
 
 def build_command(node: Node, remote: str | None = None) -> list[str]:
     cmd = ["ssh", *SSH_OPTIONS, f"{node.user}@{node.host}"]

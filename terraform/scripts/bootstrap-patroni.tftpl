@@ -93,17 +93,131 @@ etcd:
 
 bootstrap:
   dcs:
+    # EVERYTHING under `bootstrap.dcs` is read exactly once, by the node that
+    # wins the initial bootstrap race, and is written into etcd there. Patroni
+    # never consults this template again -- not on restart, not on a new node
+    # joining. Editing any of it below therefore changes the NEXT deployment
+    # and has no effect whatsoever on a cluster that is already running; that
+    # needs `patronictl -c /etc/patroni/config.yml edit-config`. Verify what
+    # actually took with `patronictl show-config`, not by reading this file.
     ttl: 30
     loop_wait: 10
     retry_timeout: 10
+    # Secondary bound only, and deliberately NOT zero. In quorum mode below,
+    # the guarantee against promoting a lossy candidate comes from quorum
+    # membership -- a node that was not in the synchronous quorum cannot be
+    # promoted at all -- not from this number. Setting it to 0 would demand a
+    # candidate be byte-exact with a leader position read from the DCS, which
+    # after a crash is routinely stale, and would block failover outright.
+    # That would silently disable the very failover Phase IV exists to measure,
+    # which is a worse failure than the one zeroing it was meant to prevent.
     maximum_lag_on_failover: 1048576
+    #
+    # Raft-equivalent synchronous replication. Three settings, and all three
+    # are load-bearing for the comparison rather than tuning.
+    #
+    # `quorum`, NOT `true`. Both give synchronous replication; they differ in
+    # WHICH standbys must ack. `synchronous_mode: true` names specific nodes
+    # (`FIRST n (node,node)`), so whichever two Patroni picks gate every commit
+    # -- and if it picks the Azure pair this cluster pays 211-215 ms per commit
+    # instead of ~69 ms, destroying the write-floor equivalence the whole
+    # cross-engine comparison rests on. `quorum` emits `ANY n (...)`, so the two
+    # FASTEST acks win: from gcp-1 that is linode-1 at 24.6 ms and linode-2 at
+    # 69.1 ms, giving the ~69 ms floor that matches CockroachDB's 68.8 ms
+    # 3-of-5 Raft quorum from the same node.
+    #
+    # Why this is needed at all, when `synchronous_standby_names: 'ANY 2 (*)'`
+    # was already set by hand: that setting made every ordinary COMMIT durable
+    # on 3 of 5 nodes, and it worked -- measured write p50 75.5 ms against the
+    # 69.6 ms floor. But with synchronous_mode left at its default of `false`,
+    # Patroni does not couple synchronous replication to leader election: at
+    # failover it promotes the most advanced replica by LSN, with no
+    # requirement that the promoted node was one of the two synchronous
+    # standbys. Raft's core safety property is exactly that a new leader
+    # already holds every committed entry. So the guarantee held for every
+    # steady-state commit and was NOT enforced across the one event Phases III
+    # and IV measure -- meaning a PostgreSQL RPO figure would have been
+    # measuring Patroni's default promotion policy, not PostgreSQL HA.
+    #
+    # In quorum mode Patroni OWNS synchronous_standby_names and computes it
+    # from synchronous_node_count. Setting it by hand as well conflicts with
+    # that, so it has been removed from `parameters` below; only
+    # synchronous_commit stays there.
+    synchronous_mode: quorum
+    synchronous_node_count: 2
+    #
+    # Strict: when fewer than synchronous_node_count standbys are available,
+    # block writes rather than quietly shrinking the requirement and committing
+    # asynchronously. Non-strict is the default and is the flattering failure
+    # this project exists to catch -- writes would get FASTER at the moment the
+    # durability guarantee silently disappeared, and nothing in the artefacts
+    # would say so. Raft equally refuses to commit without a quorum, so strict
+    # is the faithful choice.
+    #
+    # Two consequences to expect rather than debug. Provisioning still works:
+    # the post-bootstrap DDL runs with `synchronous_commit=local` via PGOPTIONS
+    # (see "Create the harness roles"), which bypasses the wait entirely, so the
+    # primary does not hang before any standby exists. And in Phase IV the
+    # measured RTO now includes the time for a SECOND standby to become
+    # synchronous-eligible, not merely the time for a primary to be promoted.
+    # That is the correct quantity -- it is when the cluster can accept durable
+    # writes again -- and it is the like-for-like counterpart of a Raft group
+    # regaining quorum. One fault against five nodes always leaves three
+    # standbys, so two eligible acks remain reachable and the cluster cannot
+    # wedge on a single injected fault.
+    synchronous_mode_strict: true
     postgresql:
       use_pg_rewind: true
       use_slots: true
+      #
+      # use_pg_rewind alone is NOT enough to get a demoted primary back, and
+      # this project has the run that proves it. Phase III partitions the
+      # primary (`tailscale down`), so the old primary is demoted holding WAL
+      # the new timeline never saw -- on 2026-09-09 it forked at 0/157C7D10
+      # while gcp-1's local checkpoint had reached 0/157C7E40. That is exactly
+      # what pg_rewind is for, and Patroni duly ran it three times. It failed
+      # every time:
+      #
+      #   pg_rewind: servers diverged at WAL location 0/157C7D10 on timeline 1
+      #   pg_rewind: error: could not open file
+      #     "/var/lib/postgresql/16/data/pg_wal/00000001000000000000000C":
+      #     No such file or directory
+      #   pg_rewind: error: could not find previous WAL record at 0/CFFFCF8
+      #
+      # pg_rewind reads the TARGET's own WAL backwards from the divergence
+      # point to the last common checkpoint, and gcp-1 had already recycled
+      # those segments -- the checkpoint that completed 30 s before the fault
+      # recycled 12 of them (~192 MB) because wal_keep_size defaults to 0. The
+      # node parked at "start failed" and stayed there indefinitely; the
+      # subsequent `patronictl switchover` correctly answered "no good
+      # candidates have been found", and Phase IV never ran. Structural, not
+      # bad luck: it happens after every Phase III run against the primary.
+      #
+      # Fall back to a fresh basebackup when the rewind cannot be done. This is
+      # the guarantee -- wal_keep_size below is only the fast path that usually
+      # avoids paying for it. Without this the harness has no way back at all,
+      # and the cost of the wrong choice is a testbed that cannot run Phase IV.
+      remove_data_directory_on_diverged_timelines: true
       parameters:
+        # synchronous_standby_names is deliberately absent: Patroni manages it
+        # in quorum mode (see synchronous_mode above). Do not re-add it.
         synchronous_commit: on
-        synchronous_standby_names: 'ANY 2 (*)'
         max_connections: 500
+        # Retain enough WAL that pg_rewind can walk back to the last common
+        # checkpoint instead of finding the segment recycled (see
+        # remove_data_directory_on_diverged_timelines above for the run this
+        # comes from). Sized against measured churn -- ~192 MB recycled per
+        # checkpoint interval at the 125k-row working set -- with headroom for
+        # the 3.75M-row thesis profile, on the 50 GB disks these nodes now get.
+        # It is a retention floor, not an allocation: WAL is only kept if it
+        # was written.
+        wal_keep_size: '4GB'
+        # Substituted below by the sed that follows this heredoc -- the value is
+        # a fraction of the node's ACTUAL RAM, which a quoted heredoc cannot
+        # compute. See "Memory budget" below for why it is a fraction and not a
+        # literal.
+        shared_buffers: __SHARED_BUFFERS_MB__MB
+        effective_cache_size: __EFFECTIVE_CACHE_MB__MB
   initdb:
     - auth-host: md5
     - auth-local: trust
@@ -148,21 +262,166 @@ postgresql:
       username: postgres
       password: postgrespassword
 
+EOF
+
+# ------------------------------------------------------------------
+# The designated primary, and why there is one
+# ------------------------------------------------------------------
+# Patroni's leader is an unbiased etcd election: whichever node acquires the
+# lock first bootstraps and becomes primary. That is not acceptable for this
+# experiment, because the leader's *location* is a confound. The workload is
+# driven from crdb-client-1 (GCP us-east1), and CockroachDB pins its
+# leaseholder to crdb-gcp-1 in the same region via lease_preferences -- so the
+# CockroachDB arm pays a ~1 ms client-to-leaseholder hop. Measured on this
+# testbed 2026-09-09, an unpinned election put the PostgreSQL primary on
+# crdb-azure-2 (Azure eastasia), 199 ms from the client: a fresh connection
+# cost 1.02 s against 0.05 s to crdb-gcp-1, a 20x penalty on every connection
+# the generator opens. That is not a property of PostgreSQL, it is a property
+# of where the election happened to land, and comparing the two engines across
+# it would measure cloud geography rather than the databases.
+#
+# Pinning to gcp-1 also makes the write floors comparable, which is the
+# equivalence the comparison rests on. RTTs from gcp-1: linode-1 18 ms,
+# linode-2 70 ms, azure-1 230 ms, azure-2 204 ms. synchronous_standby_names
+# 'ANY 2 (*)' commits on the two fastest acks, so ~70 ms -- against the 68.8 ms
+# 3-of-5 Raft quorum floor recorded from gcp-1 on the CockroachDB arm.
+#
+# The hostname is a literal here because no new terraform variable can be
+# added without editing modules/*_node/main.tf. It mirrors crdblab/topology.py,
+# which already hardcodes gcp-1 as the gateway, and the CockroachDB bootstrap,
+# which hardcodes us-east1 in lease_preferences.
+DESIGNATED_PRIMARY="crdb-gcp-1"
+
+# failover_priority biases *elections*, so gcp-1 is preferred whenever one
+# happens. Deliberately NOT nofailover:true on the other nodes: that would
+# forbid the failover Phase IV exists to measure. Patroni 4.1.5 is installed
+# here and supports the tag (patroni.tags.Tags exposes failover_priority).
+# Note this only biases who wins a contested election; it does not fail back
+# on its own, which is why the harness performs an explicit switchover between
+# phases (see preflight.check_patroni_primary_placement).
+if [ "${hostname}" = "$DESIGNATED_PRIMARY" ]; then
+    FAILOVER_PRIORITY=100
+else
+    FAILOVER_PRIORITY=1
+fi
+
+# Appended with an UNQUOTED heredoc so $FAILOVER_PRIORITY expands -- the config
+# heredoc above is quoted and cannot interpolate. No backticks may appear in
+# here: an unquoted heredoc runs them as commands, which has already corrupted
+# two config files in this project.
+cat <<EOF >> /etc/patroni/config.yml
+
 tags:
   nofailover: false
   noloadbalance: false
   clonefrom: false
   nosync: false
+  failover_priority: $FAILOVER_PRIORITY
 EOF
 
 # The config carries the superuser and replication passwords, and patroni runs
 # as `postgres`, so it is readable by that user and by nobody else.
 chown root:postgres /etc/patroni/config.yml
+# ------------------------------------------------------------------
+# Memory budget: match CockroachDB's, and match it the way CockroachDB
+# expresses it.
+# ------------------------------------------------------------------
+# bootstrap-cockroachdb.tftpl starts every cluster node with `--cache=0.25
+# --max-sql-memory=0.25`, so the CockroachDB arm gets a block cache of a
+# QUARTER OF THE NODE'S RAM. PostgreSQL was given no memory configuration at
+# all, so it ran on the packaged default of shared_buffers = 128MB -- against
+# CockroachDB's ~1GB on these 4GB nodes, an eightfold asymmetry in the one
+# resource that decides whether a 179 MiB working set is served from memory.
+#
+# The asymmetry happened to favour CockroachDB, so it does not explain the
+# PostgreSQL arm's higher throughput on the 2026-09-08 runs, but it is exactly
+# the shape of D9 -- two servers compared without their configurations having
+# been checked against each other -- and leaving it in place would mean the
+# headline comparison rested on an unexamined difference. It also means the
+# CockroachDB arm's saturation was measured with MORE cache than the default,
+# which is the fair direction to be wrong in but still needs to be stated.
+#
+# This is computed as a FRACTION of measured RAM rather than written as `1GB`
+# for the same reason `--cache` is a fraction: identical literals on unlike
+# machines give unlike caches, which is D9 in the form the flag comparison
+# cannot see. Deriving both from /proc/meminfo keeps the two engines tracking
+# each other if the instance type ever changes.
+#
+# What is deliberately NOT matched:
+#   * `--max-sql-memory=0.25` has no PostgreSQL counterpart. It is a ceiling on
+#     a global pool for query execution; PostgreSQL's `work_mem` is a per-node
+#     allowance inside each query, and with max_connections 500 raising it is
+#     how a 4GB node gets OOM-killed. YCSB is primary-key point lookups and
+#     single-row updates -- no sort, no hash join -- so neither engine draws on
+#     this budget in the measured workload. Raising work_mem to "match" would
+#     be tuning PostgreSQL past CockroachDB, not equalising them.
+#   * The OS page cache. Both engines read through it (Pebble and PostgreSQL
+#     alike), so neither is isolated to its declared cache and the real
+#     residency on a 4GB node is larger than either number. That is a shared
+#     property of the comparison, not an asymmetry between the arms.
+#
+# effective_cache_size allocates nothing -- it is the planner's estimate of
+# total cache, shared_buffers plus what the OS is likely holding. It is set
+# because the packaged default assumes 4GB of cache on a node that has 4GB of
+# RAM in total, and an over-estimate biases the planner toward index scans. For
+# this workload that happens to be the plan we want anyway, so the correction
+# is about the configuration being declared and defensible rather than about
+# changing a plan. preflight's row-match probe reads `seq_scan` per tier and
+# fails the tier if the plan is not an index scan, so a regression here is
+# caught by the measurement rather than by inspection.
+MEM_TOTAL_KB=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
+SHARED_BUFFERS_MB=$((MEM_TOTAL_KB / 1024 / 4))
+EFFECTIVE_CACHE_MB=$((MEM_TOTAL_KB / 1024 * 3 / 4))
+
+sed -i "s/__SHARED_BUFFERS_MB__/$SHARED_BUFFERS_MB/; s/__EFFECTIVE_CACHE_MB__/$EFFECTIVE_CACHE_MB/" \
+    /etc/patroni/config.yml
+
+# Fail loudly rather than letting Patroni start on a config still carrying a
+# placeholder: an unsubstituted token is a YAML string, PostgreSQL rejects it,
+# and the node would fail to bootstrap for a reason nothing here would explain.
+if grep -q '__SHARED_BUFFERS_MB__\|__EFFECTIVE_CACHE_MB__' /etc/patroni/config.yml; then
+    echo "FAILED: memory placeholders were not substituted in /etc/patroni/config.yml" >&2
+    exit 1
+fi
+echo "Memory budget: shared_buffers=$${SHARED_BUFFERS_MB}MB effective_cache_size=$${EFFECTIVE_CACHE_MB}MB (MemTotal $${MEM_TOTAL_KB}kB)"
+
 chmod 640 /etc/patroni/config.yml
 
 systemctl stop postgresql
 systemctl disable postgresql
 systemctl enable patroni
+
+# ------------------------------------------------------------------
+# Deterministic bootstrap ordering
+# ------------------------------------------------------------------
+# failover_priority governs elections but NOT the initial bootstrap: the first
+# node to take the lock runs initdb and becomes primary regardless of tags. So
+# the ordering is enforced here instead -- the designated primary starts first
+# and every other node waits until it has actually won before starting, at
+# which point they can only join as replicas via pg_basebackup.
+#
+# Failing loudly is the point, and is the same stance as the :8008/health poll
+# below: a node that provisions "successfully" into the wrong topology puts the
+# defect into a measurement result instead of into an error.
+if [ "${hostname}" != "$DESIGNATED_PRIMARY" ]; then
+    echo "Waiting for the designated primary $DESIGNATED_PRIMARY to take the leader lock..."
+    PRIMARY_WON=0
+    for _ in $(seq 1 60); do
+        if curl -sf -m 5 -o /dev/null "http://$DESIGNATED_PRIMARY:8008/primary"; then
+            PRIMARY_WON=1
+            break
+        fi
+        sleep 5
+    done
+    if [ "$PRIMARY_WON" != "1" ]; then
+        echo "FAILED: $DESIGNATED_PRIMARY did not become primary within 300s." >&2
+        echo "Refusing to start Patroni here, because doing so would race for the" >&2
+        echo "leader lock and could bootstrap the cluster on the wrong node." >&2
+        exit 1
+    fi
+    echo "$DESIGNATED_PRIMARY is primary; starting as a replica."
+fi
+
 systemctl start patroni
 
 # Verify rather than sleep. `systemctl start` returning 0 says the unit was
@@ -187,14 +446,21 @@ if [ "$PATRONI_UP" != "1" ]; then
     exit 1
 fi
 
-# The databases are created by whichever node the election actually made
-# primary -- not by PEERS[0]. Nothing pins Patroni's leader, so naming a node
-# in advance is a guess: on the 2026-09-08 deployment it was crdb-azure-1 while
-# PEERS[0] is crdb-gcp-1, and gating creation on PEERS[0] left gcp-1 waiting out
-# its timeout and failing provisioning while the databases were never created
-# at all. Exactly one node can answer :8008/primary, so exactly one runs the
-# block below; every other node stops looking as soon as it sees that some peer
-# has won, and exits successfully because it has nothing to do.
+# The databases are created by whichever node actually answers :8008/primary,
+# which is checked live rather than assumed -- even though the ordering above
+# now makes that node deterministically $DESIGNATED_PRIMARY.
+#
+# Keeping the live check is deliberate. Gating creation on a node named in
+# advance (PEERS[0]) is exactly what failed on the 2026-09-08 deployment: the
+# election had put the primary on crdb-azure-1 while PEERS[0] is crdb-gcp-1, so
+# gcp-1 waited out its timeout and failed provisioning while ycsb was never
+# created at all. The ordering above should make that impossible now, but the
+# cost of verifying is one HTTP request and the cost of assuming wrongly is a
+# testbed with no database on it.
+#
+# Exactly one node can answer :8008/primary, so exactly one runs the block
+# below; every other node stops looking as soon as it sees that a peer has won,
+# and exits successfully because it has nothing to do.
 IS_PRIMARY=0
 for _ in $(seq 1 36); do
     if curl -sf -m 5 -o /dev/null http://127.0.0.1:8008/primary; then
@@ -220,14 +486,32 @@ if [ "$IS_PRIMARY" = "1" ]; then
     # the harness connects as is `root`, matching the CockroachDB side, so
     # without this the deployment comes up healthy and refuses every one of its
     # connections.
+    #
+    # These commits are forced local (bypassing synchronous_standby_names)
+    # rather than left to wait on it. The primary can be elected as soon as
+    # etcd reaches 3-of-5 quorum, which says nothing about whether the 2
+    # streaming standbys `ANY 2 (*)` requires have joined yet -- the other
+    # four nodes are still mid apt-get on their own schedule, and cloud
+    # providers do not boot in lockstep. synchronous_commit=on with too few
+    # standbys attached blocks a commit indefinitely (no timeout), so an
+    # unmodified session here can hang this node's cloud-init forever the
+    # first time the primary wins the race before two replicas exist. This
+    # is a one-time administrative bootstrap step with no bearing on the
+    # measured workload's durability, which is governed by the standing
+    # postgresql.conf, not this script.
     echo "Creating the harness roles on the primary..."
-    sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='root'" | grep -q 1 \
-      || sudo -u postgres psql -c "CREATE ROLE root LOGIN SUPERUSER PASSWORD 'rootpassword'"
-    sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='admin'" | grep -q 1 \
-      || sudo -u postgres psql -c "CREATE ROLE admin LOGIN CREATEROLE CREATEDB PASSWORD 'adminpassword'"
+    sudo -u postgres env PGOPTIONS="-c synchronous_commit=local" \
+      psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='root'" | grep -q 1 \
+      || sudo -u postgres env PGOPTIONS="-c synchronous_commit=local" \
+      psql -c "CREATE ROLE root LOGIN SUPERUSER PASSWORD 'rootpassword'"
+    sudo -u postgres env PGOPTIONS="-c synchronous_commit=local" \
+      psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='admin'" | grep -q 1 \
+      || sudo -u postgres env PGOPTIONS="-c synchronous_commit=local" \
+      psql -c "CREATE ROLE admin LOGIN CREATEROLE CREATEDB PASSWORD 'adminpassword'"
 
     echo "Creating databases on the primary..."
     export PGPASSWORD=rootpassword
+    export PGOPTIONS="-c synchronous_commit=local"
     psql -h 127.0.0.1 -U root -d postgres -c "CREATE DATABASE bench OWNER root;" || true
     psql -h 127.0.0.1 -U root -d postgres -c "CREATE DATABASE ycsb OWNER root;" || true
     # Verified, not assumed: `|| true` above tolerates "already exists", which
@@ -235,6 +519,33 @@ if [ "$IS_PRIMARY" = "1" ]; then
     psql -h 127.0.0.1 -U root -d ycsb -c "SELECT 1;" >/dev/null \
       || { echo "FAILED: database ycsb is not reachable after creation." >&2; exit 1; }
     echo "Databases created."
+fi
+
+# ==========================================
+# 6. node_exporter -- hardware metrics polled directly by the harness
+# ==========================================
+# Not a standalone Prometheus server and nothing else on this testbed scrapes
+# it -- crdblab/core/hardware_metrics.py polls :9100/metrics directly over
+# the Tailscale mesh, the same way it already polls Patroni's :8008 REST API.
+# No firewall change needed for the same reason neither of those needed one:
+# every cross-node service here rides the tailnet, never the cloud provider's
+# public/VPC network.
+apt-get install -yq prometheus-node-exporter
+systemctl enable prometheus-node-exporter
+systemctl restart prometheus-node-exporter
+
+NODE_EXPORTER_UP=0
+for _ in $(seq 1 12); do
+    if ss -lnt 2>/dev/null | grep -q ':9100 '; then
+        NODE_EXPORTER_UP=1
+        break
+    fi
+    sleep 5
+done
+if [ "$NODE_EXPORTER_UP" != "1" ]; then
+    echo "FAILED: node_exporter is not listening on :9100 after 60s." >&2
+    systemctl status prometheus-node-exporter --no-pager >&2 || true
+    exit 1
 fi
 
 echo "✅ Patroni node provisioned successfully."
