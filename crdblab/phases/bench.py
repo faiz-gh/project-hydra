@@ -507,6 +507,8 @@ def run(
         manifest.note("engine: postgresql (patroni HA)")
     manifest.note(f"server: {server.get('start_command', '')}")
     manifest.note(f"host: {preflight.format_hardware(server.get('hardware', {}))}")
+    if server.get("memory"):
+        manifest.note(f"pg memory: {preflight.format_pg_memory(server['memory'])}")
 
     # All 5 cluster nodes plus the client node the generator runs from --
     # node_exporter is OS-level, not database-level, so it's polled on every

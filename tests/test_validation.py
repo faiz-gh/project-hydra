@@ -132,15 +132,22 @@ def test_a_sound_run_passes_every_check():
 
 # --- cross-engine comparability --------------------------------------------
 
-def _manifest(engine, version, cpus=2, mem=4007004):
+def _manifest(engine, version, cpus=2, mem=4007004, flags="", pg_memory=None):
+    notes = [
+        f" server: some server start command{flags}",
+        f" host: cpus={cpus} mem_total_kb={mem} cpu_model=Intel(R) Xeon(R) CPU @ 2.80GHz",
+    ]
+    if pg_memory is not None:
+        shared_buffers_kb, effective_cache_size_kb = pg_memory
+        notes.append(
+            f" pg memory: shared_buffers_kb={shared_buffers_kb} "
+            f"effective_cache_size_kb={effective_cache_size_kb}"
+        )
     return {
         "engine": engine,
         "server_version": version,
         "profile": {"workload": {}},
-        "notes": [
-            " server: some server start command",
-            f" host: cpus={cpus} mem_total_kb={mem} cpu_model=Intel(R) Xeon(R) CPU @ 2.80GHz",
-        ],
+        "notes": notes,
     }
 
 
@@ -195,3 +202,81 @@ def test_unlike_machines_are_still_refused_across_engines():
         "crdb", "pg",
     )
     assert any(f.severity == "error" and "hardware" in f.message.lower() for f in findings)
+
+
+def test_same_engine_cache_mismatch_still_errors():
+    """Regression guard: no existing fixture put `--` flags in the server note
+    at all, so `_MATCHED_SERVER_FLAGS` was never actually exercised by the
+    suite. Same-engine behaviour must be unchanged by the cross-engine fix."""
+    from crdblab.analysis.validation import check_run_comparability
+
+    findings = check_run_comparability(
+        _manifest("cockroachdb", "v26.3.0", flags=" --cache=0.25"),
+        _manifest("cockroachdb", "v26.3.0", flags=" --cache=0.10"),
+        "a", "b",
+    )
+    assert any(
+        f.severity == "error" and "--cache" in f.message and "D9" in f.message
+        for f in findings
+    )
+
+
+def test_cross_engine_with_no_pg_memory_data_warns_but_does_not_error():
+    """This is the state both of the project's real thesis-scale `dead` runs
+    are in today -- recorded before this note existed. It must not refuse the
+    comparison, only note that cache-budget equivalence is unverified."""
+    from crdblab.analysis.validation import check_run_comparability
+
+    findings = check_run_comparability(
+        _manifest("cockroachdb", "v26.3.0", flags=" --cache=0.25 --max-sql-memory=0.25"),
+        _manifest("postgresql", "16.15"),
+        "crdb", "pg",
+    )
+    assert [f for f in findings if f.severity == "error"] == []
+    assert any("cache budget" in f.message and "not recorded" in f.message for f in findings)
+
+
+def test_cross_engine_cache_within_tolerance_is_clean():
+    """CockroachDB's --cache=0.25 of 4,007,004 kB implies ~1,001,751 kB;
+    978 MiB of shared_buffers (1,001,472 kB) is the value this project's own
+    bootstrap template actually derives on these nodes -- well within
+    tolerance, and should raise no finding at all about the cache budget."""
+    from crdblab.analysis.validation import check_run_comparability
+
+    findings = check_run_comparability(
+        _manifest("cockroachdb", "v26.3.0", flags=" --cache=0.25"),
+        _manifest("postgresql", "16.15", pg_memory=(1001472, 3004416)),
+        "crdb", "pg",
+    )
+    assert [f for f in findings if f.severity == "error"] == []
+    assert not any("cache budget" in f.message for f in findings)
+
+
+def test_cross_engine_cache_outside_tolerance_errors():
+    """Reproduces the historical asymmetry documented in CLAUDE.md: PostgreSQL
+    on the packaged 128 MiB shared_buffers default against CockroachDB's
+    --cache=0.25 (~978 MiB on these nodes) -- an eightfold difference that
+    must be refused, not silently compared."""
+    from crdblab.analysis.validation import check_run_comparability
+
+    findings = check_run_comparability(
+        _manifest("cockroachdb", "v26.3.0", flags=" --cache=0.25"),
+        _manifest("postgresql", "16.15", pg_memory=(131072, 3004416)),
+        "crdb", "pg",
+    )
+    assert any(f.severity == "error" and "D9" in f.message for f in findings)
+
+
+def test_max_sql_memory_is_never_compared_cross_engine():
+    """PostgreSQL's work_mem is per-query, not a global pool, and has no
+    counterpart to --max-sql-memory -- it must never appear in a cross-engine
+    finding, even when recorded and even when the cache axis also errors."""
+    from crdblab.analysis.validation import check_run_comparability
+
+    findings = check_run_comparability(
+        _manifest("cockroachdb", "v26.3.0", flags=" --cache=0.25 --max-sql-memory=0.25"),
+        _manifest("postgresql", "16.15", pg_memory=(131072, 3004416)),
+        "crdb", "pg",
+    )
+    assert not any("max-sql-memory" in f.message for f in findings)
+    assert not any("max-sql-memory" in str(f.detail) for f in findings)

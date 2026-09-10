@@ -1095,6 +1095,8 @@ def run(
         manifest.note("engine: postgresql (patroni HA)")
     manifest.note(f"server: {server.get('start_command', '')}")
     manifest.note(f"host: {preflight.format_hardware(server.get('hardware', {}))}")
+    if server.get("memory"):
+        manifest.note(f"pg memory: {preflight.format_pg_memory(server['memory'])}")
     payload = get_payload(mode, engine)
     manifest.note(f"fault scheduled for {profile.chaos.inject_at_s}s: {payload}")
     manifest.note(

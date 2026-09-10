@@ -273,6 +273,19 @@ _MATCHED_SERVER_FLAGS: tuple[str, ...] = ("--cache", "--max-sql-memory")
 #: means the two servers cached materially different amounts on identical flags.
 MEMORY_TOLERANCE = 0.05
 
+#: Relative difference tolerated between CockroachDB's *implied* cache size
+#: (--cache fraction * measured mem_total_kb) and PostgreSQL's actual
+#: shared_buffers, when comparing across engines. Deliberately a separate
+#: constant from MEMORY_TOLERANCE even though both currently hold 0.05: that
+#: one bounds provider rounding noise in a single raw MemTotal reading; this
+#: one bounds whether two engines' independently-computed cache budgets
+#: actually hit the shared design target (bootstrap-patroni.tftpl derives
+#: shared_buffers as a quarter of MemTotal, matching --cache=0.25) -- a
+#: conceptually different question that may need its own tuning later. 5%
+#: comfortably covers the ~0.03% quantization from shared_buffers being
+#: stored in whole MB while the CockroachDB fraction is not.
+CACHE_EQUIVALENCE_TOLERANCE = 0.05
+
 #: Workload parameters that must match. A difference in any of these means the
 #: two runs did different work, so their difference is not replication cost.
 #: ``seed`` and ``insert_count`` are included because a mismatch against the
@@ -340,6 +353,30 @@ def host_hardware(manifest: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+def pg_cache_config(manifest: dict[str, Any]) -> dict[str, int | None] | None:
+    """The ``pg memory:`` note as a dict, or ``None`` for a run without one.
+
+    Absent for a CockroachDB run (nothing to probe), a legacy PostgreSQL run
+    recorded before this note existed, or a PostgreSQL run whose probe
+    failed -- all three are reported identically as "not recorded" by the
+    caller, since none of them can support a cross-engine cache-budget
+    comparison.
+    """
+    for note in manifest.get("notes", []) or []:
+        if " pg memory: " in note:
+            fields = dict(
+                part.split("=", 1)
+                for part in note.split(" pg memory: ", 1)[1].split(" ")
+                if "=" in part
+            )
+            sb, ec = fields.get("shared_buffers_kb"), fields.get("effective_cache_size_kb")
+            return {
+                "shared_buffers_kb": int(sb) if sb and sb.isdigit() else None,
+                "effective_cache_size_kb": int(ec) if ec and ec.isdigit() else None,
+            }
+    return None
+
+
 def check_run_comparability(
     a: dict[str, Any],
     b: dict[str, Any],
@@ -377,6 +414,17 @@ def check_run_comparability(
             )
         )
 
+    # `server_version` for runs recorded after it existed; `cockroach_version`
+    # for every run before that, where it was the only place a version was
+    # written. Reading both means an old CockroachDB run stays comparable with
+    # a new one. Computed here (rather than just before its own check below)
+    # because the server-flags check right below also needs to know whether
+    # the two runs are the same engine.
+    va = a.get("server_version") or a.get("cockroach_version")
+    vb = b.get("server_version") or b.get("cockroach_version")
+    ea = a.get("engine") or "cockroachdb"
+    eb = b.get("engine") or "cockroachdb"
+
     cmd_a, cmd_b = _server_command(a), _server_command(b)
     if cmd_a is None or cmd_b is None:
         findings.append(
@@ -390,7 +438,7 @@ def check_run_comparability(
                 {},
             )
         )
-    else:
+    elif ea == eb:
         fa, fb = server_flags(cmd_a), server_flags(cmd_b)
         mismatched = {
             flag: (fa.get(flag), fb.get(flag))
@@ -413,6 +461,73 @@ def check_run_comparability(
                     {"mismatched_server_flags": {k: list(v) for k, v in mismatched.items()}},
                 )
             )
+    else:
+        # Cross engine: comparing _MATCHED_SERVER_FLAGS literally is meaningless
+        # here, since PostgreSQL's postmaster argv has neither flag by
+        # construction -- that used to make this refuse *every* cross-engine
+        # pair with "different --cache (0.25 vs unset)". Only --cache has a
+        # documented PostgreSQL counterpart: bootstrap-patroni.tftpl derives
+        # shared_buffers as the same fraction of measured RAM (0.25) that
+        # --cache is, so the two are meant to name the same absolute cache
+        # size on like hardware. --max-sql-memory has no counterpart at all
+        # (PostgreSQL's work_mem is per-query, not a global pool, and this
+        # workload's point lookups draw on neither budget) and is deliberately
+        # never compared cross-engine.
+        if {ea, eb} == {"cockroachdb", "postgresql"}:
+            crdb_a = ea == "cockroachdb"
+            crdb_manifest, crdb_label, crdb_cmd = (
+                (a, label_a, cmd_a) if crdb_a else (b, label_b, cmd_b)
+            )
+            pg_manifest, pg_label = (b, label_b) if crdb_a else (a, label_a)
+
+            crdb_hw = host_hardware(crdb_manifest)
+            cache_fraction = server_flags(crdb_cmd).get("--cache")
+            crdb_cache_kb = None
+            if cache_fraction and crdb_hw and crdb_hw.get("mem_total_kb"):
+                try:
+                    crdb_cache_kb = float(cache_fraction) * crdb_hw["mem_total_kb"]
+                except ValueError:
+                    crdb_cache_kb = None
+            pg_mem = pg_cache_config(pg_manifest)
+            pg_cache_kb = pg_mem.get("shared_buffers_kb") if pg_mem else None
+
+            if crdb_cache_kb is not None and pg_cache_kb is not None:
+                rel_diff = abs(crdb_cache_kb - pg_cache_kb) / max(crdb_cache_kb, pg_cache_kb)
+                if rel_diff > CACHE_EQUIVALENCE_TOLERANCE:
+                    findings.append(
+                        Finding(
+                            "run_comparability",
+                            "error",
+                            f"{crdb_label}'s implied cache ({crdb_cache_kb:.0f} kB, "
+                            f"--cache={cache_fraction} of {crdb_hw['mem_total_kb']} kB "
+                            f"RAM) and {pg_label}'s shared_buffers ({pg_cache_kb} kB) "
+                            f"differ by {rel_diff:.1%}, more than the "
+                            f"{CACHE_EQUIVALENCE_TOLERANCE:.0%} tolerance; the "
+                            "difference between them therefore confounds the "
+                            "variable under study with cache residency (D9)",
+                            {
+                                "crdb_implied_cache_kb": round(crdb_cache_kb, 1),
+                                "pg_shared_buffers_kb": pg_cache_kb,
+                                "relative_difference": round(rel_diff, 4),
+                            },
+                        )
+                    )
+            else:
+                findings.append(
+                    Finding(
+                        "run_comparability",
+                        "warning",
+                        f"PostgreSQL's cache budget was not recorded for {pg_label} "
+                        f"(or CockroachDB's --cache/mem_total_kb could not be read "
+                        f"for {crdb_label}), so cross-engine cache-budget "
+                        "equivalence could not be verified; this is the condition "
+                        "under which D9 went unnoticed",
+                        {
+                            "crdb_implied_cache_kb": crdb_cache_kb,
+                            "pg_shared_buffers_kb": pg_cache_kb,
+                        },
+                    )
+                )
 
     ha, hb = host_hardware(a), host_hardware(b)
     if ha is None or hb is None:
@@ -502,14 +617,7 @@ def check_run_comparability(
                     )
                 )
 
-    # `server_version` for runs recorded after it existed; `cockroach_version`
-    # for every run before that, where it was the only place a version was
-    # written. Reading both means an old CockroachDB run stays comparable with
-    # a new one.
-    va = a.get("server_version") or a.get("cockroach_version")
-    vb = b.get("server_version") or b.get("cockroach_version")
-    ea = a.get("engine") or "cockroachdb"
-    eb = b.get("engine") or "cockroachdb"
+    # va/vb/ea/eb were computed earlier, before the server-flags check above.
     if ea != eb:
         # Two engines have different version strings by definition -- that is
         # the variable under study, not a confound -- and treating it as an

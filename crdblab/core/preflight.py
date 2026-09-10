@@ -180,6 +180,13 @@ def capture_server_config(node: Node, engine: str = "cockroachdb") -> dict[str, 
     ``MemTotal`` silently changes the absolute cache size even when the flags do
     not move: the flags can match exactly while the caches differ, which is D9
     reappearing in a form the flag comparison alone cannot see.
+
+    For PostgreSQL, ``memory`` additionally carries ``shared_buffers``/
+    ``effective_cache_size`` (see :func:`capture_pg_memory_config`) -- the
+    counterpart ``--cache``/``--max-sql-memory`` has no equivalent for on the
+    postmaster's own argv, since Patroni sets them as ``postgresql.conf``
+    parameters rather than command-line flags. It is ``None`` for CockroachDB,
+    where there is nothing PostgreSQL-specific to probe.
     """
     argv_cmd, version_cmd = _SERVER_PROBES.get(engine, _SERVER_PROBES["cockroachdb"])
     result = ssh.run(
@@ -198,6 +205,7 @@ def capture_server_config(node: Node, engine: str = "cockroachdb") -> dict[str, 
         "start_command": argv.strip(),
         "version": version.strip() or None,
         "hardware": parse_hardware(hardware),
+        "memory": capture_pg_memory_config(node) if engine == "postgresql" else None,
     }
 
 
@@ -221,6 +229,63 @@ def parse_hardware(block: str) -> dict[str, Any]:
         else:
             out["cpu_model"] = " ".join(line.split())
     return out
+
+
+#: Reads PostgreSQL's *actual* running memory configuration rather than a
+#: literal off the postmaster's argv, because Patroni sets these as
+#: postgresql.conf parameters, not command-line flags -- they never appear in
+#: `capture_server_config`'s argv capture, on any run. `pg_size_bytes()`
+#: converts the human-readable setting (e.g. "978MB") to a plain byte
+#: integer, so this module needs no unit parser of its own.
+_PG_MEMORY_QUERY = (
+    "SELECT pg_size_bytes(current_setting('shared_buffers')), "
+    "pg_size_bytes(current_setting('effective_cache_size'))"
+)
+
+
+def capture_pg_memory_config(node: Node) -> dict[str, int] | None:
+    """PostgreSQL's ``shared_buffers``/``effective_cache_size``, in kB.
+
+    This is the PostgreSQL counterpart CockroachDB's ``--cache`` needs for a
+    cross-engine cache-budget comparison (see
+    ``analysis.validation.check_run_comparability``): both are provisioned as
+    fractions of the same measured RAM (``bootstrap-patroni.tftpl`` derives
+    ``shared_buffers`` as a quarter of ``MemTotal``, matching ``--cache=0.25``),
+    but that equivalence was never checked because it was never captured.
+
+    Queried against the local unix socket as the ``postgres`` OS/DB superuser,
+    the same passwordless idiom ``bootstrap-patroni.tftpl`` already uses
+    (``auth-local: trust`` makes this un-authenticated for local connections;
+    ``sudo -n`` is this module's standing idiom for privileged remote
+    commands). Any failure -- not PostgreSQL, ``psql`` missing, a transient
+    connection error -- collapses to ``None`` rather than raising, because the
+    caller treats "not postgres" and "probe failed" identically: cross-engine
+    cache-budget equivalence could not be verified for this run either way.
+    """
+    result = ssh.run(
+        node,
+        f"{ssh.SUDO} -u postgres psql -tAF, -c {shlex.quote(_PG_MEMORY_QUERY)}",
+        timeout=CONTROL_TIMEOUT_S,
+    )
+    if result.returncode != 0:
+        return None
+    line = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
+    parts = line.split(",")
+    if len(parts) != 2 or not all(p.strip().isdigit() for p in parts):
+        return None
+    shared_buffers_bytes, effective_cache_bytes = (int(p.strip()) for p in parts)
+    return {
+        "shared_buffers_kb": shared_buffers_bytes // 1024,
+        "effective_cache_size_kb": effective_cache_bytes // 1024,
+    }
+
+
+def format_pg_memory(memory: dict[str, Any]) -> str:
+    """Render a PostgreSQL memory capture as one manifest note line."""
+    return (
+        f"shared_buffers_kb={memory.get('shared_buffers_kb')} "
+        f"effective_cache_size_kb={memory.get('effective_cache_size_kb')}"
+    )
 
 
 def format_hardware(hardware: dict[str, Any]) -> str:

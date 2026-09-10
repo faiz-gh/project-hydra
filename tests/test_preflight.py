@@ -396,3 +396,53 @@ def test_the_pg_stats_query_reads_no_sequential_row_counter():
 
     assert "seq_tup_read" not in _PG_STATS_QUERY
     assert "idx_tup_fetch" in _PG_STATS_QUERY and "idx_scan" in _PG_STATS_QUERY
+
+
+# --- PostgreSQL cache-budget probe ------------------------------------------
+#
+# shared_buffers/effective_cache_size never appear on the postmaster's own
+# argv -- Patroni sets them as postgresql.conf parameters -- so they were
+# never captured, and the cross-engine cache-budget check had nothing to
+# compare CockroachDB's --cache against. This is what closes that gap.
+
+def test_pg_memory_note_round_trips_through_the_manifest():
+    from crdblab.analysis.validation import pg_cache_config
+    from crdblab.core.preflight import format_pg_memory
+
+    memory = {"shared_buffers_kb": 1001472, "effective_cache_size_kb": 3004416}
+    note = f"2026-09-10T00:00:00Z pg memory: {format_pg_memory(memory)}"
+    assert pg_cache_config({"notes": [note]}) == memory
+
+
+def test_capture_pg_memory_config_parses_a_successful_probe():
+    from crdblab.core.preflight import capture_pg_memory_config
+
+    with patch(
+        "crdblab.core.ssh.run", return_value=RemoteResult(0, "1001474048,3004420096\n", "")
+    ):
+        assert capture_pg_memory_config(_GATEWAY) == {
+            "shared_buffers_kb": 1001474048 // 1024,
+            "effective_cache_size_kb": 3004420096 // 1024,
+        }
+
+
+def test_capture_pg_memory_config_returns_none_on_probe_failure():
+    from crdblab.core.preflight import capture_pg_memory_config
+
+    with patch("crdblab.core.ssh.run", return_value=RemoteResult(1, "", "connection refused")):
+        assert capture_pg_memory_config(_GATEWAY) is None
+
+
+def test_capture_server_config_cockroachdb_makes_no_extra_ssh_call():
+    """CockroachDB has no PostgreSQL-only budget to probe -- confirming this
+    stays a single round trip, not two, for the engine that gains nothing
+    from the second one."""
+    from crdblab.core.preflight import capture_server_config
+
+    with patch(
+        "crdblab.core.ssh.run",
+        return_value=RemoteResult(0, "cockroach start ...\n---\nv26.3.0\n---\n2\nsome cpu\nMemTotal: 4007012 kB", ""),
+    ) as run:
+        result = capture_server_config(_GATEWAY, engine="cockroachdb")
+    assert result["memory"] is None
+    assert run.call_count == 1

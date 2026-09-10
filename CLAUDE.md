@@ -401,20 +401,107 @@ below: worth fixing (either wire `Target.metrics_url` to CockroachDB's
 `:8080/_status/vars`, or delete the dead columns now that
 `hardware_metrics.csv` supersedes them), not yet done.
 
-**Order of work, updated:** the testbed is currently deployed as PostgreSQL
-(redeployed fresh this session to take the smoke run above). The only
-measurement gap left before `analyze engine-comparison` is worth attempting
-at all is CockroachDB's thesis-scale sweep, including its `dead` phase, which
-has never run at the current 3.75M-row profile on either engine's original
-attempt. That still means: redeploy to CockroachDB
-(`terraform apply -var="database_engine=cockroachdb"`), then
-`./run-experiment.sh --engine cockroachdb` at the `thesis` profile. The
-CockroachDB smoke run above confirms the code path; it does not confirm
-thesis-scale timing, the same caveat this file has made about every
-smoke-to-thesis jump so far. `analyze engine-comparison` remains blocked
-after that regardless, by the still-unfixed `_MATCHED_SERVER_FLAGS` gate
-described in its own gotcha below — that decision has not been made this
-session.
+**Update — 2026-09-10: both engines now have complete thesis-scale data,
+including `dead`, for the first time in the project.** Two full
+`./run-experiment.sh` invocations ran back to back against redeployed
+testbeds, closing the gap the previous note called the only one left.
+
+`./run-experiment.sh --engine cockroachdb` at `thesis`
+(`runs/_logs/experiment-20260909T222326Z.log`, 64 m 50 s — the bulk `IMPORT`
+loads 3.75M rows in 19 m 31 s, nothing like PostgreSQL's serial-insert load)
+completed all four phases, `dead` included, for the first time at this
+profile on either engine's original attempt: quorum floor 72.404 ms
+(`linode-1`, unchanged ranking); Phase II clean across all four concurrency
+tiers; Phase III (`recover`) availability RTO 11.92 s, probe outage 5290 ms,
+RPO 0/1578; Phase IV (`dead`) availability RTO 9.95 s, probe outage 4881 ms,
+RPO 0/1189, performance RTO undefined — throughput settled at 776 ops/s, 74%
+of baseline, just under the 80% recovery floor, correctly reported as a new
+stable state rather than a slow recovery. Run ids
+`20260909T224417Z_p1-network` through `20260909T231745Z_p4-chaos-dead`.
+
+The testbed was then redeployed to PostgreSQL and
+`./run-experiment.sh --engine postgresql` at `thesis`
+(`runs/_logs/experiment-20260909T235804Z.log`, 127 m 22 s) also completed all
+four phases end to end on the fresh deployment — the second complete
+PostgreSQL thesis run in the project's history, reproducing the shape of the
+first (2026-09-09 15:38) rather than superseding it. Phase III RPO 0/1126 (3
+ambiguous, 1 present in the table); Phase IV RPO 0/1421 (11 ambiguous, 0
+present); both phases' performance RTO came back undefined — recover
+settled at 819 ops/s (20% of baseline, latency CV 0.30, not settled), dead at
+325 ops/s (8% of baseline) — consistent with the primary-relocation
+read-path penalty documented above, not a new defect. Run ids
+`20260910T011709Z_p1-network` through `20260910T014707Z_p4-chaos-dead`.
+
+**`analyze engine-comparison` was attempted between the two `dead` runs above
+and, at the time, still refused, unchanged.** `_MATCHED_SERVER_FLAGS` still
+errored with "different --cache (0.25 vs unset, i.e. the 128 MiB default),
+--max-sql-memory (0.25 vs unset, i.e. the 128 MiB default)" — the same
+message documented in that gotcha below, confirmed still current against
+live data rather than only against the flag-comparison code. Full suite
+still 257 passing, no regressions since the code-only update above.
+
+**Update — the flag-gate decision above was made and implemented the same
+session, and `analyze engine-comparison` now succeeds against these same two
+runs.** The gate is now engine-aware, mirroring the pattern already used for
+the version check just below it in the same function: a same-engine
+`--cache`/`--max-sql-memory` mismatch is still a hard error, unchanged.
+Cross-engine, the two flags are no longer compared literally (meaningless —
+PostgreSQL's postmaster argv has neither), and only `--cache` gets a real
+check: `core/preflight.py::capture_pg_memory_config` now probes PostgreSQL's
+actual `shared_buffers`/`effective_cache_size` (via `sudo -u postgres psql`
+against the local trust-authenticated socket, the same idiom
+`bootstrap-patroni.tftpl` already uses), recorded as a new `pg memory:`
+manifest note; `analysis/validation.py::check_run_comparability` then
+compares CockroachDB's implied cache (`--cache` fraction × measured RAM)
+against PostgreSQL's recorded `shared_buffers` within a 5%
+`CACHE_EQUIVALENCE_TOLERANCE`, erroring on D9 if they diverge. `--max-sql-memory`
+is deliberately never compared cross-engine at all (no PostgreSQL
+counterpart — `work_mem` is per-query, not a global pool). Both existing
+`dead` runs above predate the new probe, so neither has a `pg memory:` note;
+this is handled as a **warning**, not an error ("PostgreSQL's cache budget
+was not recorded... equivalence could not be verified"), which is what
+actually unblocked them — confirmed live: `crdblab analyze
+engine-comparison --crdb 20260909T231745Z_p4-chaos-dead --pg
+20260910T014707Z_p4-chaos-dead` now exits 0 and prints a real
+throughput-latency comparison instead of refusing. Six new tests cover the
+same-engine-unchanged, cross-engine-unrecorded, cross-engine-within-tolerance,
+cross-engine-outside-tolerance and `--max-sql-memory`-never-compared cases;
+full suite 266 passing, `ruff check` shows the same 33 pre-existing findings
+as before this change (zero introduced by it, confirmed by diffing against
+the pre-change baseline on the same file set) — no regressions.
+**Known limitation, not yet closed:** the real fraction-comparison arithmetic
+is covered only by synthetic unit-test fixtures so far, not by a live probe
+against a running PostgreSQL node — `capture_pg_memory_config`'s exact
+`sudo -u postgres psql` invocation has not been exercised against a real
+cluster. It will run automatically the next time any PostgreSQL phase
+executes (`bench`, `chaos run`, or the between-phase repair in
+`run-experiment.sh` all call `capture_server_config`); worth a glance at that
+run's manifest for a `pg memory:` note the first time it happens, but nothing
+about it should require a dedicated run.
+
+**Order of work, updated: the cross-engine comparability gate is fixed; only
+a live confirmation of the new probe (not a full re-run) remains
+optional.** Every phase on both engines has run at least once at the current
+3.75M-row thesis profile, `dead` included, and `analyze engine-comparison`
+now runs against them end to end. The next PostgreSQL run of any kind will
+naturally confirm the new `capture_pg_memory_config` probe against a live
+cluster; nothing forces that to be a thesis-scale run. The testbed is
+currently deployed as PostgreSQL (the 2026-09-09 23:58 run's redeploy, not
+since changed).
+
+**Only the `dead`-phase pair has actually been run through
+`engine-comparison` so far; the other two are untried, not blocked.** The
+other two thesis-scale pairs available on disk right now, not yet attempted:
+`--crdb 20260909T224600Z_bench_cluster --pg 20260910T011819Z_bench_cluster`
+(Phase II, the only pair with a full 4-tier throughput-latency curve on both
+sides -- the other two chaos-run pairs carry a single pre-fault tier each,
+so their "matched throughput"/"matched utilisation" sections degrade to the
+lightest-load median and the NOT-A-RESULT same-concurrency delta rather than
+a real curve comparison) and
+`--crdb 20260909T230544Z_p4-chaos-recover --pg 20260910T013631Z_p4-chaos-recover`
+(Phase III). Running all three and writing up the results is the actual
+dissertation deliverable this fix exists to unblock; nothing about it
+requires new data collection or code.
 
 **This project was rearchitected from a different design.** It originally
 compared the five-node CockroachDB cluster against a separate *unreplicated*
@@ -1594,17 +1681,47 @@ testbed, not something touched by most code changes to `crdblab/`.
   already up, still fails hard rather than hanging, and names the offending
   host:code in the failure. Do not turn it back into a single reading.
 
-- **`analyze engine-comparison` still refuses every cross-engine comparison, and
-  this is NOT yet fixed.** `validation._MATCHED_SERVER_FLAGS` is
-  `("--cache", "--max-sql-memory")` -- both CockroachDB-only flags. PostgreSQL's
-  postmaster argv contains neither, so they read as `unset` and always mismatch,
-  and the gate errors with "were started with different --cache (0.25 vs unset)"
-  for *every* CockroachDB-vs-PostgreSQL pair. This is the same half-fixed shape
-  as the version check: that one was made engine-aware (a cross-engine version
-  difference is the variable under study, so it warns), the flag comparison was
-  not. Fixing it needs a measurement decision rather than a code change --
-  what the PostgreSQL counterpart of `--cache` is -- and it is load-bearing,
-  because the gate exists to stop D9.
+- **`analyze engine-comparison` used to refuse every cross-engine comparison;
+  fixed 2026-09-10.** `validation._MATCHED_SERVER_FLAGS` is `("--cache",
+  "--max-sql-memory")` -- both CockroachDB-only flags. PostgreSQL's postmaster
+  argv contains neither, so they read as `unset` and always mismatched, and the
+  gate errored with "were started with different --cache (0.25 vs unset)" for
+  *every* CockroachDB-vs-PostgreSQL pair. This was the same half-fixed shape as
+  the version check below: that one was made engine-aware first (a cross-engine
+  version difference is the variable under study, so it warns), the flag
+  comparison was not, for a while.
+  The fix needed a measurement decision, not just a code change: what the
+  PostgreSQL counterpart of `--cache` is. The answer is `shared_buffers` (see
+  the next gotcha) -- both are fractions of the same measured RAM by design,
+  just never checked against each other. `check_run_comparability` now branches
+  on `ea == eb` the same way the version check does: same-engine
+  `_MATCHED_SERVER_FLAGS` comparison is unchanged (still an error on any
+  mismatch). Cross-engine, the literal flags are never compared (meaningless --
+  one side has neither); instead, when both sides' data is available,
+  CockroachDB's implied cache (`--cache` fraction x measured `mem_total_kb`) is
+  compared against PostgreSQL's actual `shared_buffers` (newly probed by
+  `core/preflight.py::capture_pg_memory_config`, a `sudo -u postgres psql`
+  query against the local trust-authenticated socket, recorded as a `pg
+  memory:` manifest note) within `CACHE_EQUIVALENCE_TOLERANCE` (5%), erroring
+  on D9 if they diverge by more. When either side lacks the data -- true of
+  every run recorded before this fix, including both of the thesis-scale
+  `dead` runs cited above -- the check degrades to a **warning** ("cache
+  budget was not recorded... equivalence could not be verified") rather than
+  refusing outright, which is what actually unblocked those two runs without
+  needing to re-measure anything. `--max-sql-memory` is deliberately never
+  compared cross-engine, matching the "no PostgreSQL counterpart" decision in
+  the next gotcha. Verified against the two real on-disk thesis `dead` runs
+  (`crdblab analyze engine-comparison --crdb 20260909T231745Z_p4-chaos-dead
+  --pg 20260910T014707Z_p4-chaos-dead` exits 0 and prints a real comparison)
+  and by six new unit tests in `tests/test_validation.py`/`tests/test_preflight.py`;
+  full suite 266 passing, zero new `ruff` findings introduced (33
+  pre-existing findings, unchanged, confirmed by diffing against the
+  pre-change baseline on the same file set). **Not yet exercised**: the actual
+  `capture_pg_memory_config` probe against a live PostgreSQL node -- only
+  synthetic fixtures cover the real fraction-comparison arithmetic so far. It
+  will run automatically inside `capture_server_config` the next time any
+  PostgreSQL phase executes; no dedicated run is needed to confirm it, but it
+  hasn't happened yet as of this note.
 
 - **The two engines' cache budgets are matched, as fractions of measured RAM.**
   `bootstrap-cockroachdb.tftpl` starts every node with `--cache=0.25
@@ -1634,7 +1751,11 @@ testbed, not something touched by most code changes to `crdblab/`.
   after the quoted heredoc, because a quoted heredoc cannot compute anything and
   unquoting it is what corrupted two config files in this project; the script
   greps for a surviving placeholder and fails provisioning rather than letting
-  Patroni start on a config PostgreSQL will reject.
+  Patroni start on a config PostgreSQL will reject. **This equivalence is now
+  checked by the harness, not just asserted by provisioning** -- see the
+  previous gotcha: `capture_pg_memory_config` reads `shared_buffers` back at
+  measurement time and `check_run_comparability` compares it against
+  CockroachDB's implied `--cache` size within a 5% tolerance, cross-engine.
 
 - **The generator is ruled out as the cause of the cross-engine throughput
   gap** (checked 2026-09-09 against the 2026-09-08 thesis runs; don't re-litigate
