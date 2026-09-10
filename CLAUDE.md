@@ -442,7 +442,7 @@ still 257 passing, no regressions since the code-only update above.
 
 **Update — the flag-gate decision above was made and implemented the same
 session, and `analyze engine-comparison` now succeeds against these same two
-runs.** The gate is now engine-aware, mirroring the pattern already used for
+runs. Committed as `6c1fdb4`.** The gate is now engine-aware, mirroring the pattern already used for
 the version check just below it in the same function: a same-engine
 `--cache`/`--max-sql-memory` mismatch is still a hard error, unchanged.
 Cross-engine, the two flags are no longer compared literally (meaningless —
