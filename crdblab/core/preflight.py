@@ -352,9 +352,21 @@ def _read_leaseholder_placement(
         f"[SHOW RANGES FROM DATABASE {database} WITH DETAILS] "
         f"GROUP BY 1 ORDER BY 2 DESC"
     )
+    # Resolved via the gateway's OWN `tailscale ip -4`, not `gateway.host`.
+    # This command runs ON the gateway (it is the ssh target), asking it about
+    # itself -- and cockroach binds only its Tailscale IPv4 address, while a
+    # bare hostname resolved by the gateway's own OS can answer with something
+    # else entirely: on GCP, the project's internal DNS search domain is
+    # consulted ahead of the tailnet's own and returns the node's internal
+    # RFC1918 address, which nothing listens on. Observed on
+    # experiment-20260909T205041Z.log against a cluster verified fully live at
+    # the time: "dial tcp 10.5.0.2:26257: connect: connection refused" for a
+    # node whose Tailscale address (100.79.193.22) answered node status with
+    # all 5 nodes live in the same second. Same idiom the dead-mode restore
+    # payload already uses (`p4_chaos.py`'s `TS_IP=$(tailscale ip -4)`).
     result = ssh.run(
         gateway,
-        f"cockroach sql --insecure --host={gateway.host}:26257 "
+        f"TS_IP=$(tailscale ip -4); cockroach sql --insecure --host=$TS_IP:26257 "
         f"--format=csv -e \"{query};\"",
         timeout=60,
     )
@@ -862,9 +874,13 @@ class RowMatchProbe:
 
     def _sample(self) -> tuple[float, float]:
         query = _STATS_QUERY.format(pattern=f"%{self.table}%WHERE%")
+        # See the matching comment in `_read_leaseholder_placement`: resolved
+        # via the gateway's own `tailscale ip -4` rather than `gateway.host`,
+        # since this command runs ON the gateway and a bare hostname resolved
+        # there can answer with an address cockroach never bound.
         result = ssh.run(
             self.gateway,
-            f"cockroach sql --insecure --host={self.gateway.host}:26257 "
+            f"TS_IP=$(tailscale ip -4); cockroach sql --insecure --host=$TS_IP:26257 "
             f"--format=csv -e \"{_ALLOW_INTERNALS} {query};\"",
             timeout=60,
         )

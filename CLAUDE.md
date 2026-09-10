@@ -113,7 +113,13 @@ usertable` returning `125063`. The thesis run will reload the full 3.75M rows
 itself (~70-110 min) the same way every prior thesis run has; this is not a
 blocker, just not yet done.
 
-**Still unexercised: Phase IV (`dead`) at disk-bound scale, on either engine.**
+**Superseded below (2026-09-10): the PostgreSQL `dead` phase at disk-bound
+scale did run, the same day this note was written, and completed.** See the
+2026-09-10 update after the "runs/ was decluttered" paragraph for the numbers
+and why it took until the *next* session to get written down here at all.
+Only CockroachDB's `dead` phase at thesis scale remains unexercised.
+
+**Still unexercised (superseded above): Phase IV (`dead`) at disk-bound scale, on either engine.**
 Phase I-III have run for real on the PostgreSQL arm at the current profile;
 the `dead` fault has not, on either arm, because CockroachDB's thesis-scale
 sweep predates the profile's move to 3.75M rows (see below) and PostgreSQL's
@@ -275,6 +281,140 @@ a full `runs/<run_id>/` directory exactly as described in
 `docs/data-schema.md`'s "Where the data lives" section, and that document is
 the reference for artifact layout going forward, superseding any ad-hoc
 description in this file.
+
+**Update — 2026-09-10, the PostgreSQL `dead` phase at thesis scale turned out
+to have already happened, and three CockroachDB-only defects were found and
+fixed while getting the CockroachDB arm running again for the first time
+since the engine-flag refactor.**
+
+The thesis-scale PostgreSQL run this file's last status note was waiting on
+(`./run-experiment.sh --engine postgresql`, profile thesis) had in fact
+already completed the day before, end to end, all four phases —
+`runs/_logs/experiment-20260909T153820Z.log`, 117 m 37 s. Nobody wrote it
+down here before the 2026-09-10 `runs/` consolidation deleted its run
+directories, so it read as "still unexercised" above until this session
+checked the logs against that claim and found the mismatch. The data
+survived correctly (`runs/legacy-runs/`, run ids `20260909T165504Z_p1-network`
+through `20260909T172425Z_p4-chaos-dead`), just undocumented. Headline
+numbers: Phase III (`recover`) RPO 0/331 acknowledged writes lost; Phase IV
+(`dead`) RPO 0/430, but its performance RTO did **not** settle within the run
+— throughput at 194 ops/s (4% of baseline, CV within tolerance) and update
+latency CV 0.60, both past the point `resilience.post_fault_steady_state`
+could call recovered, degraded, or still trending. That is a real result to
+carry into the write-up, not a defect: report it as "did not settle," not as
+a missing number.
+
+Getting the CockroachDB arm running again (idle since before the PostgreSQL
+work started) surfaced three defects, all in code that had never been
+exercised against a truly fresh redeploy since `run-experiment.sh` gained
+`--engine` and `crdblab/core/preflight.py` gained its CockroachDB-specific
+checks. All three are CockroachDB-only; a research pass confirmed every
+affected call site sits behind `engine == "cockroachdb"`, and both a
+CockroachDB and a PostgreSQL smoke run were taken in the same session to
+prove neither engine regressed the other (below).
+
+(1) **`run-experiment.sh`'s CockroachDB node-status check was a single
+reading, not a bounded wait**, unlike the Patroni health gate right below it
+in the same file (fixed 2026-09-08 for exactly this reason — see that
+gotcha). A fresh `terraform apply` boots five nodes across three clouds on
+their own schedules, so a cluster mid-bootstrap legitimately reports fewer
+than 5 nodes for a while; read once, that looks identical to a fault.
+`experiment-20260909T202501Z.log` died with "cluster reports 0 node(s),
+expected 5" against a testbed that was, a few minutes later, entirely
+healthy. Fixed the same way as the Patroni gate: polls every 10 s for up to
+600 s, breaks immediately once already healthy.
+
+(2) **The wait in (1) was necessary but not sufficient — the real defect was
+a self-referential DNS resolution bug, and it was still there after (1)
+shipped.** `experiment-20260909T204104Z.log` waited the full 600 s and never
+saw more than 0/5, on a cluster that was live and fully healthy the entire
+time (confirmed by hand: `cockroach node status` against the gateway's own
+Tailscale IP returned all 5 nodes `is_live=true` at the exact moment the
+script's own check was failing). The command that fails is `cockroach ...
+--host=$GW_HOST:26257`, issued *by SSHing onto the gateway and asking it to
+resolve its own hostname*. `cockroach` binds only its Tailscale IPv4 address
+(`bootstrap-cockroachdb.tftpl`'s `--listen-addr=$TS_IP:26257`), but on the
+gateway's own OS, `/etc/resolv.conf`'s search-domain order puts GCP's
+project-internal DNS zone (`*.c.<project>.internal`) ahead of the tailnet's
+own (`*.ts.net`) — confirmed live: `getent hosts crdb-gcp-1` run *on*
+`crdb-gcp-1` answers `10.5.0.2` (the node's internal RFC1918 address, which
+nothing listens on), while `tailscale ip -4` on the same node correctly
+answers `100.79.193.22`. Nothing was wrong with the cluster; the check was
+asking the node to dial an address it never bound. The same bug then
+reappeared one layer down: `experiment-20260909T205041Z.log` got past both
+of `run-experiment.sh`'s own checks (fixed by this point) and failed inside
+`crdblab` itself, at `preflight.check_leaseholder_placement` — the harness
+has its own copy of the identical self-referential pattern.
+
+Fixed in five places, all by resolving the gateway's own `tailscale ip -4`
+inline rather than trusting bare-hostname resolution (the same idiom
+`p4_chaos.py`'s dead-mode restore payload already used):
+`run-experiment.sh`'s node-status and lease-preference checks (`GW_TS_IP`,
+resolved once); `crdblab/core/preflight.py::_read_leaseholder_placement`
+(D7's detector) and `RowMatchProbe._sample` (D8's detector, CockroachDB
+side); `crdblab/cli.py::_cmd_probe`'s canary-table bootstrap. One existing
+test (`tests/test_rto_probe.py::test_the_standalone_probe_command_produces_a_normal_run_directory`)
+hardcoded the literal hostname in its assertion and was updated to assert
+the `tailscale ip -4` idiom instead; full suite (257 tests) and `ruff check`
+both clean afterward. **Deliberately left unfixed**, because neither is
+reproduced as broken under the current profile (`chaos.target` is always
+`gcp-1`, never the node these touch): `p4_chaos.py`'s dead-mode rejoin poll
+(SSHes onto a *survivor*, not `gcp-1` — untested whether Azure/Linode have
+the same internal-DNS precedence GCP does) and its RPO-audit-table admin
+connection (already resolves a *different* node than the one it SSHes onto,
+which is why it was never broken in the first place). Revisit if either
+provider is ever seen to reproduce the same class of failure.
+
+(3) Both fixes were verified against the same live redeployment, not just by
+inspection: a CockroachDB smoke run (`experiment-20260909T210023Z.log`,
+11 m 16 s) and, on the same testbed after a redeploy back to PostgreSQL, a
+PostgreSQL smoke run (`experiment-20260909T212843Z.log`, 17 m 5 s) both
+completed all four phases end to end with no manual intervention. CockroachDB
+run: 7/7 pre-flight checks passed, row-match rate 1.0000 on both tiers, both
+chaos faults `landed: true`, RPO 0/279 and 0/158, `coverage_truncated: false`
+throughout, `crdblab validate` PASS on all three measured runs. PostgreSQL
+run: same shape (7/7 checks, RPO 0/209 and 0/96, both faults landed, both
+switchovers — including the `/quorum` candidate gate from 2026-09-09 —
+printed `quorum member` and took cleanly), and its RTO figures closely
+reproduce the historical 2026-09-09 PostgreSQL smoke numbers cited earlier in
+this file (34.1 s/33.9 s recover, 28.3 s/28.5 s dead, vs. 34.44 s/34.30 s and
+28.82 s/28.87 s here) — strong evidence the fixes changed nothing about
+PostgreSQL's own path, since it doesn't touch any of the code that changed.
+
+**Also surfaced, not fixed: `bench.py::HostSampler`'s
+`gateway_cpu_pct`/`gateway_disk_iops`/`gateway_rss_bytes` columns in
+`metrics.csv` have silently failed on every scrape since this code was
+written**, because `Target.metrics_url` (the base property `HostSampler` is
+constructed from) unconditionally returns `""`, so every scrape attempt
+during every past bench run raised inside `urllib.request.urlopen("")` and
+was swallowed by `HostSampler`'s own per-tick failure counter — the smoke
+run above reported "host metric scrape failed 65 time(s)" for what is a
+~65-70 s phase at a 1 s poll interval, i.e. effectively every tick. This is a
+different, older sampler than the 2026-09-10 node_exporter-based
+`hardware_metrics.csv` above, which does work (confirmed: 0 unexpected
+failures, only the documented one-blank-row-per-node on each node's first
+poll). Nothing downstream reads `gateway_cpu_pct` et al. — not `validate`,
+not `analysis/` — so this has never corrupted a result, only silently
+produced three empty `metrics.csv` columns on every run in the project's
+history. Same "flagged, not chased" status as the `generator_totals` gotcha
+below: worth fixing (either wire `Target.metrics_url` to CockroachDB's
+`:8080/_status/vars`, or delete the dead columns now that
+`hardware_metrics.csv` supersedes them), not yet done.
+
+**Order of work, updated:** the testbed is currently deployed as PostgreSQL
+(redeployed fresh this session to take the smoke run above). The only
+measurement gap left before `analyze engine-comparison` is worth attempting
+at all is CockroachDB's thesis-scale sweep, including its `dead` phase, which
+has never run at the current 3.75M-row profile on either engine's original
+attempt. That still means: redeploy to CockroachDB
+(`terraform apply -var="database_engine=cockroachdb"`), then
+`./run-experiment.sh --engine cockroachdb` at the `thesis` profile. The
+CockroachDB smoke run above confirms the code path; it does not confirm
+thesis-scale timing, the same caveat this file has made about every
+smoke-to-thesis jump so far. `analyze engine-comparison` remains blocked
+after that regardless, by the still-unfixed `_MATCHED_SERVER_FLAGS` gate
+described in its own gotcha below — that decision has not been made this
+session.
 
 **This project was rearchitected from a different design.** It originally
 compared the five-node CockroachDB cluster against a separate *unreplicated*
@@ -1541,6 +1681,57 @@ testbed, not something touched by most code changes to `crdblab/`.
   grepping a raw bench output file (`runs/*_bench_cluster/raw/*.txt`) for
   whatever line the generator prints as its final cumulative summary and
   checking whether `crdblab/core/workload.py` recognises it.
+
+- **`run-experiment.sh`'s CockroachDB "5 cluster nodes live" check needed the
+  same bounded-wait fix as the Patroni health gate above, and hadn't gotten
+  it.** A fresh `terraform apply` boots five nodes across three clouds on
+  their own schedules, so `cockroach node status` legitimately reports fewer
+  than 5 while the slowest node is still coming up — read once, on
+  2026-09-09 that aborted `experiment-20260909T202501Z.log` with "cluster
+  reports 0 node(s), expected 5" on a testbed that hadn't been given time to
+  boot. Fixed the same way as the Patroni gate: polls every 10 s for up to
+  600 s (`CRDB_HEALTH_WAIT_S`), breaks immediately once already healthy. This
+  is CockroachDB-only code, gated by `[ "$ENGINE" = "cockroachdb" ]`; it
+  cannot affect the PostgreSQL path.
+
+- **A `cockroach` CLI command SSHed onto the gateway and told to `--host` the
+  gateway's own hostname can dial an address nothing listens on, even though
+  the cluster is fully healthy.** `cockroach` binds only its Tailscale IPv4
+  address (`bootstrap-cockroachdb.tftpl`'s `--listen-addr=$TS_IP:26257`), but
+  a bare hostname resolved by the node's *own* OS is not guaranteed to answer
+  with that address. On GCP, `/etc/resolv.conf`'s search-domain order puts
+  the project's internal DNS zone (`*.c.<project>.internal`) ahead of the
+  tailnet's own (`*.ts.net`), so `crdb-gcp-1` resolved *on* `crdb-gcp-1`
+  answers the node's internal RFC1918 address (`10.5.0.2`, confirmed live via
+  `getent hosts`), not the Tailscale address (`100.79.193.22`, confirmed live
+  via `tailscale ip -4` on the same node) that `cockroach` actually bound.
+  The wait added just above was necessary but not sufficient:
+  `experiment-20260909T204104Z.log` polled the full 600 s and still saw
+  0/5 against a cluster that was live and healthy the entire time, because
+  "not yet 5" and "asking the wrong address" print identically. The same bug
+  reached one layer deeper the moment `run-experiment.sh`'s own checks were
+  fixed: `experiment-20260909T205041Z.log` then failed inside `crdblab`
+  itself, at `preflight.check_leaseholder_placement`, which has the identical
+  self-referential shape. Fixed in five places (2026-09-10) by resolving the
+  gateway's own `tailscale ip -4` inline rather than trusting the bare
+  hostname — the same idiom `p4_chaos.py`'s dead-mode restore payload already
+  used — rather than adding a per-node Tailscale-IP field anywhere: two call
+  sites in `run-experiment.sh` (`GW_TS_IP`, resolved once via `remote()`),
+  `crdblab/core/preflight.py::_read_leaseholder_placement` (D7's detector)
+  and `RowMatchProbe._sample` (D8's detector), and
+  `crdblab/cli.py::_cmd_probe`'s canary-table bootstrap. All confirmed
+  CockroachDB-only — PostgreSQL's Patroni checks use `psql`/`curl` against
+  `:8008` and never build this kind of self-referential `--host=` command.
+  **Deliberately left alone, because neither is reproduced as broken**:
+  `p4_chaos.py`'s dead-mode rejoin poll (SSHes onto a *survivor*, never
+  `gcp-1` under the current profile, so it's asking Azure or Linode to
+  resolve themselves — untested whether either has GCP's same
+  internal-DNS-before-tailnet precedence) and its RPO-audit-table admin
+  connection (already targets a *different* node than the one it SSHes onto,
+  so it was never self-referential to begin with). Verified live end-to-end
+  by both a CockroachDB and a PostgreSQL smoke run completing all four phases
+  cleanly on the same redeployment after these fixes
+  (`experiment-20260909T210023Z.log`, `experiment-20260909T212843Z.log`).
 
 ## Working with this codebase
 

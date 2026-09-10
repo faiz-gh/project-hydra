@@ -326,18 +326,81 @@ ok "ssh to gateway and client"
 
 if [ "$ENGINE" = "cockroachdb" ]; then
 
-LIVE=$(remote "$GW_USER" "$GW_HOST" \
-  "cockroach node status --insecure --host=$GW_HOST:26257 --format=csv 2>/dev/null | tail -n +2 | wc -l" \
-  | tr -d ' ')
-[ "$LIVE" = "5" ] || die "cluster reports $LIVE node(s), expected 5.
-  If a previous 'dead' run left a node down, restart it (see instructions.md)."
+# `cockroach` is bound only to its Tailscale IPv4 address
+# (bootstrap-cockroachdb.tftpl: --listen-addr=$TS_IP:26257), but the bare
+# hostname $GW_HOST does not reliably resolve to that address -- it depends
+# on WHERE it is resolved. From this workstation, Tailscale's MagicDNS
+# answers it correctly (that's what lets `remote()` ssh to the gateway at
+# all). Resolved by the gateway node's OWN OS instead, GCP's
+# project-internal search domain (*.c.<project>.internal) is consulted
+# ahead of the tailnet's own (*.ts.net) in /etc/resolv.conf and answers
+# first, handing back the node's internal RFC1918 address. Every
+# self-referential `cockroach ... --host=$GW_HOST` issued BY the gateway
+# (over ssh, below) therefore dials an address nothing listens on and
+# reports "connection refused" against a cluster that is, in fact, fully
+# live -- observed on experiment-20260909T204104Z.log: all 5 nodes healthy
+# (`tailscale ip -4` on gcp-1 answers 100.79.193.22, and a node status query
+# against that address lists all 5 as is_live=true), while `getent hosts
+# crdb-gcp-1` run on that same node answers 10.5.0.2, which cockroach never
+# bound. The wait added above for experiment-20260909T202501Z.log was
+# correct but insufficient -- the loop waited its full 600s timeout on a
+# cluster that was live the whole time, because "not yet 5" and "asking the
+# wrong address" print identically. Resolve the gateway's own Tailscale
+# address once here rather than trusting it to resolve its own name.
+GW_TS_IP="$(remote "$GW_USER" "$GW_HOST" "tailscale ip -4" | tr -d ' \r\n')"
+[ -n "$GW_TS_IP" ] || die "could not read $GW_HOST's Tailscale IPv4 address
+  ('tailscale ip -4' over ssh returned nothing -- is tailscale up on $GW_HOST?)"
+
+# This is a bounded *wait*, not a single reading -- the same fix applied to
+# the Patroni health gate below, and needed for the same reason. A fresh
+# `terraform apply` boots five nodes across three clouds on their own
+# schedules; `cockroach node status` only lists nodes that have already found
+# the cluster, so a cluster mid-bootstrap legitimately reads as fewer than 5
+# for as long as the slowest node's cloud-init takes, not because anything is
+# wrong. Read once, this failed exactly the way the Patroni gate once did
+# (experiment-20260908T225729Z.log, "1 healthy member(s), expected 5"):
+# experiment-20260909T202501Z.log died here with "cluster reports 0 node(s),
+# expected 5" against a testbed that simply hadn't finished coming up.
+# Waiting costs nothing once the cluster is already up (the first pass breaks
+# immediately), and the bound still fails the run rather than hanging.
+CRDB_HEALTH_WAIT_S=600
+CRDB_HEALTH_POLL_S=10
+crdb_health_deadline=$(( $(date -u +%s) + CRDB_HEALTH_WAIT_S ))
+crdb_waited=0
+while :; do
+  LIVE=$(remote "$GW_USER" "$GW_HOST" \
+    "cockroach node status --insecure --host=$GW_TS_IP:26257 --format=csv 2>/dev/null | tail -n +2 | wc -l" \
+    | tr -d ' ')
+  [ -n "$LIVE" ] || LIVE=0
+
+  [ "$LIVE" = "5" ] && break
+  [ "$(date -u +%s)" -ge "$crdb_health_deadline" ] && break
+
+  if [ "$crdb_waited" = "0" ]; then
+    note "cluster reports $LIVE/5 node(s) (still booting?);"
+    note "waiting up to ${CRDB_HEALTH_WAIT_S}s for all 5"
+    crdb_waited=1
+  else
+    note "  $LIVE/5 nodes live"
+  fi
+  sleep "$CRDB_HEALTH_POLL_S"
+done
+
+[ "$crdb_waited" = "1" ] && [ "$LIVE" = "5" ] \
+  && note "all 5 nodes live after waiting"
+
+[ "$LIVE" = "5" ] || die "cluster reports $LIVE node(s), expected 5, and did
+  not reach 5 within ${CRDB_HEALTH_WAIT_S}s of waiting.
+  If a previous 'dead' run left a node down, restart it (see instructions.md).
+  If this is a fresh 'terraform apply', check cloud-init on the slow node(s)
+  ('journalctl -u cloud-init' / /var/log/cloud-init-output.log there)."
 ok "5 cluster nodes live"
 
 # D7: the bootstrap can apply num_replicas and then fail on lease_preferences,
 # leaving a healthy-looking cluster whose leaseholders are on another continent.
 # It costs 12.3x throughput and no consistency check can detect it.
 LEASE=$(remote "$GW_USER" "$GW_HOST" \
-  "cockroach sql --insecure --host=$GW_HOST:26257 -e 'SHOW ZONE CONFIGURATION FROM DATABASE ycsb;' 2>/dev/null \
+  "cockroach sql --insecure --host=$GW_TS_IP:26257 -e 'SHOW ZONE CONFIGURATION FROM DATABASE ycsb;' 2>/dev/null \
    | grep -o \"lease_preferences = '[^']*'\" || true")
 case "$LEASE" in
   *"[[+region=$GW_REGION]"*)

@@ -817,9 +817,14 @@ def _cmd_probe(args: argparse.Namespace) -> int:
     interval = args.interval if args.interval is not None else chaos.probe_interval_s
 
     if not args.keep_table:
+        # Resolved via the gateway's own `tailscale ip -4`, not `gateway.host`:
+        # this command runs ON the gateway, and a bare hostname resolved by
+        # the node's own OS can answer with an address cockroach never bound
+        # to (see the matching comment in preflight.py's
+        # `_read_leaseholder_placement`).
         ssh.run(
             gateway,
-            f"cockroach sql --insecure --host={gateway.host}:26257 "
+            f"TS_IP=$(tailscale ip -4); cockroach sql --insecure --host=$TS_IP:26257 "
             f"--database={args.database} "
             f'-e "DROP TABLE IF EXISTS {chaos.probe_table}; '
             f'{CREATE_TABLE_SQL.format(table=chaos.probe_table)};"',

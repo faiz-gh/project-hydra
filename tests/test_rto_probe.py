@@ -794,9 +794,12 @@ def test_the_standalone_probe_command_produces_a_normal_run_directory(tmp_path, 
     assert manifest["clock_epoch_utc"], "the run's monotonic zero must be datable"
     assert manifest["profile"]["chaos"]["probe_table"] == "rto_canary"
 
-    # The canary table is dropped and recreated, and against the gateway.
+    # The canary table is dropped and recreated, and against the gateway --
+    # via its own `tailscale ip -4`, not the bare hostname (a self-referential
+    # `cockroach sql --host=<hostname>` run ON the gateway can resolve to an
+    # address cockroach never bound; see the matching comment at the call site).
     assert any("rto_canary" in cmd and "DROP TABLE" in cmd for cmd in issued)
-    assert any("crdb-gcp-1" in cmd for cmd in issued)
+    assert any("tailscale ip -4" in cmd for cmd in issued)
 
     # And it validates under its own schema, with no metrics.csv in sight.
     validate_args = cli.build_parser().parse_args(["validate", str(run_dir)])
