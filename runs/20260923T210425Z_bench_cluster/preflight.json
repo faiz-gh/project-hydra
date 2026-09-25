@@ -1,0 +1,98 @@
+{
+  "ok": true,
+  "checks": [
+    {
+      "name": "clock_offset",
+      "passed": true,
+      "detail": "client-1: NTP offset 0.00 ms (limit 250 ms)",
+      "node": "client-1",
+      "offset_s": 6.84e-07
+    },
+    {
+      "name": "patroni_primary_placement",
+      "passed": true,
+      "detail": "patroni primary is gcp-1, as required",
+      "expected": "gcp-1",
+      "observed": "gcp-1",
+      "repaired": false
+    },
+    {
+      "name": "quorum_floor_available",
+      "passed": true,
+      "detail": "quorum floor 75.1 ms from runs/20260923T210315Z_p1-network/network.csv",
+      "quorum_floor_ms": 75.119
+    },
+    {
+      "name": "write_latency_floor",
+      "passed": true,
+      "detail": "write p50 79.7 ms against a quorum floor of 75.1 ms",
+      "observed_write_p50_ms": 79.7,
+      "quorum_floor_ms": 75.119
+    },
+    {
+      "name": "row_match",
+      "passed": true,
+      "detail": "8963/8963 index scans fetched a row (rate 1.0000, minimum 0.99)",
+      "table": "usertable",
+      "executions": 8963.0,
+      "matched": 8963.0,
+      "match_rate": 1.0,
+      "window": "interval"
+    },
+    {
+      "name": "write_latency_floor",
+      "passed": true,
+      "detail": "write p50 79.7 ms against a quorum floor of 75.1 ms",
+      "observed_write_p50_ms": 79.7,
+      "quorum_floor_ms": 75.119
+    },
+    {
+      "name": "row_match",
+      "passed": true,
+      "detail": "42342/42342 index scans fetched a row (rate 1.0000, minimum 0.99)",
+      "table": "usertable",
+      "executions": 42342.0,
+      "matched": 42342.0,
+      "match_rate": 1.0,
+      "window": "interval"
+    }
+  ],
+  "tiers": [
+    {
+      "concurrency": 10,
+      "repetition": 1,
+      "ticks_recorded": 12,
+      "generator_start_offset_s": 17.888,
+      "connection_setup_s": 4.686,
+      "mean_total_tps": 616.07,
+      "mean_p50_ms": {
+        "read": 0.7,
+        "update": 79.7
+      },
+      "generator_totals": {
+        "read": 7296.0,
+        "update": 1830.0,
+        "all": 9126.0
+      },
+      "row_match_rate": 1.0
+    },
+    {
+      "concurrency": 50,
+      "repetition": 1,
+      "ticks_recorded": 12,
+      "generator_start_offset_s": 51.886,
+      "connection_setup_s": 5.289,
+      "mean_total_tps": 2957.35,
+      "mean_p50_ms": {
+        "read": 0.858,
+        "update": 79.7
+      },
+      "generator_totals": {
+        "read": 34209.0,
+        "update": 8606.0,
+        "all": 42815.0
+      },
+      "row_match_rate": 1.0
+    }
+  ]
+}

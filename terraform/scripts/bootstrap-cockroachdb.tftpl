@@ -1,0 +1,198 @@
+#!/bin/bash
+set -e
+
+# ==========================================
+# 1. Install & Configure Tailscale Mesh
+# ==========================================
+curl -fsSL https://tailscale.com/install.sh | sh
+# TF evaluates these because of single $
+tailscale up --authkey="${tailscale_key}" --hostname="${hostname}" --accept-dns=true
+
+# Deterministic check: Wait until Tailscale successfully assigns an IPv4 address
+echo "Waiting for Tailscale IP assignment..."
+TS_IP=""
+while [ -z "$TS_IP" ]; do
+    sleep 2
+    TS_IP=$(tailscale ip -4 || true)
+done
+echo "Node registered on mesh with IP: $TS_IP"
+
+# ==========================================
+# 2. DNS Verification Loop
+# ==========================================
+echo "Verifying network reachability to all cluster peers..."
+
+# TF evaluates ${join_nodes} to inject the comma-separated string
+IFS=',' read -ra PEERS <<< "${join_nodes}"
+
+# ESCAPED for Bash with $$: $${PEERS[@]}
+for peer in "$${PEERS[@]}"; do
+    # TF evaluates ${hostname}
+    if [ "$peer" == "${hostname}" ]; then
+        continue
+    fi
+
+    echo "Waiting for $peer to resolve and become reachable..."
+    WAIT_COUNT=0
+    MAX_RETRIES=60 # Up to 5 minutes of waiting per node
+
+    while ! ping -c 1 -W 1 "$peer" &> /dev/null; do
+        sleep 5
+        WAIT_COUNT=$((WAIT_COUNT + 1))
+
+        if [ $WAIT_COUNT -ge $MAX_RETRIES ]; then
+            echo "WARNING: Timeout waiting for $peer. Proceeding to avoid deadlocks..."
+            break
+        fi
+    done
+    echo "Success: $peer is reachable!"
+done
+
+# ==========================================
+# 3. NTP & Clock Sync (CRDB HLC Requirement)
+# ==========================================
+echo "Installing and configuring Chrony for strict NTP sync..."
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -yq
+apt-get install -yq chrony
+
+# Force an immediate hard-sync of the system clock, bypassing standard slew
+systemctl enable chrony
+systemctl start chrony
+chronyc makestep || true
+chronyc tracking
+
+# ==========================================
+# 4. Install CockroachDB (Updated to v26.3.0)
+# ==========================================
+echo "Installing CockroachDB v26.3.0..."
+wget -qO- https://binaries.cockroachdb.com/cockroach-v26.3.0.linux-amd64.tgz | tar xvz
+cp -i cockroach-v26.3.0.linux-amd64/cockroach /usr/local/bin/
+mkdir -p /var/lib/cockroach
+
+# ==========================================
+# 5. Start Node
+# ==========================================
+echo "Starting CockroachDB node..."
+# Start CockroachDB node in the background.
+# --cache and --max-sql-memory are set to 0.25 to explicitly define resource boundaries.
+cockroach start \
+  --insecure \
+  --store=/var/lib/cockroach \
+  --listen-addr=$TS_IP:26257 \
+  --advertise-addr=$TS_IP:26257 \
+  --locality=${locality} \
+  --cache=0.25 \
+  --max-sql-memory=0.25 \
+  --join=${join_nodes} \
+  --background
+
+# ==========================================
+# 6. Cluster Initialization & Topology Tuning
+# ==========================================
+PRIMARY_NODE="$${PEERS[0]}"
+
+if [ "${hostname}" == "$PRIMARY_NODE" ]; then
+    echo "I am the primary node ($PRIMARY_NODE). Initializing the cluster in 15 seconds..."
+    sleep 15
+    cockroach init --insecure --host=$TS_IP:26257 || true
+    echo "Raft consensus initialized."
+
+    echo "Waiting for CockroachDB SQL interface to become ready..."
+    MAX_RETRIES=12 # Wait up to 60 seconds
+    READY=0
+    for i in $(seq 1 $MAX_RETRIES); do
+        # A simple SELECT 1 ensures the SQL gateway is actively responding
+        if cockroach sql --insecure --host=$TS_IP:26257 -e "SELECT 1;" > /dev/null 2>&1; then
+            echo "SQL interface is online!"
+            READY=1
+            break
+        fi
+        echo "SQL not ready yet, retrying in 5 seconds..."
+        sleep 5
+    done
+
+    # Wait for the full inventory before configuring to avoid applying constraints
+    # that match no existing nodes.
+    EXPECTED_NODES=$${#PEERS[@]}
+    echo "Waiting for all $EXPECTED_NODES nodes to join before applying zone configuration..."
+    for i in $(seq 1 24); do
+        LIVE=$(cockroach node status --insecure --host=$TS_IP:26257 --format=csv 2>/dev/null \
+                 | tail -n +2 | grep -c "true$" || true)
+        if [ "$${LIVE:-0}" -ge "$EXPECTED_NODES" ]; then
+            echo "All $EXPECTED_NODES nodes are live."
+            break
+        fi
+        echo "Only $${LIVE:-0}/$EXPECTED_NODES nodes live, retrying in 5 seconds..."
+        sleep 5
+    done
+
+    if [ "$READY" -eq 1 ]; then
+        echo "Applying global zone configurations for latency optimization..."
+
+        # Create Databases bench for benchmarking purposes
+        cockroach sql --insecure --host=$TS_IP:26257 \
+            -e "CREATE DATABASE IF NOT EXISTS bench;"
+
+        # Create Database kv for key-value workloads
+        cockroach sql --insecure --host=$TS_IP:26257 \
+            -e "CREATE DATABASE IF NOT EXISTS kv;"
+
+        # ycsb is the generator of record. The database must exist before
+        # `cockroach workload init ycsb` can populate it.
+        cockroach sql --insecure --host=$TS_IP:26257 \
+            -e "CREATE DATABASE IF NOT EXISTS ycsb;"
+
+        # 1. Force 5 replicas so data is globally mirrored (Azure survives US outages)
+        cockroach sql --insecure --host=$TS_IP:26257 \
+            -e "ALTER RANGE default CONFIGURE ZONE USING num_replicas = 5;"
+
+        # 2. Pin leaseholders (write coordinators) to the low-latency US triangle
+        cockroach sql --insecure --host=$TS_IP:26257 \
+            -e "ALTER RANGE default CONFIGURE ZONE USING lease_preferences = '[[+region=us-east1], [+region=us-east], [+region=us-west]]';"
+
+        # Assert the end state to ensure lease_preferences applied correctly.
+        APPLIED=$(cockroach sql --insecure --host=$TS_IP:26257 \
+            -e "SELECT raw_config_sql FROM [SHOW ZONE CONFIGURATION FOR RANGE default];" 2>/dev/null \
+            | grep -c "lease_preferences = '\[\[" || true)
+        if [ "$${APPLIED:-0}" -eq 0 ]; then
+            echo "❌ ERROR: lease_preferences is empty after configuration."
+            echo "   Leaseholders will be placed arbitrarily and all latency"
+            echo "   measurements will be invalid. Refusing to report success."
+            exit 1
+        fi
+
+        echo "✅ Topology tuning successfully applied."
+    else
+        echo "❌ ERROR: SQL interface never became ready. Topology tuning skipped."
+    fi
+else
+    echo "I am a secondary node. Skipping initialization; waiting for $PRIMARY_NODE to orchestrate."
+fi
+
+# ==========================================
+# 7. node_exporter -- hardware metrics polled directly by the harness
+# ==========================================
+# Not a standalone Prometheus server and nothing else on this testbed scrapes
+# it -- crdblab/core/hardware_metrics.py polls :9100/metrics directly over
+# the Tailscale mesh, the same way it already polls Patroni's :8008 REST API.
+# No firewall change needed for the same reason neither of those needed one:
+# every cross-node service here rides the tailnet, never the cloud provider's
+# public/VPC network.
+apt-get install -yq prometheus-node-exporter
+systemctl enable prometheus-node-exporter
+systemctl restart prometheus-node-exporter
+
+NODE_EXPORTER_UP=0
+for _ in $(seq 1 12); do
+    if ss -lnt 2>/dev/null | grep -q ':9100 '; then
+        NODE_EXPORTER_UP=1
+        break
+    fi
+    sleep 5
+done
+if [ "$NODE_EXPORTER_UP" != "1" ]; then
+    echo "FAILED: node_exporter is not listening on :9100 after 60s." >&2
+    systemctl status prometheus-node-exporter --no-pager >&2 || true
+    exit 1
+fi

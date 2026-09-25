@@ -1,0 +1,62 @@
+{
+  "ok": true,
+  "checks": [
+    {
+      "name": "clock_offset",
+      "passed": true,
+      "detail": "linode-1: NTP offset 0.01 ms (limit 250 ms)",
+      "node": "linode-1",
+      "offset_s": 9.749e-06
+    },
+    {
+      "name": "clock_offset",
+      "passed": true,
+      "detail": "linode-2: NTP offset 0.27 ms (limit 250 ms)",
+      "node": "linode-2",
+      "offset_s": 0.000269579
+    },
+    {
+      "name": "clock_offset",
+      "passed": true,
+      "detail": "azure-1: NTP offset 0.00 ms (limit 250 ms)",
+      "node": "azure-1",
+      "offset_s": 9.83e-07
+    },
+    {
+      "name": "clock_offset",
+      "passed": true,
+      "detail": "azure-2: NTP offset 0.00 ms (limit 250 ms)",
+      "node": "azure-2",
+      "offset_s": 2.993e-06
+    },
+    {
+      "name": "clock_offset",
+      "passed": true,
+      "detail": "gcp-1: NTP offset 0.01 ms (limit 250 ms)",
+      "node": "gcp-1",
+      "offset_s": 6.714e-06
+    },
+    {
+      "name": "leaseholder_placement",
+      "passed": true,
+      "detail": "2/2 ycsb leaseholders in 'us-east1'",
+      "database": "ycsb",
+      "expected_region": "us-east1",
+      "waited_s": 6.4,
+      "distribution": {
+        "cloud=gcp,region=us-east1": 2
+      }
+    }
+  ],
+  "derived": {
+    "gateway": "crdb-gcp-1",
+    "gateway_rtt_ms": {
+      "crdb-linode-1": 18.548,
+      "crdb-linode-2": 71.647,
+      "crdb-azure-1": 225.16,
+      "crdb-azure-2": 211.448
+    },
+    "quorum_floor_ms": 71.647,
+    "voters": 5
+  }
+}

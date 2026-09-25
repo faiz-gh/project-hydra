@@ -1,0 +1,156 @@
+{
+  "run_id": "20260911T033435Z_bench_cluster",
+  "phase": "bench_cluster",
+  "schema_version": "2.1",
+  "engine": "cockroachdb",
+  "started_utc": "2026-09-11T03:34:35.560217Z",
+  "finished_utc": "2026-09-11T03:35:43.719226Z",
+  "git_revision": "e1ed56535747807214f4b8aeb9000b31a2d75eb0",
+  "profile": {
+    "name": "smoke",
+    "workload": {
+      "generator": "ycsb",
+      "ycsb_workload": "CUSTOM",
+      "read_freq": 0.8,
+      "update_freq": 0.2,
+      "request_distribution": "uniform",
+      "read_percent": 80,
+      "duration_s": 15,
+      "warmup_s": 3,
+      "display_every_s": 1,
+      "concurrencies": [
+        10,
+        50
+      ],
+      "repetitions": 1,
+      "randomise_tier_order": false,
+      "cooldown_s": 5,
+      "seed": 42,
+      "insert_count": 125000,
+      "cycle_length": 1000000,
+      "block_bytes": 256
+    },
+    "chaos": {
+      "duration_s": 45,
+      "inject_at_s": 15,
+      "concurrency": 10,
+      "target": "gcp-1",
+      "recovery_threshold": 0.8,
+      "recovery_hold_s": 10,
+      "min_post_fault_s": 45,
+      "leaseholder_settle_s": 300,
+      "audit_interval_s": 0.02,
+      "probe_enabled": true,
+      "probe_interval_s": 0.002,
+      "probe_workers": 2,
+      "probe_statement_timeout_ms": 5000,
+      "probe_connect_timeout_s": 2.0,
+      "probe_table": "rto_canary"
+    },
+    "hardware_metrics": {
+      "enabled": true,
+      "sample_interval_s": 5.0
+    },
+    "tps_ceiling": 20000.0
+  },
+  "topology": [
+    {
+      "name": "client-1",
+      "host": "crdb-client-1",
+      "region": "us-east1",
+      "locality": "cloud=gcp,region=us-east1",
+      "role": "generator host and connection endpoint"
+    }
+  ],
+  "clock_epoch_utc": "2026-09-11T03:34:35.559985Z",
+  "server_version": "v26.3.0",
+  "cockroach_version": "v26.3.0",
+  "generator_command": "cockroach workload run ycsb --workload=CUSTOM --seed=42 --insert-count=125000 --request-distribution=uniform --read-freq=0.8 --update-freq=0.2 --concurrency=50 --duration=15s --display-every=1s 'postgresql://root@127.0.0.1:26257/ycsb?sslmode=disable'",
+  "ssh_options": [
+    "-q",
+    "-o",
+    "StrictHostKeyChecking=no",
+    "-o",
+    "UserKnownHostsFile=/dev/null",
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "ServerAliveInterval=5",
+    "-o",
+    "ServerAliveCountMax=3"
+  ],
+  "client_platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+  "notes": [
+    "2026-09-11T03:34:35.619120Z target=cluster database=ycsb voters=5",
+    "2026-09-11T03:34:35.619169Z tier order: [(10, 1), (50, 1)]",
+    "2026-09-11T03:34:40.013590Z server: 2569 cockroach start --insecure --store=/var/lib/cockroach --listen-addr=100.122.23.124:26257 --advertise-addr=100.122.23.124:26257 --locality=cloud=gcp,region=us-east1 --cache=0.25 --max-sql-memory=0.25 --join=crdb-gcp-1,crdb-azure-1,crdb-azure-2,crdb-linode-1,crdb-linode-2",
+    "2026-09-11T03:34:40.013802Z host: cpus=4 mem_total_kb=8128936 cpu_model=AMD EPYC 7B13",
+    "2026-09-11T03:35:43.712638Z host metric scrape failed 64 time(s)"
+  ],
+  "generator_totals": {},
+  "validation": {
+    "preflight": {
+      "ok": true,
+      "checks": [
+        {
+          "name": "clock_offset",
+          "passed": true,
+          "detail": "client-1: NTP offset 0.00 ms (limit 250 ms)",
+          "node": "client-1",
+          "offset_s": 3.494e-06
+        },
+        {
+          "name": "leaseholder_placement",
+          "passed": true,
+          "detail": "2/2 ycsb leaseholders in 'us-east1'",
+          "database": "ycsb",
+          "expected_region": "us-east1",
+          "waited_s": 6.7,
+          "distribution": {
+            "cloud=gcp,region=us-east1": 2
+          }
+        },
+        {
+          "name": "quorum_floor_available",
+          "passed": true,
+          "detail": "quorum floor 71.6 ms from runs/20260911T033315Z_p1-network/network.csv",
+          "quorum_floor_ms": 71.647
+        },
+        {
+          "name": "write_latency_floor",
+          "passed": true,
+          "detail": "write p50 75.5 ms against a quorum floor of 71.6 ms",
+          "observed_write_p50_ms": 75.5,
+          "quorum_floor_ms": 71.647
+        },
+        {
+          "name": "row_match",
+          "passed": true,
+          "detail": "9445/9445 operations matched a row (rate 1.0000, minimum 0.99)",
+          "table": "usertable",
+          "executions": 9445.0,
+          "matched": 9445.0,
+          "match_rate": 1.0,
+          "window": "interval"
+        },
+        {
+          "name": "write_latency_floor",
+          "passed": true,
+          "detail": "write p50 76.3 ms against a quorum floor of 71.6 ms",
+          "observed_write_p50_ms": 76.264,
+          "quorum_floor_ms": 71.647
+        },
+        {
+          "name": "row_match",
+          "passed": true,
+          "detail": "44376/44376 operations matched a row (rate 1.0000, minimum 0.99)",
+          "table": "usertable",
+          "executions": 44376.0,
+          "matched": 44376.0,
+          "match_rate": 1.0,
+          "window": "interval"
+        }
+      ]
+    }
+  }
+}

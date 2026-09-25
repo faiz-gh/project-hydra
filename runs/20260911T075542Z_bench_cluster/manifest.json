@@ -1,0 +1,328 @@
+{
+  "run_id": "20260911T075542Z_bench_cluster",
+  "phase": "bench_cluster",
+  "schema_version": "2.1",
+  "engine": "postgresql",
+  "started_utc": "2026-09-11T07:55:42.022945Z",
+  "finished_utc": "2026-09-11T08:13:18.253963Z",
+  "git_revision": "de7e94a0aa55d56613e4abb3d6def0fa2feae898",
+  "profile": {
+    "name": "thesis",
+    "workload": {
+      "generator": "ycsb",
+      "ycsb_workload": "CUSTOM",
+      "read_freq": 0.8,
+      "update_freq": 0.2,
+      "request_distribution": "uniform",
+      "read_percent": 80,
+      "duration_s": 60,
+      "warmup_s": 5,
+      "display_every_s": 1,
+      "concurrencies": [
+        10,
+        50,
+        100,
+        200
+      ],
+      "repetitions": 3,
+      "randomise_tier_order": true,
+      "cooldown_s": 15,
+      "seed": 42,
+      "insert_count": 7500000,
+      "cycle_length": 1000000,
+      "block_bytes": 256
+    },
+    "chaos": {
+      "duration_s": 180,
+      "inject_at_s": 60,
+      "concurrency": 100,
+      "target": "gcp-1",
+      "recovery_threshold": 0.8,
+      "recovery_hold_s": 10,
+      "min_post_fault_s": 450,
+      "leaseholder_settle_s": 900,
+      "audit_interval_s": 0.02,
+      "probe_enabled": true,
+      "probe_interval_s": 0.002,
+      "probe_workers": 8,
+      "probe_statement_timeout_ms": 5000,
+      "probe_connect_timeout_s": 2.0,
+      "probe_table": "rto_canary"
+    },
+    "hardware_metrics": {
+      "enabled": true,
+      "sample_interval_s": 5.0
+    },
+    "tps_ceiling": 20000.0
+  },
+  "topology": [
+    {
+      "name": "client-1",
+      "host": "crdb-client-1",
+      "region": "us-east1",
+      "locality": "cloud=gcp,region=us-east1",
+      "role": "generator host and connection endpoint"
+    }
+  ],
+  "clock_epoch_utc": "2026-09-11T07:55:42.022807Z",
+  "server_version": "postgres (PostgreSQL) 16.15 (Ubuntu 16.15-1.pgdg22.04+2)",
+  "cockroach_version": null,
+  "generator_command": "cockroach workload run ycsb --workload=CUSTOM --seed=42 --insert-count=7500000 --request-distribution=uniform --read-freq=0.8 --update-freq=0.2 --concurrency=100 --duration=60s --display-every=1s 'postgresql://root:rootpassword@127.0.0.1:6432/ycsb?sslmode=disable'",
+  "ssh_options": [
+    "-q",
+    "-o",
+    "StrictHostKeyChecking=no",
+    "-o",
+    "UserKnownHostsFile=/dev/null",
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "ServerAliveInterval=5",
+    "-o",
+    "ServerAliveCountMax=3"
+  ],
+  "client_platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+  "notes": [
+    "2026-09-11T07:55:42.091310Z target=cluster database=ycsb voters=5",
+    "2026-09-11T07:55:42.091368Z tier order: [(200, 2), (50, 2), (100, 1), (10, 3), (50, 3), (100, 2), (200, 3), (200, 1), (10, 2), (10, 1), (50, 1), (100, 3)]",
+    "2026-09-11T07:55:50.068254Z engine: postgresql (patroni HA)",
+    "2026-09-11T07:55:50.068330Z server: 6480 /usr/lib/postgresql/16/bin/postgres -D /var/lib/postgresql/16/data --config-file=/var/lib/postgresql/16/data/postgresql.conf --listen_addresses=0.0.0.0 --port=5432 --cluster_name=postgres-cluster --wal_level=replica --hot_standby=on --max_connections=500 --max_wal_senders=10 --max_prepared_transactions=0 --max_locks_per_transaction=64 --track_commit_timestamp=off --max_replication_slots=10 --max_worker_processes=8 --wal_log_hints=on",
+    "2026-09-11T07:55:50.068353Z host: cpus=4 mem_total_kb=8128936 cpu_model=AMD EPYC 7B13",
+    "2026-09-11T07:55:50.068364Z pg memory: shared_buffers_kb=2031616 effective_cache_size_kb=6095872",
+    "2026-09-11T08:13:18.211007Z host metric scrape failed 1042 time(s)",
+    "2026-09-11T08:13:18.253938Z hardware metrics: scrape failures {'azure-2': 1}"
+  ],
+  "generator_totals": {},
+  "validation": {
+    "preflight": {
+      "ok": true,
+      "checks": [
+        {
+          "name": "clock_offset",
+          "passed": true,
+          "detail": "client-1: NTP offset 0.00 ms (limit 250 ms)",
+          "node": "client-1",
+          "offset_s": 2.65e-07
+        },
+        {
+          "name": "patroni_primary_placement",
+          "passed": true,
+          "detail": "patroni primary is gcp-1, as required",
+          "expected": "gcp-1",
+          "observed": "gcp-1",
+          "repaired": false
+        },
+        {
+          "name": "quorum_floor_available",
+          "passed": true,
+          "detail": "quorum floor 71.1 ms from runs/20260911T075432Z_p1-network/network.csv",
+          "quorum_floor_ms": 71.075
+        },
+        {
+          "name": "write_latency_floor",
+          "passed": true,
+          "detail": "write p50 166.2 ms against a quorum floor of 71.1 ms",
+          "observed_write_p50_ms": 166.244,
+          "quorum_floor_ms": 71.075
+        },
+        {
+          "name": "row_match",
+          "passed": true,
+          "detail": "272437/272437 index scans fetched a row (rate 1.0000, minimum 0.99)",
+          "table": "usertable",
+          "executions": 272437.0,
+          "matched": 272437.0,
+          "match_rate": 1.0,
+          "window": "interval"
+        },
+        {
+          "name": "write_latency_floor",
+          "passed": true,
+          "detail": "write p50 75.7 ms against a quorum floor of 71.1 ms",
+          "observed_write_p50_ms": 75.733,
+          "quorum_floor_ms": 71.075
+        },
+        {
+          "name": "row_match",
+          "passed": true,
+          "detail": "181873/181873 index scans fetched a row (rate 1.0000, minimum 0.99)",
+          "table": "usertable",
+          "executions": 181873.0,
+          "matched": 181873.0,
+          "match_rate": 1.0,
+          "window": "interval"
+        },
+        {
+          "name": "write_latency_floor",
+          "passed": true,
+          "detail": "write p50 90.7 ms against a quorum floor of 71.1 ms",
+          "observed_write_p50_ms": 90.695,
+          "quorum_floor_ms": 71.075
+        },
+        {
+          "name": "row_match",
+          "passed": true,
+          "detail": "294753/294753 index scans fetched a row (rate 1.0000, minimum 0.99)",
+          "table": "usertable",
+          "executions": 294753.0,
+          "matched": 294753.0,
+          "match_rate": 1.0,
+          "window": "interval"
+        },
+        {
+          "name": "write_latency_floor",
+          "passed": true,
+          "detail": "write p50 75.5 ms against a quorum floor of 71.1 ms",
+          "observed_write_p50_ms": 75.5,
+          "quorum_floor_ms": 71.075
+        },
+        {
+          "name": "row_match",
+          "passed": true,
+          "detail": "38121/38121 index scans fetched a row (rate 1.0000, minimum 0.99)",
+          "table": "usertable",
+          "executions": 38121.0,
+          "matched": 38121.0,
+          "match_rate": 1.0,
+          "window": "interval"
+        },
+        {
+          "name": "write_latency_floor",
+          "passed": true,
+          "detail": "write p50 75.5 ms against a quorum floor of 71.1 ms",
+          "observed_write_p50_ms": 75.5,
+          "quorum_floor_ms": 71.075
+        },
+        {
+          "name": "row_match",
+          "passed": true,
+          "detail": "186339/186339 index scans fetched a row (rate 1.0000, minimum 0.99)",
+          "table": "usertable",
+          "executions": 186339.0,
+          "matched": 186339.0,
+          "match_rate": 1.0,
+          "window": "interval"
+        },
+        {
+          "name": "write_latency_floor",
+          "passed": true,
+          "detail": "write p50 87.8 ms against a quorum floor of 71.1 ms",
+          "observed_write_p50_ms": 87.787,
+          "quorum_floor_ms": 71.075
+        },
+        {
+          "name": "row_match",
+          "passed": true,
+          "detail": "309066/309066 index scans fetched a row (rate 1.0000, minimum 0.99)",
+          "table": "usertable",
+          "executions": 309066.0,
+          "matched": 309066.0,
+          "match_rate": 1.0,
+          "window": "interval"
+        },
+        {
+          "name": "write_latency_floor",
+          "passed": true,
+          "detail": "write p50 141.3 ms against a quorum floor of 71.1 ms",
+          "observed_write_p50_ms": 141.309,
+          "quorum_floor_ms": 71.075
+        },
+        {
+          "name": "row_match",
+          "passed": true,
+          "detail": "410175/410175 index scans fetched a row (rate 1.0000, minimum 0.99)",
+          "table": "usertable",
+          "executions": 410175.0,
+          "matched": 410175.0,
+          "match_rate": 1.0,
+          "window": "interval"
+        },
+        {
+          "name": "write_latency_floor",
+          "passed": true,
+          "detail": "write p50 134.3 ms against a quorum floor of 71.1 ms",
+          "observed_write_p50_ms": 134.289,
+          "quorum_floor_ms": 71.075
+        },
+        {
+          "name": "row_match",
+          "passed": true,
+          "detail": "402563/402563 index scans fetched a row (rate 1.0000, minimum 0.99)",
+          "table": "usertable",
+          "executions": 402563.0,
+          "matched": 402563.0,
+          "match_rate": 1.0,
+          "window": "interval"
+        },
+        {
+          "name": "write_latency_floor",
+          "passed": true,
+          "detail": "write p50 75.5 ms against a quorum floor of 71.1 ms",
+          "observed_write_p50_ms": 75.5,
+          "quorum_floor_ms": 71.075
+        },
+        {
+          "name": "row_match",
+          "passed": true,
+          "detail": "38067/38067 index scans fetched a row (rate 1.0000, minimum 0.99)",
+          "table": "usertable",
+          "executions": 38067.0,
+          "matched": 38067.0,
+          "match_rate": 1.0,
+          "window": "interval"
+        },
+        {
+          "name": "write_latency_floor",
+          "passed": true,
+          "detail": "write p50 75.5 ms against a quorum floor of 71.1 ms",
+          "observed_write_p50_ms": 75.5,
+          "quorum_floor_ms": 71.075
+        },
+        {
+          "name": "row_match",
+          "passed": true,
+          "detail": "38941/38941 index scans fetched a row (rate 1.0000, minimum 0.99)",
+          "table": "usertable",
+          "executions": 38941.0,
+          "matched": 38941.0,
+          "match_rate": 1.0,
+          "window": "interval"
+        },
+        {
+          "name": "write_latency_floor",
+          "passed": true,
+          "detail": "write p50 75.5 ms against a quorum floor of 71.1 ms",
+          "observed_write_p50_ms": 75.5,
+          "quorum_floor_ms": 71.075
+        },
+        {
+          "name": "row_match",
+          "passed": true,
+          "detail": "186256/186256 index scans fetched a row (rate 1.0000, minimum 0.99)",
+          "table": "usertable",
+          "executions": 186256.0,
+          "matched": 186256.0,
+          "match_rate": 1.0,
+          "window": "interval"
+        },
+        {
+          "name": "write_latency_floor",
+          "passed": true,
+          "detail": "write p50 76.9 ms against a quorum floor of 71.1 ms",
+          "observed_write_p50_ms": 76.875,
+          "quorum_floor_ms": 71.075
+        },
+        {
+          "name": "row_match",
+          "passed": true,
+          "detail": "351590/351590 index scans fetched a row (rate 1.0000, minimum 0.99)",
+          "table": "usertable",
+          "executions": 351590.0,
+          "matched": 351590.0,
+          "match_rate": 1.0,
+          "window": "interval"
+        }
+      ]
+    }
+  }
+}

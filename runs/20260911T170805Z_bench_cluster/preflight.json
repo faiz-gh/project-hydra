@@ -1,0 +1,766 @@
+{
+  "ok": true,
+  "checks": [
+    {
+      "name": "clock_offset",
+      "passed": true,
+      "detail": "client-1: NTP offset 0.00 ms (limit 250 ms)",
+      "node": "client-1",
+      "offset_s": 9.95e-07
+    },
+    {
+      "name": "leaseholder_placement",
+      "passed": true,
+      "detail": "38/38 ycsb leaseholders in 'us-east1'",
+      "database": "ycsb",
+      "expected_region": "us-east1",
+      "waited_s": 26.8,
+      "distribution": {
+        "cloud=gcp,region=us-east1": 38
+      }
+    },
+    {
+      "name": "quorum_floor_available",
+      "passed": true,
+      "detail": "quorum floor 71.0 ms from runs/20260911T170557Z_p1-network/network.csv",
+      "quorum_floor_ms": 70.987
+    },
+    {
+      "name": "write_latency_floor",
+      "passed": true,
+      "detail": "write p50 95.4 ms against a quorum floor of 71.0 ms",
+      "observed_write_p50_ms": 95.355,
+      "quorum_floor_ms": 70.987
+    },
+    {
+      "name": "row_match",
+      "passed": true,
+      "detail": "197801/197801 operations matched a row (rate 1.0000, minimum 0.99)",
+      "table": "usertable",
+      "executions": 197801.0,
+      "matched": 197801.0,
+      "match_rate": 1.0,
+      "window": "interval"
+    },
+    {
+      "name": "write_latency_floor",
+      "passed": true,
+      "detail": "write p50 96.4 ms against a quorum floor of 71.0 ms",
+      "observed_write_p50_ms": 96.422,
+      "quorum_floor_ms": 70.987
+    },
+    {
+      "name": "row_match",
+      "passed": true,
+      "detail": "217078/217078 operations matched a row (rate 1.0000, minimum 0.99)",
+      "table": "usertable",
+      "executions": 217078.0,
+      "matched": 217078.0,
+      "match_rate": 1.0,
+      "window": "interval"
+    },
+    {
+      "name": "write_latency_floor",
+      "passed": true,
+      "detail": "write p50 75.5 ms against a quorum floor of 71.0 ms",
+      "observed_write_p50_ms": 75.5,
+      "quorum_floor_ms": 70.987
+    },
+    {
+      "name": "row_match",
+      "passed": true,
+      "detail": "3628/3628 operations matched a row (rate 1.0000, minimum 0.99)",
+      "table": "usertable",
+      "executions": 3628.0,
+      "matched": 3628.0,
+      "match_rate": 1.0,
+      "window": "interval"
+    },
+    {
+      "name": "write_latency_floor",
+      "passed": true,
+      "detail": "write p50 78.7 ms against a quorum floor of 71.0 ms",
+      "observed_write_p50_ms": 78.689,
+      "quorum_floor_ms": 70.987
+    },
+    {
+      "name": "row_match",
+      "passed": true,
+      "detail": "164010/164010 operations matched a row (rate 1.0000, minimum 0.99)",
+      "table": "usertable",
+      "executions": 164010.0,
+      "matched": 164010.0,
+      "match_rate": 1.0,
+      "window": "interval"
+    },
+    {
+      "name": "write_latency_floor",
+      "passed": true,
+      "detail": "write p50 75.5 ms against a quorum floor of 71.0 ms",
+      "observed_write_p50_ms": 75.5,
+      "quorum_floor_ms": 70.987
+    },
+    {
+      "name": "row_match",
+      "passed": true,
+      "detail": "18604/18604 operations matched a row (rate 1.0000, minimum 0.99)",
+      "table": "usertable",
+      "executions": 18604.0,
+      "matched": 18604.0,
+      "match_rate": 1.0,
+      "window": "interval"
+    },
+    {
+      "name": "write_latency_floor",
+      "passed": true,
+      "detail": "write p50 130.9 ms against a quorum floor of 71.0 ms",
+      "observed_write_p50_ms": 130.916,
+      "quorum_floor_ms": 70.987
+    },
+    {
+      "name": "row_match",
+      "passed": true,
+      "detail": "238490/238490 operations matched a row (rate 1.0000, minimum 0.99)",
+      "table": "usertable",
+      "executions": 238490.0,
+      "matched": 238490.0,
+      "match_rate": 1.0,
+      "window": "interval"
+    },
+    {
+      "name": "write_latency_floor",
+      "passed": true,
+      "detail": "write p50 75.5 ms against a quorum floor of 71.0 ms",
+      "observed_write_p50_ms": 75.5,
+      "quorum_floor_ms": 70.987
+    },
+    {
+      "name": "row_match",
+      "passed": true,
+      "detail": "7331/7331 operations matched a row (rate 1.0000, minimum 0.99)",
+      "table": "usertable",
+      "executions": 7331.0,
+      "matched": 7331.0,
+      "match_rate": 1.0,
+      "window": "interval"
+    },
+    {
+      "name": "write_latency_floor",
+      "passed": true,
+      "detail": "write p50 76.7 ms against a quorum floor of 71.0 ms",
+      "observed_write_p50_ms": 76.722,
+      "quorum_floor_ms": 70.987
+    },
+    {
+      "name": "row_match",
+      "passed": true,
+      "detail": "172198/172198 operations matched a row (rate 1.0000, minimum 0.99)",
+      "table": "usertable",
+      "executions": 172198.0,
+      "matched": 172198.0,
+      "match_rate": 1.0,
+      "window": "interval"
+    },
+    {
+      "name": "write_latency_floor",
+      "passed": true,
+      "detail": "write p50 131.9 ms against a quorum floor of 71.0 ms",
+      "observed_write_p50_ms": 131.909,
+      "quorum_floor_ms": 70.987
+    },
+    {
+      "name": "row_match",
+      "passed": true,
+      "detail": "235884/235894 operations matched a row (rate 1.0000, minimum 0.99)",
+      "table": "usertable",
+      "executions": 235894.0,
+      "matched": 235884.0,
+      "match_rate": 0.999958,
+      "window": "interval"
+    },
+    {
+      "name": "write_latency_floor",
+      "passed": true,
+      "detail": "write p50 98.5 ms against a quorum floor of 71.0 ms",
+      "observed_write_p50_ms": 98.482,
+      "quorum_floor_ms": 70.987
+    },
+    {
+      "name": "row_match",
+      "passed": true,
+      "detail": "211268/211268 operations matched a row (rate 1.0000, minimum 0.99)",
+      "table": "usertable",
+      "executions": 211268.0,
+      "matched": 211267.99999999674,
+      "match_rate": 1.0,
+      "window": "interval"
+    },
+    {
+      "name": "write_latency_floor",
+      "passed": true,
+      "detail": "write p50 75.6 ms against a quorum floor of 71.0 ms",
+      "observed_write_p50_ms": 75.576,
+      "quorum_floor_ms": 70.987
+    },
+    {
+      "name": "row_match",
+      "passed": true,
+      "detail": "1502843/1502853 operations matched a row (rate 1.0000, minimum 0.99)",
+      "table": "usertable",
+      "executions": 1502853.0,
+      "matched": 1502842.9999999967,
+      "match_rate": 0.999993,
+      "window": "interval"
+    },
+    {
+      "name": "write_latency_floor",
+      "passed": true,
+      "detail": "write p50 75.9 ms against a quorum floor of 71.0 ms",
+      "observed_write_p50_ms": 75.882,
+      "quorum_floor_ms": 70.987
+    },
+    {
+      "name": "row_match",
+      "passed": true,
+      "detail": "36753/36753 operations matched a row (rate 1.0000, minimum 0.99)",
+      "table": "usertable",
+      "executions": 36753.0,
+      "matched": 36753.0,
+      "match_rate": 1.0,
+      "window": "interval"
+    },
+    {
+      "name": "write_latency_floor",
+      "passed": true,
+      "detail": "write p50 75.5 ms against a quorum floor of 71.0 ms",
+      "observed_write_p50_ms": 75.5,
+      "quorum_floor_ms": 70.987
+    },
+    {
+      "name": "row_match",
+      "passed": true,
+      "detail": "7575/7575 operations matched a row (rate 1.0000, minimum 0.99)",
+      "table": "usertable",
+      "executions": 7575.0,
+      "matched": 7575.0,
+      "match_rate": 1.0,
+      "window": "interval"
+    },
+    {
+      "name": "write_latency_floor",
+      "passed": true,
+      "detail": "write p50 77.0 ms against a quorum floor of 71.0 ms",
+      "observed_write_p50_ms": 77.027,
+      "quorum_floor_ms": 70.987
+    },
+    {
+      "name": "row_match",
+      "passed": true,
+      "detail": "171758/171758 operations matched a row (rate 1.0000, minimum 0.99)",
+      "table": "usertable",
+      "executions": 171758.0,
+      "matched": 171758.0,
+      "match_rate": 1.0,
+      "window": "interval"
+    },
+    {
+      "name": "write_latency_floor",
+      "passed": true,
+      "detail": "write p50 75.5 ms against a quorum floor of 71.0 ms",
+      "observed_write_p50_ms": 75.5,
+      "quorum_floor_ms": 70.987
+    },
+    {
+      "name": "row_match",
+      "passed": true,
+      "detail": "18855/18855 operations matched a row (rate 1.0000, minimum 0.99)",
+      "table": "usertable",
+      "executions": 18855.0,
+      "matched": 18855.0,
+      "match_rate": 1.0,
+      "window": "interval"
+    },
+    {
+      "name": "write_latency_floor",
+      "passed": true,
+      "detail": "write p50 75.5 ms against a quorum floor of 71.0 ms",
+      "observed_write_p50_ms": 75.5,
+      "quorum_floor_ms": 70.987
+    },
+    {
+      "name": "row_match",
+      "passed": true,
+      "detail": "19270/19270 operations matched a row (rate 1.0000, minimum 0.99)",
+      "table": "usertable",
+      "executions": 19270.0,
+      "matched": 19270.0,
+      "match_rate": 1.0,
+      "window": "interval"
+    },
+    {
+      "name": "write_latency_floor",
+      "passed": true,
+      "detail": "write p50 75.5 ms against a quorum floor of 71.0 ms",
+      "observed_write_p50_ms": 75.5,
+      "quorum_floor_ms": 70.987
+    },
+    {
+      "name": "row_match",
+      "passed": true,
+      "detail": "1716319/1716329 operations matched a row (rate 1.0000, minimum 0.99); measured over a partial window because the statistics view was flushed mid-tier",
+      "table": "usertable",
+      "executions": 1716329.0,
+      "matched": 1716318.9999999967,
+      "match_rate": 0.999994,
+      "window": "post-flush partial"
+    },
+    {
+      "name": "write_latency_floor",
+      "passed": true,
+      "detail": "write p50 75.5 ms against a quorum floor of 71.0 ms",
+      "observed_write_p50_ms": 75.5,
+      "quorum_floor_ms": 70.987
+    },
+    {
+      "name": "row_match",
+      "passed": true,
+      "detail": "52161/52161 operations matched a row (rate 1.0000, minimum 0.99)",
+      "table": "usertable",
+      "executions": 52161.0,
+      "matched": 52161.0,
+      "match_rate": 1.0,
+      "window": "interval"
+    },
+    {
+      "name": "write_latency_floor",
+      "passed": true,
+      "detail": "write p50 75.5 ms against a quorum floor of 71.0 ms",
+      "observed_write_p50_ms": 75.5,
+      "quorum_floor_ms": 70.987
+    },
+    {
+      "name": "row_match",
+      "passed": true,
+      "detail": "3849/3849 operations matched a row (rate 1.0000, minimum 0.99)",
+      "table": "usertable",
+      "executions": 3849.0,
+      "matched": 3849.0,
+      "match_rate": 1.0,
+      "window": "interval"
+    },
+    {
+      "name": "write_latency_floor",
+      "passed": true,
+      "detail": "write p50 75.5 ms against a quorum floor of 71.0 ms",
+      "observed_write_p50_ms": 75.5,
+      "quorum_floor_ms": 70.987
+    },
+    {
+      "name": "row_match",
+      "passed": true,
+      "detail": "37786/37786 operations matched a row (rate 1.0000, minimum 0.99)",
+      "table": "usertable",
+      "executions": 37786.0,
+      "matched": 37786.0,
+      "match_rate": 1.0,
+      "window": "interval"
+    },
+    {
+      "name": "write_latency_floor",
+      "passed": true,
+      "detail": "write p50 133.5 ms against a quorum floor of 71.0 ms",
+      "observed_write_p50_ms": 133.513,
+      "quorum_floor_ms": 70.987
+    },
+    {
+      "name": "row_match",
+      "passed": true,
+      "detail": "233498/233498 operations matched a row (rate 1.0000, minimum 0.99)",
+      "table": "usertable",
+      "executions": 233498.0,
+      "matched": 233498.0,
+      "match_rate": 1.0,
+      "window": "interval"
+    }
+  ],
+  "tiers": [
+    {
+      "concurrency": 100,
+      "repetition": 3,
+      "ticks_recorded": 55,
+      "generator_start_offset_s": 18.501,
+      "connection_setup_s": 6.154,
+      "mean_total_tps": 3272.9,
+      "mean_p50_ms": {
+        "read": 13.176,
+        "update": 95.355
+      },
+      "generator_totals": {
+        "read": 157891.0,
+        "update": 39856.0,
+        "all": 197747.0
+      },
+      "row_match_rate": 1.0
+    },
+    {
+      "concurrency": 100,
+      "repetition": 1,
+      "ticks_recorded": 55,
+      "generator_start_offset_s": 114.081,
+      "connection_setup_s": 6.023,
+      "mean_total_tps": 3682.01,
+      "mean_p50_ms": {
+        "read": 8.929,
+        "update": 96.422
+      },
+      "generator_totals": {
+        "read": 173373.0,
+        "update": 43656.0,
+        "all": 217029.0
+      },
+      "row_match_rate": 1.0
+    },
+    {
+      "concurrency": 1,
+      "repetition": 3,
+      "ticks_recorded": 55,
+      "generator_start_offset_s": 207.697,
+      "connection_setup_s": 4.599,
+      "mean_total_tps": 60.54,
+      "mean_p50_ms": {
+        "read": 1.653,
+        "update": 75.5
+      },
+      "generator_totals": {
+        "read": 2884.0,
+        "update": 744.0,
+        "all": 3628.0
+      },
+      "row_match_rate": 1.0
+    },
+    {
+      "concurrency": 50,
+      "repetition": 1,
+      "ticks_recorded": 54,
+      "generator_start_offset_s": 301.618,
+      "connection_setup_s": 5.164,
+      "mean_total_tps": 2744.23,
+      "mean_p50_ms": {
+        "read": 2.791,
+        "update": 78.689
+      },
+      "generator_totals": {
+        "read": 131095.0,
+        "update": 32898.0,
+        "all": 163993.0
+      },
+      "row_match_rate": 1.0
+    },
+    {
+      "concurrency": 5,
+      "repetition": 2,
+      "ticks_recorded": 55,
+      "generator_start_offset_s": 395.338,
+      "connection_setup_s": 4.813,
+      "mean_total_tps": 309.22,
+      "mean_p50_ms": {
+        "read": 1.502,
+        "update": 75.5
+      },
+      "generator_totals": {
+        "read": 14823.0,
+        "update": 3779.0,
+        "all": 18602.0
+      },
+      "row_match_rate": 1.0
+    },
+    {
+      "concurrency": 200,
+      "repetition": 2,
+      "ticks_recorded": 55,
+      "generator_start_offset_s": 492.936,
+      "connection_setup_s": 8.693,
+      "mean_total_tps": 3915.86,
+      "mean_p50_ms": {
+        "read": 32.2,
+        "update": 130.916
+      },
+      "generator_totals": {
+        "read": 190707.0,
+        "update": 47629.0,
+        "all": 238336.0
+      },
+      "row_match_rate": 1.0
+    },
+    {
+      "concurrency": 2,
+      "repetition": 3,
+      "ticks_recorded": 55,
+      "generator_start_offset_s": 586.65,
+      "connection_setup_s": 4.453,
+      "mean_total_tps": 122.83,
+      "mean_p50_ms": {
+        "read": 1.558,
+        "update": 75.5
+      },
+      "generator_totals": {
+        "read": 5817.0,
+        "update": 1514.0,
+        "all": 7331.0
+      },
+      "row_match_rate": 1.0
+    },
+    {
+      "concurrency": 50,
+      "repetition": 3,
+      "ticks_recorded": 55,
+      "generator_start_offset_s": 680.306,
+      "connection_setup_s": 5.226,
+      "mean_total_tps": 2874.16,
+      "mean_p50_ms": {
+        "read": 2.345,
+        "update": 76.722
+      },
+      "generator_totals": {
+        "read": 137601.0,
+        "update": 34582.0,
+        "all": 172183.0
+      },
+      "row_match_rate": 1.0
+    },
+    {
+      "concurrency": 200,
+      "repetition": 1,
+      "ticks_recorded": 55,
+      "generator_start_offset_s": 776.623,
+      "connection_setup_s": 7.469,
+      "mean_total_tps": 3906.48,
+      "mean_p50_ms": {
+        "read": 32.569,
+        "update": 131.909
+      },
+      "generator_totals": {
+        "read": 188631.0,
+        "update": 47105.0,
+        "all": 235736.0
+      },
+      "row_match_rate": 0.9999576080782047
+    },
+    {
+      "concurrency": 100,
+      "repetition": 2,
+      "ticks_recorded": 55,
+      "generator_start_offset_s": 871.473,
+      "connection_setup_s": 5.898,
+      "mean_total_tps": 3508.93,
+      "mean_p50_ms": {
+        "read": 10.044,
+        "update": 98.482
+      },
+      "generator_totals": {
+        "read": 168708.0,
+        "update": 42524.0,
+        "all": 211232.0
+      },
+      "row_match_rate": 0.9999999999999846
+    },
+    {
+      "concurrency": 10,
+      "repetition": 3,
+      "ticks_recorded": 55,
+      "generator_start_offset_s": 965.741,
+      "connection_setup_s": 4.647,
+      "mean_total_tps": 607.66,
+      "mean_p50_ms": {
+        "read": 1.564,
+        "update": 75.576
+      },
+      "generator_totals": {
+        "read": 29080.0,
+        "update": 7465.0,
+        "all": 36545.0
+      },
+      "row_match_rate": 0.9999933459892596
+    },
+    {
+      "concurrency": 10,
+      "repetition": 2,
+      "ticks_recorded": 55,
+      "generator_start_offset_s": 1059.598,
+      "connection_setup_s": 4.812,
+      "mean_total_tps": 610.53,
+      "mean_p50_ms": {
+        "read": 1.273,
+        "update": 75.882
+      },
+      "generator_totals": {
+        "read": 29248.0,
+        "update": 7503.0,
+        "all": 36751.0
+      },
+      "row_match_rate": 1.0
+    },
+    {
+      "concurrency": 2,
+      "repetition": 1,
+      "ticks_recorded": 54,
+      "generator_start_offset_s": 1152.637,
+      "connection_setup_s": 4.447,
+      "mean_total_tps": 125.8,
+      "mean_p50_ms": {
+        "read": 0.969,
+        "update": 75.5
+      },
+      "generator_totals": {
+        "read": 6024.0,
+        "update": 1551.0,
+        "all": 7575.0
+      },
+      "row_match_rate": 1.0
+    },
+    {
+      "concurrency": 50,
+      "repetition": 2,
+      "ticks_recorded": 55,
+      "generator_start_offset_s": 1246.802,
+      "connection_setup_s": 5.295,
+      "mean_total_tps": 2860.62,
+      "mean_p50_ms": {
+        "read": 2.322,
+        "update": 77.027
+      },
+      "generator_totals": {
+        "read": 137250.0,
+        "update": 34490.0,
+        "all": 171740.0
+      },
+      "row_match_rate": 1.0
+    },
+    {
+      "concurrency": 5,
+      "repetition": 1,
+      "ticks_recorded": 54,
+      "generator_start_offset_s": 1340.016,
+      "connection_setup_s": 4.411,
+      "mean_total_tps": 313.08,
+      "mean_p50_ms": {
+        "read": 1.369,
+        "update": 75.5
+      },
+      "generator_totals": {
+        "read": 15035.0,
+        "update": 3819.0,
+        "all": 18854.0
+      },
+      "row_match_rate": 1.0
+    },
+    {
+      "concurrency": 5,
+      "repetition": 3,
+      "ticks_recorded": 55,
+      "generator_start_offset_s": 1471.011,
+      "connection_setup_s": 17.243,
+      "mean_total_tps": 321.27,
+      "mean_p50_ms": {
+        "read": 0.951,
+        "update": 75.5
+      },
+      "generator_totals": {
+        "read": 15360.0,
+        "update": 3909.0,
+        "all": 19269.0
+      },
+      "row_match_rate": 1.0
+    },
+    {
+      "concurrency": 1,
+      "repetition": 2,
+      "ticks_recorded": 54,
+      "generator_start_offset_s": 1563.421,
+      "connection_setup_s": 4.5,
+      "mean_total_tps": 63.31,
+      "mean_p50_ms": {
+        "read": 0.906,
+        "update": 75.5
+      },
+      "generator_totals": {
+        "read": 3042.0,
+        "update": 772.0,
+        "all": 3814.0
+      },
+      "row_match_rate": 0.9999941736112347
+    },
+    {
+      "concurrency": 2,
+      "repetition": 2,
+      "ticks_recorded": 55,
+      "generator_start_offset_s": 1658.525,
+      "connection_setup_s": 4.515,
+      "mean_total_tps": 126.67,
+      "mean_p50_ms": {
+        "read": 0.905,
+        "update": 75.5
+      },
+      "generator_totals": {
+        "read": 6048.0,
+        "update": 1561.0,
+        "all": 7609.0
+      },
+      "row_match_rate": 1.0
+    },
+    {
+      "concurrency": 1,
+      "repetition": 1,
+      "ticks_recorded": 55,
+      "generator_start_offset_s": 1752.872,
+      "connection_setup_s": 4.578,
+      "mean_total_tps": 64.36,
+      "mean_p50_ms": {
+        "read": 0.9,
+        "update": 75.5
+      },
+      "generator_totals": {
+        "read": 3069.0,
+        "update": 780.0,
+        "all": 3849.0
+      },
+      "row_match_rate": 1.0
+    },
+    {
+      "concurrency": 10,
+      "repetition": 1,
+      "ticks_recorded": 55,
+      "generator_start_offset_s": 1846.733,
+      "connection_setup_s": 4.383,
+      "mean_total_tps": 626.16,
+      "mean_p50_ms": {
+        "read": 1.187,
+        "update": 75.5
+      },
+      "generator_totals": {
+        "read": 30093.0,
+        "update": 7691.0,
+        "all": 37784.0
+      },
+      "row_match_rate": 1.0
+    },
+    {
+      "concurrency": 200,
+      "repetition": 3,
+      "ticks_recorded": 55,
+      "generator_start_offset_s": 1944.498,
+      "connection_setup_s": 7.957,
+      "mean_total_tps": 3800.18,
+      "mean_p50_ms": {
+        "read": 33.9,
+        "update": 133.513
+      },
+      "generator_totals": {
+        "read": 186711.0,
+        "update": 46672.0,
+        "all": 233383.0
+      },
+      "row_match_rate": 1.0
+    }
+  ]
+}

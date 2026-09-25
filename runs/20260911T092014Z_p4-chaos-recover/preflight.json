@@ -1,0 +1,49 @@
+{
+  "ok": true,
+  "checks": [
+    {
+      "name": "patroni_primary_placement",
+      "passed": true,
+      "detail": "patroni primary is gcp-1, as required",
+      "expected": "gcp-1",
+      "observed": "gcp-1",
+      "repaired": false
+    },
+    {
+      "name": "clock_offset",
+      "passed": true,
+      "detail": "client-1: NTP offset 0.00 ms (limit 250 ms)",
+      "node": "client-1",
+      "offset_s": 1.793e-06
+    },
+    {
+      "name": "clock_offset",
+      "passed": true,
+      "detail": "gcp-1: NTP offset 0.00 ms (limit 250 ms)",
+      "node": "gcp-1",
+      "offset_s": 8.76e-07
+    },
+    {
+      "name": "fault_authorisation",
+      "passed": true,
+      "detail": "gcp-1: 'recover' fault is permitted as ubuntu",
+      "node": "gcp-1",
+      "mode": "recover",
+      "probe": "sudo -n tailscale status --json >/dev/null",
+      "returncode": 0,
+      "stderr": ""
+    },
+    {
+      "name": "probe_agent_ready",
+      "passed": true,
+      "detail": "python3 with psycopg 3.3.5",
+      "node": "client-1"
+    },
+    {
+      "name": "patroni_primary_resolved",
+      "passed": true,
+      "detail": "resolved gcp-1 (crdb-gcp-1) as the current Patroni primary via its REST API immediately before scheduling the fault",
+      "target": "gcp-1"
+    }
+  ]
+}

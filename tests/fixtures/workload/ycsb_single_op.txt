@@ -1,0 +1,25 @@
+I260902 00:16:10.541491 1 workload/cli/run.go:702  [-] 1  random seed: 42
+I260902 00:16:10.541961 1 workload/cli/run.go:487  [-] 2  creating load generator...
+I260902 00:16:10.615161 1 workload/cli/run.go:536  [-] 3  creating load generator... done (took 73.198428ms)
+_elapsed___errors__ops/sec(inst)___ops/sec(cum)__p50(ms)__p95(ms)__p99(ms)_pMax(ms)
+    1.0s        0         2557.0         2745.7      3.3      8.1     11.0     17.8 read
+    2.0s        0         2886.2         2815.8      3.1      7.6      8.9     16.3 read
+    3.0s        0         2444.2         2691.9      3.5      9.4     14.7     39.8 read
+    4.0s        0         2902.8         2744.7      3.1      7.3      9.4     26.2 read
+    5.0s        0         2403.0         2676.3      3.4     10.0     18.9     29.4 read
+    6.0s        0         3079.1         2743.4      3.0      7.1      9.4     27.3 read
+    7.0s        0         3072.0         2790.4      3.0      7.3      8.9     15.2 read
+    8.0s        0         3113.5         2830.8      2.9      7.1      8.9     14.7 read
+    9.0s        0         3141.6         2865.3      2.9      7.1      8.9     18.9 read
+   10.0s        0         3132.0         2892.0      2.9      6.8      8.9     21.0 read
+   11.0s        0         3043.8         2905.8      3.0      7.1      8.9     14.2 read
+   12.0s        0         3167.9         2927.6      3.0      6.8      8.4     14.7 read
+   13.0s        0         2712.1         2911.0      3.3      8.4     13.1     24.1 read
+   14.0s        0         2912.2         2911.1      3.3      7.3      9.4     16.3 read
+   15.0s        0         2275.5         2868.8      3.7     11.0     17.8     32.5 read
+
+_elapsed___errors_____ops(total)___ops/sec(cum)__avg(ms)__p50(ms)__p95(ms)__p99(ms)_pMax(ms)__total
+   15.0s        0          43034         2868.7      3.5      3.1      7.6     11.0     39.8  read
+
+_elapsed___errors_____ops(total)___ops/sec(cum)__avg(ms)__p50(ms)__p95(ms)__p99(ms)_pMax(ms)__result
+   15.0s        0          43034         2868.7      3.5      3.1      7.6     11.0     39.8  

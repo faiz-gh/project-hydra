@@ -1,0 +1,49 @@
+{
+  "ok": true,
+  "checks": [
+    {
+      "name": "patroni_primary_placement",
+      "passed": true,
+      "detail": "switched over from linode-2 to gcp-1",
+      "expected": "gcp-1",
+      "observed": "gcp-1",
+      "repaired": true
+    },
+    {
+      "name": "clock_offset",
+      "passed": true,
+      "detail": "client-1: NTP offset 0.00 ms (limit 250 ms)",
+      "node": "client-1",
+      "offset_s": 9e-09
+    },
+    {
+      "name": "clock_offset",
+      "passed": true,
+      "detail": "gcp-1: NTP offset 0.00 ms (limit 250 ms)",
+      "node": "gcp-1",
+      "offset_s": 1.16e-07
+    },
+    {
+      "name": "fault_authorisation",
+      "passed": true,
+      "detail": "gcp-1: 'dead' fault is permitted as ubuntu",
+      "node": "gcp-1",
+      "mode": "dead",
+      "probe": "sudo -n systemctl show patroni.service --property=MainPID && sudo -n test -w /etc/systemd/system",
+      "returncode": 0,
+      "stderr": ""
+    },
+    {
+      "name": "probe_agent_ready",
+      "passed": true,
+      "detail": "python3 with psycopg 3.3.5",
+      "node": "client-1"
+    },
+    {
+      "name": "patroni_primary_resolved",
+      "passed": true,
+      "detail": "resolved gcp-1 (crdb-gcp-1) as the current Patroni primary via its REST API immediately before scheduling the fault",
+      "target": "gcp-1"
+    }
+  ]
+}

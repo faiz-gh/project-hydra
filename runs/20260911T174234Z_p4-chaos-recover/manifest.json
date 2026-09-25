@@ -1,0 +1,148 @@
+{
+  "run_id": "20260911T174234Z_p4-chaos-recover",
+  "phase": "p4_chaos",
+  "schema_version": "2.1",
+  "engine": "cockroachdb",
+  "started_utc": "2026-09-11T17:42:34.367027Z",
+  "finished_utc": "2026-09-11T17:59:38.812378Z",
+  "git_revision": "de7e94a0aa55d56613e4abb3d6def0fa2feae898",
+  "profile": {
+    "name": "thesis-extended",
+    "workload": {
+      "generator": "ycsb",
+      "ycsb_workload": "CUSTOM",
+      "read_freq": 0.8,
+      "update_freq": 0.2,
+      "request_distribution": "uniform",
+      "read_percent": 80,
+      "duration_s": 60,
+      "warmup_s": 5,
+      "display_every_s": 1,
+      "concurrencies": [
+        1,
+        2,
+        5,
+        10,
+        50,
+        100,
+        200
+      ],
+      "repetitions": 3,
+      "randomise_tier_order": true,
+      "cooldown_s": 15,
+      "seed": 42,
+      "insert_count": 7500000,
+      "cycle_length": 1000000,
+      "block_bytes": 256
+    },
+    "chaos": {
+      "duration_s": 180,
+      "inject_at_s": 60,
+      "concurrency": 100,
+      "target": "gcp-1",
+      "recovery_threshold": 0.8,
+      "recovery_hold_s": 10,
+      "min_post_fault_s": 900,
+      "leaseholder_settle_s": 900,
+      "audit_interval_s": 0.02,
+      "probe_enabled": true,
+      "probe_interval_s": 0.002,
+      "probe_workers": 8,
+      "probe_statement_timeout_ms": 5000,
+      "probe_connect_timeout_s": 2.0,
+      "probe_table": "rto_canary"
+    },
+    "hardware_metrics": {
+      "enabled": true,
+      "sample_interval_s": 5.0
+    },
+    "tps_ceiling": 20000.0
+  },
+  "topology": [
+    {
+      "name": "client-1",
+      "host": "crdb-client-1",
+      "role": "generator, audit endpoint"
+    },
+    {
+      "name": "gcp-1",
+      "host": "crdb-gcp-1",
+      "role": "chaos target (recover)"
+    }
+  ],
+  "clock_epoch_utc": "2026-09-11T17:42:39.007454Z",
+  "server_version": "v26.3.0",
+  "cockroach_version": "v26.3.0",
+  "generator_command": "cockroach workload run ycsb --workload=CUSTOM --seed=42 --insert-count=7500000 --request-distribution=uniform --read-freq=0.8 --update-freq=0.2 --concurrency=100 --duration=1005s --tolerate-errors --display-every=1s 'postgresql://root@127.0.0.1:26257/ycsb?sslmode=disable'",
+  "ssh_options": [
+    "-q",
+    "-o",
+    "StrictHostKeyChecking=no",
+    "-o",
+    "UserKnownHostsFile=/dev/null",
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "ServerAliveInterval=5",
+    "-o",
+    "ServerAliveCountMax=3"
+  ],
+  "client_platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+  "notes": [
+    "2026-09-11T17:42:39.006383Z server: 2915 cockroach start --insecure --store=/var/lib/cockroach --listen-addr=100.107.161.123:26257 --advertise-addr=100.107.161.123:26257 --locality=cloud=gcp,region=us-east1 --cache=0.25 --max-sql-memory=0.25 --join=crdb-gcp-1,crdb-azure-1,crdb-azure-2,crdb-linode-1,crdb-linode-2",
+    "2026-09-11T17:42:39.006524Z host: cpus=4 mem_total_kb=8128928 cpu_model=AMD EPYC 7B13",
+    "2026-09-11T17:42:39.006569Z fault scheduled for 60s: sudo -n nohup setsid bash -c 'tailscale down && sleep 45 && tailscale up' >/dev/null 2>&1 &",
+    "2026-09-11T17:42:39.006621Z rto probe: enabled, 8 worker(s) at 2 ms dispatch into bench.rto_canary",
+    "2026-09-11T17:42:39.006641Z generator run extended from 180s to 1005s to keep 900s of observation after the partition heals at 105s",
+    "2026-09-11T17:59:36.905561Z hardware metrics: scrape failures {'gcp-1': 9}"
+  ],
+  "generator_totals": {},
+  "validation": {
+    "preflight": {
+      "ok": true,
+      "checks": [
+        {
+          "name": "clock_offset",
+          "passed": true,
+          "detail": "client-1: NTP offset 0.00 ms (limit 250 ms)",
+          "node": "client-1",
+          "offset_s": 2.525e-06
+        },
+        {
+          "name": "clock_offset",
+          "passed": true,
+          "detail": "gcp-1: NTP offset 0.01 ms (limit 250 ms)",
+          "node": "gcp-1",
+          "offset_s": 6.738e-06
+        },
+        {
+          "name": "fault_authorisation",
+          "passed": true,
+          "detail": "gcp-1: 'recover' fault is permitted as ubuntu",
+          "node": "gcp-1",
+          "mode": "recover",
+          "probe": "sudo -n tailscale status --json >/dev/null",
+          "returncode": 0,
+          "stderr": ""
+        },
+        {
+          "name": "probe_agent_ready",
+          "passed": true,
+          "detail": "python3 with psycopg 3.3.5",
+          "node": "client-1"
+        },
+        {
+          "name": "leaseholder_placement",
+          "passed": true,
+          "detail": "43/43 ycsb leaseholders in 'us-east1' (after waiting 29s for placement to settle)",
+          "database": "ycsb",
+          "expected_region": "us-east1",
+          "waited_s": 29.4,
+          "distribution": {
+            "cloud=gcp,region=us-east1": 43
+          }
+        }
+      ]
+    }
+  }
+}

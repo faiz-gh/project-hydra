@@ -1,0 +1,711 @@
+{
+  "A1": {
+    "title": "Throughput-latency curve",
+    "drawn": true,
+    "skipped": "",
+    "stats": {
+      "cockroachdb_knee_concurrency": 100,
+      "cockroachdb_knee_tps": 3852.4,
+      "cockroachdb_peak_tps": 3852.4,
+      "postgresql_knee_concurrency": 200,
+      "postgresql_knee_tps": 5824.0,
+      "postgresql_peak_tps": 5824.0
+    },
+    "files": [
+      "a1_throughput_latency_curve_mixed-engine_thesis_20260911T042526Z_bench_cluster_20260911T075542Z_bench_cluster.png",
+      "a1_throughput_latency_curve_mixed-engine_thesis_20260911T042526Z_bench_cluster_20260911T075542Z_bench_cluster.svg"
+    ]
+  },
+  "A2": {
+    "title": "Latency percentile fan",
+    "drawn": true,
+    "skipped": "",
+    "stats": {
+      "cockroachdb_read_p99_max_ms": 100.69,
+      "postgresql_read_p99_max_ms": 30.82,
+      "cockroachdb_update_p99_max_ms": 212.92,
+      "postgresql_update_p99_max_ms": 255.72
+    },
+    "files": [
+      "a2_latency_percentile_fan_mixed-engine_thesis_20260911T042526Z_bench_cluster_20260911T075542Z_bench_cluster.png",
+      "a2_latency_percentile_fan_mixed-engine_thesis_20260911T042526Z_bench_cluster_20260911T075542Z_bench_cluster.svg"
+    ]
+  },
+  "A3": {
+    "title": "Concurrency slot occupancy",
+    "drawn": true,
+    "skipped": "",
+    "stats": {
+      "cockroachdb_read_slots_at_max_c": 104.2,
+      "cockroachdb_update_slots_at_max_c": 96.6,
+      "postgresql_read_slots_at_max_c": 45.3,
+      "postgresql_update_slots_at_max_c": 172.7
+    },
+    "files": [
+      "a3_concurrency_slot_occupancy_mixed-engine_thesis_20260911T042526Z_bench_cluster_20260911T075542Z_bench_cluster.png",
+      "a3_concurrency_slot_occupancy_mixed-engine_thesis_20260911T042526Z_bench_cluster_20260911T075542Z_bench_cluster.svg"
+    ]
+  },
+  "A4": {
+    "title": "Steady-state stability",
+    "drawn": true,
+    "skipped": "",
+    "stats": {
+      "cockroachdb_max_cv": 0.151,
+      "cockroachdb_worst_tier": 200,
+      "postgresql_max_cv": 0.375,
+      "postgresql_worst_tier": 200
+    },
+    "files": [
+      "a4_steady_state_stability_mixed-engine_thesis_20260911T042526Z_bench_cluster_20260911T075542Z_bench_cluster.png",
+      "a4_steady_state_stability_mixed-engine_thesis_20260911T042526Z_bench_cluster_20260911T075542Z_bench_cluster.svg"
+    ]
+  },
+  "A5": {
+    "title": "Error rate against load",
+    "drawn": true,
+    "skipped": "",
+    "stats": {
+      "cockroachdb_errors_total": 0,
+      "postgresql_errors_total": 0
+    },
+    "files": [
+      "a5_error_rate_against_load_mixed-engine_thesis_20260911T042526Z_bench_cluster_20260911T075542Z_bench_cluster.png",
+      "a5_error_rate_against_load_mixed-engine_thesis_20260911T042526Z_bench_cluster_20260911T075542Z_bench_cluster.svg"
+    ]
+  },
+  "A6": {
+    "title": "Throughput under a latency budget",
+    "drawn": true,
+    "skipped": "",
+    "stats": {
+      "cockroachdb_tps_under_p99_10ms": 0.0,
+      "cockroachdb_tps_under_p99_25ms": 0.0,
+      "cockroachdb_tps_under_p99_50ms": 0.0,
+      "cockroachdb_tps_under_p99_100ms": 2891.2,
+      "cockroachdb_tps_under_p99_200ms": 3852.4,
+      "cockroachdb_tps_under_p99_400ms": 3852.4,
+      "cockroachdb_tps_under_p99_800ms": 3852.4,
+      "postgresql_tps_under_p99_10ms": 0.0,
+      "postgresql_tps_under_p99_25ms": 0.0,
+      "postgresql_tps_under_p99_50ms": 0.0,
+      "postgresql_tps_under_p99_100ms": 640.3,
+      "postgresql_tps_under_p99_200ms": 5301.3,
+      "postgresql_tps_under_p99_400ms": 5824.0,
+      "postgresql_tps_under_p99_800ms": 5824.0
+    },
+    "files": [
+      "a6_throughput_under_a_latency_budget_mixed-engine_thesis_20260911T042526Z_bench_cluster_20260911T075542Z_bench_cluster.png",
+      "a6_throughput_under_a_latency_budget_mixed-engine_thesis_20260911T042526Z_bench_cluster_20260911T075542Z_bench_cluster.svg"
+    ]
+  },
+  "A7": {
+    "title": "Throughput by concurrency",
+    "drawn": true,
+    "skipped": "",
+    "stats": {
+      "cockroachdb_peak_tps": 3852.4,
+      "cockroachdb_peak_concurrency": 100,
+      "postgresql_peak_tps": 5824.0,
+      "postgresql_peak_concurrency": 200
+    },
+    "files": [
+      "a7_throughput_by_concurrency_mixed-engine_thesis_20260911T042526Z_bench_cluster_20260911T075542Z_bench_cluster.png",
+      "a7_throughput_by_concurrency_mixed-engine_thesis_20260911T042526Z_bench_cluster_20260911T075542Z_bench_cluster.svg"
+    ]
+  },
+  "B1": {
+    "title": "Per-node CPU timeline",
+    "drawn": true,
+    "skipped": "",
+    "stats": {
+      "cockroachdb_azure-1_cpu_mean_pct": 17.5,
+      "cockroachdb_azure-2_cpu_mean_pct": 18.5,
+      "cockroachdb_gcp-1_cpu_mean_pct": 55.3,
+      "cockroachdb_linode-1_cpu_mean_pct": 13.6,
+      "cockroachdb_linode-2_cpu_mean_pct": 13.6,
+      "postgresql_azure-1_cpu_mean_pct": 30.6,
+      "postgresql_azure-2_cpu_mean_pct": 15.8,
+      "postgresql_gcp-1_cpu_mean_pct": 42.1,
+      "postgresql_linode-1_cpu_mean_pct": 11.9,
+      "postgresql_linode-2_cpu_mean_pct": 12.6
+    },
+    "files": [
+      "b1_per_node_cpu_timeline_mixed-engine_thesis_20260911T042526Z_bench_cluster_20260911T075542Z_bench_cluster.png",
+      "b1_per_node_cpu_timeline_mixed-engine_thesis_20260911T042526Z_bench_cluster_20260911T075542Z_bench_cluster.svg"
+    ]
+  },
+  "B2": {
+    "title": "CPU efficiency",
+    "drawn": true,
+    "skipped": "",
+    "stats": {
+      "cockroachdb_c10_ops_per_cpu_pct": 29.0,
+      "cockroachdb_c50_ops_per_cpu_pct": 124.3,
+      "cockroachdb_c100_ops_per_cpu_pct": 167.0,
+      "cockroachdb_c200_ops_per_cpu_pct": 139.8,
+      "postgresql_c10_ops_per_cpu_pct": 28.3,
+      "postgresql_c50_ops_per_cpu_pct": 137.3,
+      "postgresql_c100_ops_per_cpu_pct": 232.7,
+      "postgresql_c200_ops_per_cpu_pct": 230.2
+    },
+    "files": [
+      "b2_cpu_efficiency_mixed-engine_thesis_20260911T042526Z_bench_cluster_20260911T075542Z_bench_cluster.png",
+      "b2_cpu_efficiency_mixed-engine_thesis_20260911T042526Z_bench_cluster_20260911T075542Z_bench_cluster.svg"
+    ]
+  },
+  "B3": {
+    "title": "Disk I/O and busy time",
+    "drawn": true,
+    "skipped": "",
+    "stats": {
+      "cockroachdb_disk_busy_mean_pct": 43.7,
+      "cockroachdb_disk_read_mean_mb_s": 10.15,
+      "cockroachdb_disk_write_mean_mb_s": 3.81,
+      "postgresql_disk_busy_mean_pct": 42.5,
+      "postgresql_disk_read_mean_mb_s": 3.34,
+      "postgresql_disk_write_mean_mb_s": 21.76
+    },
+    "files": [
+      "b3_disk_i_o_and_busy_time_mixed-engine_thesis_20260911T042526Z_bench_cluster_20260911T075542Z_bench_cluster.png",
+      "b3_disk_i_o_and_busy_time_mixed-engine_thesis_20260911T042526Z_bench_cluster_20260911T075542Z_bench_cluster.svg"
+    ]
+  },
+  "B4": {
+    "title": "Memory headroom",
+    "drawn": true,
+    "skipped": "",
+    "stats": {
+      "cockroachdb_mem_available_min_gb": 2.01,
+      "cockroachdb_mem_total_gb": 8.32,
+      "postgresql_mem_available_min_gb": 3.92,
+      "postgresql_mem_total_gb": 8.32
+    },
+    "files": [
+      "b4_memory_headroom_mixed-engine_thesis_20260911T042526Z_bench_cluster_20260911T075542Z_bench_cluster.png",
+      "b4_memory_headroom_mixed-engine_thesis_20260911T042526Z_bench_cluster_20260911T075542Z_bench_cluster.svg"
+    ]
+  },
+  "B5": {
+    "title": "Replication traffic amplification",
+    "drawn": true,
+    "skipped": "",
+    "stats": {
+      "cockroachdb_c10_tx_kib_per_op": 2.24,
+      "cockroachdb_c50_tx_kib_per_op": 0.53,
+      "cockroachdb_c100_tx_kib_per_op": 0.41,
+      "cockroachdb_c200_tx_kib_per_op": 0.5,
+      "postgresql_c10_tx_kib_per_op": 19.62,
+      "postgresql_c50_tx_kib_per_op": 4.27,
+      "postgresql_c100_tx_kib_per_op": 2.4,
+      "postgresql_c200_tx_kib_per_op": 2.78
+    },
+    "files": [
+      "b5_replication_traffic_amplification_mixed-engine_thesis_20260911T042526Z_bench_cluster_20260911T075542Z_bench_cluster.png",
+      "b5_replication_traffic_amplification_mixed-engine_thesis_20260911T042526Z_bench_cluster_20260911T075542Z_bench_cluster.svg"
+    ]
+  },
+  "B6": {
+    "title": "Cluster utilisation heatmap",
+    "drawn": true,
+    "skipped": "",
+    "stats": {
+      "cockroachdb_cpu_peak_pct": 99.9,
+      "postgresql_cpu_peak_pct": 97.8
+    },
+    "files": [
+      "b6_cluster_utilisation_heatmap_mixed-engine_thesis_20260911T042526Z_bench_cluster_20260911T075542Z_bench_cluster.png",
+      "b6_cluster_utilisation_heatmap_mixed-engine_thesis_20260911T042526Z_bench_cluster_20260911T075542Z_bench_cluster.svg"
+    ]
+  },
+  "B7": {
+    "title": "Cluster load imbalance",
+    "drawn": true,
+    "skipped": "",
+    "stats": {
+      "cockroachdb_cpu_imbalance_cv": 0.672,
+      "cockroachdb_busiest_node": "gcp-1",
+      "postgresql_cpu_imbalance_cv": 0.526,
+      "postgresql_busiest_node": "gcp-1"
+    },
+    "files": [
+      "b7_cluster_load_imbalance_mixed-engine_thesis_20260911T042526Z_bench_cluster_20260911T075542Z_bench_cluster.png",
+      "b7_cluster_load_imbalance_mixed-engine_thesis_20260911T042526Z_bench_cluster_20260911T075542Z_bench_cluster.svg"
+    ]
+  },
+  "C1": {
+    "title": "Probe attempt strip",
+    "drawn": true,
+    "skipped": "",
+    "stats": {
+      "cockroachdb_dead_attempts": 18638,
+      "cockroachdb_dead_outcomes": {
+        "ok": 18630,
+        "conn_error": 7,
+        "refused": 1
+      },
+      "cockroachdb_recover_attempts": 30062,
+      "cockroachdb_recover_outcomes": {
+        "ok": 30054,
+        "timeout": 8
+      },
+      "postgresql_dead_attempts": 21309,
+      "postgresql_dead_outcomes": {
+        "ok": 21197,
+        "conn_error": 112
+      },
+      "postgresql_recover_attempts": 21641,
+      "postgresql_recover_outcomes": {
+        "ok": 21601,
+        "conn_error": 40
+      }
+    },
+    "files": [
+      "c1_probe_attempt_strip_mixed-engine_thesis_20260911T045700Z_p4-chaos-dead_20260911T044449Z_p4-chaos-recover_20260911T083034Z_p4-chaos-dead_20260911T081345Z_p4-chaos-recover.png",
+      "c1_probe_attempt_strip_mixed-engine_thesis_20260911T045700Z_p4-chaos-dead_20260911T044449Z_p4-chaos-recover_20260911T083034Z_p4-chaos-dead_20260911T081345Z_p4-chaos-recover.svg"
+    ]
+  },
+  "C2": {
+    "title": "Probe latency through the fault",
+    "drawn": true,
+    "skipped": "",
+    "stats": {
+      "cockroachdb_dead_pre_fault_p50_ms": 131.01,
+      "cockroachdb_dead_post_fault_p50_ms": 216.22,
+      "cockroachdb_recover_pre_fault_p50_ms": 139.61,
+      "cockroachdb_recover_post_fault_p50_ms": 124.77,
+      "postgresql_dead_pre_fault_p50_ms": 73.28,
+      "postgresql_dead_post_fault_p50_ms": 207.66,
+      "postgresql_recover_pre_fault_p50_ms": 73.39,
+      "postgresql_recover_post_fault_p50_ms": 221.57
+    },
+    "files": [
+      "c2_probe_latency_through_the_fault_mixed-engine_thesis_20260911T045700Z_p4-chaos-dead_20260911T044449Z_p4-chaos-recover_20260911T083034Z_p4-chaos-dead_20260911T081345Z_p4-chaos-recover.png",
+      "c2_probe_latency_through_the_fault_mixed-engine_thesis_20260911T045700Z_p4-chaos-dead_20260911T044449Z_p4-chaos-recover_20260911T083034Z_p4-chaos-dead_20260911T081345Z_p4-chaos-recover.svg"
+    ]
+  },
+  "C3": {
+    "title": "Instrument agreement",
+    "drawn": true,
+    "skipped": "",
+    "stats": {
+      "CockroachDB_dead": {
+        "audit_s": 10.206,
+        "probe_s": 3.930655
+      },
+      "CockroachDB_recover": {
+        "audit_s": 11.056,
+        "probe_s": 5.532481
+      },
+      "PostgreSQL/Patroni_dead": {
+        "audit_s": 28.435,
+        "probe_s": 23.917491
+      },
+      "PostgreSQL/Patroni_recover": {
+        "audit_s": 46.21,
+        "probe_s": 40.365276
+      }
+    },
+    "files": [
+      "c3_instrument_agreement_mixed-engine_thesis_20260911T045700Z_p4-chaos-dead_20260911T044449Z_p4-chaos-recover_20260911T083034Z_p4-chaos-dead_20260911T081345Z_p4-chaos-recover.png",
+      "c3_instrument_agreement_mixed-engine_thesis_20260911T045700Z_p4-chaos-dead_20260911T044449Z_p4-chaos-recover_20260911T083034Z_p4-chaos-dead_20260911T081345Z_p4-chaos-recover.svg"
+    ]
+  },
+  "C4": {
+    "title": "Recovery decomposition",
+    "drawn": true,
+    "skipped": "",
+    "stats": {
+      "CockroachDB_dead": {
+        "detection_s": 8.599756,
+        "outage_s": 3.930655
+      },
+      "CockroachDB_recover": {
+        "detection_s": 8.724752,
+        "outage_s": 5.532481
+      },
+      "PostgreSQL/Patroni_dead": {
+        "detection_s": 4.540826,
+        "outage_s": 23.917491
+      },
+      "PostgreSQL/Patroni_recover": {
+        "detection_s": 15.961584,
+        "outage_s": 40.365276
+      }
+    },
+    "files": [
+      "c4_recovery_decomposition_mixed-engine_thesis_20260911T045700Z_p4-chaos-dead_20260911T044449Z_p4-chaos-recover_20260911T083034Z_p4-chaos-dead_20260911T081345Z_p4-chaos-recover.png",
+      "c4_recovery_decomposition_mixed-engine_thesis_20260911T045700Z_p4-chaos-dead_20260911T044449Z_p4-chaos-recover_20260911T083034Z_p4-chaos-dead_20260911T081345Z_p4-chaos-recover.svg"
+    ]
+  },
+  "C5": {
+    "title": "Post-fault settling",
+    "drawn": true,
+    "skipped": "",
+    "stats": {
+      "cockroachdb_dead": {
+        "settled": true,
+        "mean_tps": 1485.7,
+        "fraction_of_baseline": 0.4807,
+        "cv": 0.0562
+      },
+      "cockroachdb_recover": {
+        "settled": false,
+        "mean_tps": 2537.7,
+        "fraction_of_baseline": 0.6825,
+        "cv": 0.3268
+      },
+      "postgresql_dead": {
+        "settled": true,
+        "mean_tps": 1528.2,
+        "fraction_of_baseline": 0.2714,
+        "cv": 0.2445
+      },
+      "postgresql_recover": {
+        "settled": false,
+        "mean_tps": 881.7,
+        "fraction_of_baseline": 0.1467,
+        "cv": 0.3316
+      }
+    },
+    "files": [
+      "c5_post_fault_settling_mixed-engine_thesis_20260911T045700Z_p4-chaos-dead_20260911T044449Z_p4-chaos-recover_20260911T083034Z_p4-chaos-dead_20260911T081345Z_p4-chaos-recover.png",
+      "c5_post_fault_settling_mixed-engine_thesis_20260911T045700Z_p4-chaos-dead_20260911T044449Z_p4-chaos-recover_20260911T083034Z_p4-chaos-dead_20260911T081345Z_p4-chaos-recover.svg"
+    ]
+  },
+  "C6": {
+    "title": "Read and write paths after failover",
+    "drawn": true,
+    "skipped": "",
+    "stats": {
+      "cockroachdb_dead": {
+        "read_p50_before_ms": 13.899999999999999,
+        "read_p50_after_ms": 28.3,
+        "update_p50_before_ms": 92.3,
+        "update_p50_after_ms": 218.1
+      },
+      "cockroachdb_recover": {
+        "read_p50_before_ms": 8.9,
+        "read_p50_after_ms": 24.1,
+        "update_p50_before_ms": 92.3,
+        "update_p50_after_ms": 104.9
+      },
+      "postgresql_dead": {
+        "read_p50_before_ms": 1.2,
+        "read_p50_after_ms": 25.2,
+        "update_p50_before_ms": 75.5,
+        "update_p50_after_ms": 209.7
+      },
+      "postgresql_recover": {
+        "read_p50_before_ms": 1.0,
+        "read_p50_after_ms": 71.3,
+        "update_p50_before_ms": 75.5,
+        "update_p50_after_ms": 226.5
+      }
+    },
+    "files": [
+      "c6_read_and_write_paths_after_failover_mixed-engine_thesis_20260911T045700Z_p4-chaos-dead_20260911T044449Z_p4-chaos-recover_20260911T083034Z_p4-chaos-dead_20260911T081345Z_p4-chaos-recover.png",
+      "c6_read_and_write_paths_after_failover_mixed-engine_thesis_20260911T045700Z_p4-chaos-dead_20260911T044449Z_p4-chaos-recover_20260911T083034Z_p4-chaos-dead_20260911T081345Z_p4-chaos-recover.svg"
+    ]
+  },
+  "C7": {
+    "title": "Hardware through the failover",
+    "drawn": true,
+    "skipped": "",
+    "stats": {
+      "cockroachdb_dead_target": "gcp-1",
+      "cockroachdb_recover_target": "gcp-1",
+      "postgresql_dead_target": "gcp-1",
+      "postgresql_recover_target": "gcp-1"
+    },
+    "files": [
+      "c7_hardware_through_the_failover_mixed-engine_thesis_20260911T045700Z_p4-chaos-dead_20260911T044449Z_p4-chaos-recover_20260911T083034Z_p4-chaos-dead_20260911T081345Z_p4-chaos-recover.png",
+      "c7_hardware_through_the_failover_mixed-engine_thesis_20260911T045700Z_p4-chaos-dead_20260911T044449Z_p4-chaos-recover_20260911T083034Z_p4-chaos-dead_20260911T081345Z_p4-chaos-recover.svg"
+    ]
+  },
+  "C8": {
+    "title": "RTO and RPO summary",
+    "drawn": true,
+    "skipped": "",
+    "stats": {
+      "CockroachDB_dead": {
+        "availability_rto_s": 10.206,
+        "probe_outage_s": 3.930655,
+        "rpo_lost": 0,
+        "rpo_acknowledged": 1200
+      },
+      "CockroachDB_recover": {
+        "availability_rto_s": 11.056,
+        "probe_outage_s": 5.532481,
+        "rpo_lost": 0,
+        "rpo_acknowledged": 1545
+      },
+      "PostgreSQL/Patroni_dead": {
+        "availability_rto_s": 28.435,
+        "probe_outage_s": 23.917491,
+        "rpo_lost": 0,
+        "rpo_acknowledged": 1116
+      },
+      "PostgreSQL/Patroni_recover": {
+        "availability_rto_s": 46.21,
+        "probe_outage_s": 40.365276,
+        "rpo_lost": 0,
+        "rpo_acknowledged": 1113
+      }
+    },
+    "files": [
+      "c8_rto_and_rpo_summary_mixed-engine_thesis_20260911T045700Z_p4-chaos-dead_20260911T044449Z_p4-chaos-recover_20260911T083034Z_p4-chaos-dead_20260911T081345Z_p4-chaos-recover.png",
+      "c8_rto_and_rpo_summary_mixed-engine_thesis_20260911T045700Z_p4-chaos-dead_20260911T044449Z_p4-chaos-recover_20260911T083034Z_p4-chaos-dead_20260911T081345Z_p4-chaos-recover.svg"
+    ]
+  },
+  "D1": {
+    "title": "Engine throughput-latency curves",
+    "drawn": true,
+    "skipped": "",
+    "stats": {
+      "cockroachdb_peak_tps": 3852.4,
+      "cockroachdb_peak_concurrency": 100,
+      "cockroachdb_saturated": true,
+      "postgresql_peak_tps": 5824.0,
+      "postgresql_peak_concurrency": 200,
+      "postgresql_saturated": false
+    },
+    "files": [
+      "d1_engine_throughput_latency_curves_mixed-engine_thesis_20260911T042526Z_bench_cluster_20260911T075542Z_bench_cluster.png",
+      "d1_engine_throughput_latency_curves_mixed-engine_thesis_20260911T042526Z_bench_cluster_20260911T075542Z_bench_cluster.svg"
+    ]
+  },
+  "D2": {
+    "title": "Latency at matched throughput",
+    "drawn": true,
+    "skipped": "",
+    "stats": {
+      "points": [
+        {
+          "throughput_tps": 640.3,
+          "phase_ii_latency_ms": 74.703,
+          "phase_iii_latency_ms": 75.5,
+          "overhead_x": 1.01,
+          "phase_ii_utilisation": 0.166,
+          "phase_iii_utilisation": 0.11,
+          "utilisation_gap": 0.056,
+          "measured_in": "PostgreSQL"
+        },
+        {
+          "throughput_tps": 2891.2,
+          "phase_ii_latency_ms": 75.958,
+          "phase_iii_latency_ms": 75.571,
+          "overhead_x": 0.99,
+          "phase_ii_utilisation": 0.75,
+          "phase_iii_utilisation": 0.496,
+          "utilisation_gap": 0.254,
+          "measured_in": "CockroachDB"
+        },
+        {
+          "throughput_tps": 3107.9,
+          "phase_ii_latency_ms": 79.935,
+          "phase_iii_latency_ms": 75.578,
+          "overhead_x": 0.95,
+          "phase_ii_utilisation": 0.807,
+          "phase_iii_utilisation": 0.534,
+          "utilisation_gap": 0.273,
+          "measured_in": "PostgreSQL"
+        },
+        {
+          "throughput_tps": 3525.3,
+          "phase_ii_latency_ms": 87.595,
+          "phase_iii_latency_ms": 77.393,
+          "overhead_x": 0.88,
+          "phase_ii_utilisation": 0.915,
+          "phase_iii_utilisation": 0.605,
+          "utilisation_gap": 0.31,
+          "measured_in": "CockroachDB"
+        },
+        {
+          "throughput_tps": 3852.4,
+          "phase_ii_latency_ms": 93.598,
+          "phase_iii_latency_ms": 78.816,
+          "overhead_x": 0.84,
+          "phase_ii_utilisation": 1.0,
+          "phase_iii_utilisation": 0.661,
+          "utilisation_gap": 0.339,
+          "measured_in": "CockroachDB"
+        }
+      ],
+      "least_confounded": {
+        "throughput_tps": 640.3,
+        "phase_ii_latency_ms": 74.703,
+        "phase_iii_latency_ms": 75.5,
+        "overhead_x": 1.01,
+        "phase_ii_utilisation": 0.166,
+        "phase_iii_utilisation": 0.11,
+        "utilisation_gap": 0.056,
+        "measured_in": "PostgreSQL"
+      }
+    },
+    "files": [
+      "d2_latency_at_matched_throughput_mixed-engine_thesis_20260911T042526Z_bench_cluster_20260911T075542Z_bench_cluster.png",
+      "d2_latency_at_matched_throughput_mixed-engine_thesis_20260911T042526Z_bench_cluster_20260911T075542Z_bench_cluster.svg"
+    ]
+  },
+  "D3": {
+    "title": "Latency at matched utilisation",
+    "drawn": true,
+    "skipped": "",
+    "stats": {
+      "points": [
+        {
+          "utilisation": 0.163,
+          "phase_ii_tps": 627.8,
+          "phase_iii_tps": 949.0,
+          "phase_ii_latency_ms": 74.696,
+          "phase_iii_latency_ms": 75.51,
+          "overhead_x": 1.01
+        },
+        {
+          "utilisation": 0.534,
+          "phase_ii_tps": 2055.8,
+          "phase_iii_tps": 3107.9,
+          "phase_ii_latency_ms": 75.492,
+          "phase_iii_latency_ms": 75.578,
+          "overhead_x": 1.0
+        },
+        {
+          "utilisation": 0.75,
+          "phase_ii_tps": 2891.2,
+          "phase_iii_tps": 4370.9,
+          "phase_ii_latency_ms": 75.958,
+          "phase_iii_latency_ms": 81.072,
+          "overhead_x": 1.07
+        },
+        {
+          "utilisation": 0.91,
+          "phase_ii_tps": 3506.7,
+          "phase_iii_tps": 5301.3,
+          "phase_ii_latency_ms": 87.253,
+          "phase_iii_latency_ms": 85.119,
+          "overhead_x": 0.98
+        },
+        {
+          "utilisation": 0.915,
+          "phase_ii_tps": 3525.3,
+          "phase_iii_tps": 5329.5,
+          "phase_ii_latency_ms": 87.595,
+          "phase_iii_latency_ms": 88.47,
+          "overhead_x": 1.01
+        },
+        {
+          "utilisation": 1.0,
+          "phase_ii_tps": 3852.4,
+          "phase_iii_tps": 5824.0,
+          "phase_ii_latency_ms": 93.598,
+          "phase_iii_latency_ms": 147.281,
+          "overhead_x": 1.57
+        }
+      ],
+      "phase_ii_peak_tps": 3852.4,
+      "phase_iii_peak_tps": 5824.0
+    },
+    "files": [
+      "d3_latency_at_matched_utilisation_mixed-engine_thesis_20260911T042526Z_bench_cluster_20260911T075542Z_bench_cluster.png",
+      "d3_latency_at_matched_utilisation_mixed-engine_thesis_20260911T042526Z_bench_cluster_20260911T075542Z_bench_cluster.svg"
+    ]
+  },
+  "D4": {
+    "title": "Engine scorecard",
+    "drawn": true,
+    "skipped": "",
+    "stats": {
+      "peak throughput": {
+        "cockroachdb": 3852.4,
+        "postgresql": 5824.0
+      },
+      "write p50 at lightest load": {
+        "cockroachdb": 74.696,
+        "postgresql": 75.5
+      },
+      "outage, recover fault": {
+        "cockroachdb": 5.532481,
+        "postgresql": 40.365276
+      },
+      "outage, dead fault": {
+        "cockroachdb": 3.930655,
+        "postgresql": 23.917491
+      }
+    },
+    "files": [
+      "d4_engine_scorecard_mixed-engine_thesis_20260911T042526Z_bench_cluster_20260911T075542Z_bench_cluster.png",
+      "d4_engine_scorecard_mixed-engine_thesis_20260911T042526Z_bench_cluster_20260911T075542Z_bench_cluster.svg"
+    ]
+  },
+  "D5": {
+    "title": "Cost of consistency",
+    "drawn": true,
+    "skipped": "",
+    "stats": {
+      "quorum_floor_ms": 71.075,
+      "CockroachDB_write_p50_ms": 74.7,
+      "CockroachDB_x_over_floor": 1.051,
+      "PostgreSQL/Patroni_write_p50_ms": 75.5,
+      "PostgreSQL/Patroni_x_over_floor": 1.062
+    },
+    "files": [
+      "d5_cost_of_consistency_mixed-engine_thesis_20260911T042526Z_bench_cluster_20260911T075542Z_bench_cluster.png",
+      "d5_cost_of_consistency_mixed-engine_thesis_20260911T042526Z_bench_cluster_20260911T075542Z_bench_cluster.svg"
+    ]
+  },
+  "E1": {
+    "title": "Quorum floor derivation",
+    "drawn": true,
+    "skipped": "",
+    "stats": {
+      "gateway": "crdb-gcp-1",
+      "recorded_quorum_floor_ms": 69.801,
+      "derived_floor_ms": 69.801
+    },
+    "files": [
+      "e1_quorum_floor_derivation_cockroachdb_thesis_20260911T042325Z_p1-network.png",
+      "e1_quorum_floor_derivation_cockroachdb_thesis_20260911T042325Z_p1-network.svg"
+    ]
+  },
+  "E2": {
+    "title": "Link stability",
+    "drawn": true,
+    "skipped": "",
+    "stats": {
+      "links": 20,
+      "max_spread_ms": 5.77,
+      "worst_link": "crdb-linode-2 -> crdb-azure-2",
+      "max_loss_pct": 0.0
+    },
+    "files": [
+      "e2_link_stability_cockroachdb_thesis_20260911T042325Z_p1-network.png",
+      "e2_link_stability_cockroachdb_thesis_20260911T042325Z_p1-network.svg"
+    ]
+  },
+  "E3": {
+    "title": "Run provenance",
+    "drawn": true,
+    "skipped": "",
+    "stats": {
+      "runs_considered": 8,
+      "runs_passing": 8
+    },
+    "files": [
+      "e3_run_provenance_mixed-engine_mixed-profile.png",
+      "e3_run_provenance_mixed-engine_mixed-profile.svg"
+    ]
+  },
+  "E4": {
+    "title": "Round-trip matrix",
+    "drawn": true,
+    "skipped": "",
+    "stats": {
+      "quorum_floor_ms": 69.801
+    },
+    "files": [
+      "e4_round_trip_matrix_cockroachdb_thesis_20260911T042325Z_p1-network.png",
+      "e4_round_trip_matrix_cockroachdb_thesis_20260911T042325Z_p1-network.svg"
+    ]
+  }
+}

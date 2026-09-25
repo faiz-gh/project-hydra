@@ -1,0 +1,148 @@
+{
+  "run_id": "20260911T014605Z_p4-chaos-recover",
+  "phase": "p4_chaos",
+  "schema_version": "2.1",
+  "engine": "postgresql",
+  "started_utc": "2026-09-11T01:46:05.214827Z",
+  "finished_utc": "2026-09-11T01:48:10.241702Z",
+  "git_revision": "e1ed56535747807214f4b8aeb9000b31a2d75eb0",
+  "profile": {
+    "name": "smoke",
+    "workload": {
+      "generator": "ycsb",
+      "ycsb_workload": "CUSTOM",
+      "read_freq": 0.8,
+      "update_freq": 0.2,
+      "request_distribution": "uniform",
+      "read_percent": 80,
+      "duration_s": 15,
+      "warmup_s": 3,
+      "display_every_s": 1,
+      "concurrencies": [
+        10,
+        50
+      ],
+      "repetitions": 1,
+      "randomise_tier_order": false,
+      "cooldown_s": 5,
+      "seed": 42,
+      "insert_count": 125000,
+      "cycle_length": 1000000,
+      "block_bytes": 256
+    },
+    "chaos": {
+      "duration_s": 45,
+      "inject_at_s": 15,
+      "concurrency": 10,
+      "target": "gcp-1",
+      "recovery_threshold": 0.8,
+      "recovery_hold_s": 10,
+      "min_post_fault_s": 45,
+      "leaseholder_settle_s": 300,
+      "audit_interval_s": 0.02,
+      "probe_enabled": true,
+      "probe_interval_s": 0.002,
+      "probe_workers": 2,
+      "probe_statement_timeout_ms": 5000,
+      "probe_connect_timeout_s": 2.0,
+      "probe_table": "rto_canary"
+    },
+    "hardware_metrics": {
+      "enabled": true,
+      "sample_interval_s": 5.0
+    },
+    "tps_ceiling": 20000.0
+  },
+  "topology": [
+    {
+      "name": "client-1",
+      "host": "crdb-client-1",
+      "role": "generator, audit endpoint"
+    },
+    {
+      "name": "gcp-1",
+      "host": "crdb-gcp-1",
+      "role": "chaos target (recover)"
+    }
+  ],
+  "clock_epoch_utc": "2026-09-11T01:46:13.397936Z",
+  "server_version": "postgres (PostgreSQL) 16.15 (Ubuntu 16.15-1.pgdg22.04+2)",
+  "cockroach_version": null,
+  "generator_command": "cockroach workload run ycsb --workload=CUSTOM --seed=42 --insert-count=125000 --request-distribution=uniform --read-freq=0.8 --update-freq=0.2 --concurrency=10 --duration=105s --tolerate-errors --display-every=1s 'postgresql://root:rootpassword@127.0.0.1:6432/ycsb?sslmode=disable'",
+  "ssh_options": [
+    "-q",
+    "-o",
+    "StrictHostKeyChecking=no",
+    "-o",
+    "UserKnownHostsFile=/dev/null",
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "ServerAliveInterval=5",
+    "-o",
+    "ServerAliveCountMax=3"
+  ],
+  "client_platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+  "notes": [
+    "2026-09-11T01:46:13.396531Z engine: postgresql (patroni HA)",
+    "2026-09-11T01:46:13.396684Z server: 6484 /usr/lib/postgresql/16/bin/postgres -D /var/lib/postgresql/16/data --config-file=/var/lib/postgresql/16/data/postgresql.conf --listen_addresses=0.0.0.0 --port=5432 --cluster_name=postgres-cluster --wal_level=replica --hot_standby=on --max_connections=500 --max_wal_senders=10 --max_prepared_transactions=0 --max_locks_per_transaction=64 --track_commit_timestamp=off --max_replication_slots=10 --max_worker_processes=8 --wal_log_hints=on",
+    "2026-09-11T01:46:13.396722Z host: cpus=4 mem_total_kb=8128932 cpu_model=AMD EPYC 7B13",
+    "2026-09-11T01:46:13.396743Z pg memory: shared_buffers_kb=2031616 effective_cache_size_kb=6095872",
+    "2026-09-11T01:46:13.396789Z fault scheduled for 15s: sudo -n nohup setsid bash -c 'tailscale down && sleep 45 && tailscale up' >/dev/null 2>&1 &",
+    "2026-09-11T01:46:13.396830Z rto probe: enabled, 2 worker(s) at 2 ms dispatch into bench.rto_canary",
+    "2026-09-11T01:46:13.396859Z generator run extended from 45s to 105s to keep 45s of observation after the partition heals at 60s",
+    "2026-09-11T01:48:07.474256Z hardware metrics: scrape failures {'gcp-1': 9}"
+  ],
+  "generator_totals": {},
+  "validation": {
+    "preflight": {
+      "ok": true,
+      "checks": [
+        {
+          "name": "patroni_primary_placement",
+          "passed": true,
+          "detail": "patroni primary is gcp-1, as required",
+          "expected": "gcp-1",
+          "observed": "gcp-1",
+          "repaired": false
+        },
+        {
+          "name": "clock_offset",
+          "passed": true,
+          "detail": "client-1: NTP offset 0.00 ms (limit 250 ms)",
+          "node": "client-1",
+          "offset_s": 3.432e-06
+        },
+        {
+          "name": "clock_offset",
+          "passed": true,
+          "detail": "gcp-1: NTP offset 0.00 ms (limit 250 ms)",
+          "node": "gcp-1",
+          "offset_s": 1.439e-06
+        },
+        {
+          "name": "fault_authorisation",
+          "passed": true,
+          "detail": "gcp-1: 'recover' fault is permitted as ubuntu",
+          "node": "gcp-1",
+          "mode": "recover",
+          "probe": "sudo -n tailscale status --json >/dev/null",
+          "returncode": 0,
+          "stderr": ""
+        },
+        {
+          "name": "probe_agent_ready",
+          "passed": true,
+          "detail": "python3 with psycopg 3.3.5",
+          "node": "client-1"
+        },
+        {
+          "name": "patroni_primary_resolved",
+          "passed": true,
+          "detail": "resolved gcp-1 (crdb-gcp-1) as the current Patroni primary via its REST API immediately before scheduling the fault",
+          "target": "gcp-1"
+        }
+      ]
+    }
+  }
+}

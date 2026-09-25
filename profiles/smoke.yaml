@@ -1,0 +1,52 @@
+# Fast profile for exercising the harness itself, not for producing results.
+name: smoke
+workload:
+  duration_s: 15
+  warmup_s: 3
+  concurrencies: [10, 50]
+  repetitions: 1
+  randomise_tier_order: false
+  cooldown_s: 5
+
+  # Deliberately identical to thesis.yaml. `cockroach workload init ycsb`
+  # requires the database to be named literally `ycsb` and rejects any other, so
+  # a smoke-sized working set cannot coexist with the real one -- loading it
+  # would drop the table the thesis sweep depends on. This profile therefore
+  # varies only the sweep (duration, tiers, repetitions) and runs against the
+  # same loaded dataset.
+  #
+  # Do not "simplify" these to smaller values. A seed or row count that disagrees
+  # with what the table was loaded with does not fail loudly: every operation
+  # matches no row and returns in ~3 ms, so the harness self-test would pass at
+  # an apparently excellent throughput while measuring nothing (D8). That is
+  # the one failure mode a self-test must not have.
+  seed: 42
+  insert_count: 125000
+chaos:
+  duration_s: 45
+  inject_at_s: 15
+  concurrency: 10
+  target: gcp-1
+  recovery_threshold: 0.80
+
+  # Counted from the point there is something to observe, which in `recover`
+  # mode is when the partition heals (inject_at_s + 45s), not when the fault
+  # lands -- see p4_chaos.generator_duration_s. So the recover run is
+  # 15+45+45 = 105s and the dead run 15+45 = 60s.
+  #
+  # 45 rather than the 20 this was until 2026-09-09. 20 was set on the theory
+  # that the self-test only has to prove the post-fault path runs, but the
+  # thesis-scale recover run of 2026-09-08 (20260908T232245Z_p4-chaos-recover)
+  # measured a 68.96s outage against a 45s partition -- i.e. writes resumed
+  # ~24s AFTER the heal, because Patroni still has to finish promoting and the
+  # clients have to reconnect. A 20s window would have ended inside that and
+  # produced the same UNMEASURED verdict the length fix exists to remove.
+  min_post_fault_s: 45
+
+  # The probe runs in the self-test too, and deliberately so: it opens
+  # connections and issues DDL against the cluster, and a smoke test that skipped
+  # it would not be exercising the path the real run takes. Two workers rather
+  # than the thesis profile's eight -- the self-test is checking that the probe
+  # works, not resolving anything.
+  probe_enabled: true
+  probe_workers: 2

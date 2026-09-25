@@ -1,0 +1,226 @@
+chart_id,chart_title,metric,value
+A1,Throughput-latency curve,cockroachdb_knee_concurrency,50
+A1,Throughput-latency curve,cockroachdb_knee_tps,2930.9
+A1,Throughput-latency curve,cockroachdb_peak_tps,2930.9
+A1,Throughput-latency curve,postgresql_knee_concurrency,50
+A1,Throughput-latency curve,postgresql_knee_tps,2957.3
+A1,Throughput-latency curve,postgresql_peak_tps,2957.3
+A2,Latency percentile fan,cockroachdb_read_p99_max_ms,3.94
+A2,Latency percentile fan,postgresql_read_p99_max_ms,1.92
+A2,Latency percentile fan,cockroachdb_update_p99_max_ms,111.17
+A2,Latency percentile fan,postgresql_update_p99_max_ms,119.54
+A3,Concurrency slot occupancy,cockroachdb_read_slots_at_max_c,3.2
+A3,Concurrency slot occupancy,cockroachdb_update_slots_at_max_c,47.1
+A3,Concurrency slot occupancy,postgresql_read_slots_at_max_c,2.0
+A3,Concurrency slot occupancy,postgresql_update_slots_at_max_c,47.5
+A4,Steady-state stability,cockroachdb_max_cv,0.112
+A4,Steady-state stability,cockroachdb_worst_tier,10
+A4,Steady-state stability,postgresql_max_cv,0.095
+A4,Steady-state stability,postgresql_worst_tier,50
+A5,Error rate against load,cockroachdb_errors_total,0
+A5,Error rate against load,postgresql_errors_total,0
+A6,Throughput under a latency budget,cockroachdb_tps_under_p99_10ms,0.0
+A6,Throughput under a latency budget,cockroachdb_tps_under_p99_25ms,0.0
+A6,Throughput under a latency budget,cockroachdb_tps_under_p99_50ms,0.0
+A6,Throughput under a latency budget,cockroachdb_tps_under_p99_100ms,2930.9
+A6,Throughput under a latency budget,cockroachdb_tps_under_p99_200ms,2930.9
+A6,Throughput under a latency budget,cockroachdb_tps_under_p99_400ms,2930.9
+A6,Throughput under a latency budget,cockroachdb_tps_under_p99_800ms,2930.9
+A6,Throughput under a latency budget,postgresql_tps_under_p99_10ms,0.0
+A6,Throughput under a latency budget,postgresql_tps_under_p99_25ms,0.0
+A6,Throughput under a latency budget,postgresql_tps_under_p99_50ms,0.0
+A6,Throughput under a latency budget,postgresql_tps_under_p99_100ms,616.1
+A6,Throughput under a latency budget,postgresql_tps_under_p99_200ms,2957.3
+A6,Throughput under a latency budget,postgresql_tps_under_p99_400ms,2957.3
+A6,Throughput under a latency budget,postgresql_tps_under_p99_800ms,2957.3
+A7,Throughput by concurrency,cockroachdb_peak_tps,2930.9
+A7,Throughput by concurrency,cockroachdb_peak_concurrency,50
+A7,Throughput by concurrency,postgresql_peak_tps,2957.3
+A7,Throughput by concurrency,postgresql_peak_concurrency,50
+B1,Per-node CPU timeline,cockroachdb_azure-1_cpu_mean_pct,15.5
+B1,Per-node CPU timeline,cockroachdb_azure-2_cpu_mean_pct,19.0
+B1,Per-node CPU timeline,cockroachdb_gcp-1_cpu_mean_pct,27.4
+B1,Per-node CPU timeline,cockroachdb_linode-1_cpu_mean_pct,12.3
+B1,Per-node CPU timeline,cockroachdb_linode-2_cpu_mean_pct,10.7
+B1,Per-node CPU timeline,postgresql_azure-1_cpu_mean_pct,8.5
+B1,Per-node CPU timeline,postgresql_azure-2_cpu_mean_pct,7.7
+B1,Per-node CPU timeline,postgresql_gcp-1_cpu_mean_pct,13.3
+B1,Per-node CPU timeline,postgresql_linode-1_cpu_mean_pct,5.5
+B1,Per-node CPU timeline,postgresql_linode-2_cpu_mean_pct,5.7
+B2,CPU efficiency,cockroachdb_c10_ops_per_cpu_pct,33.3
+B2,CPU efficiency,cockroachdb_c50_ops_per_cpu_pct,74.3
+B2,CPU efficiency,postgresql_c10_ops_per_cpu_pct,76.8
+B2,CPU efficiency,postgresql_c50_ops_per_cpu_pct,130.5
+B3,Disk I/O and busy time,cockroachdb_disk_busy_mean_pct,39.5
+B3,Disk I/O and busy time,cockroachdb_disk_read_mean_mb_s,0.0
+B3,Disk I/O and busy time,cockroachdb_disk_write_mean_mb_s,4.49
+B3,Disk I/O and busy time,postgresql_disk_busy_mean_pct,22.1
+B3,Disk I/O and busy time,postgresql_disk_read_mean_mb_s,0.0
+B3,Disk I/O and busy time,postgresql_disk_write_mean_mb_s,3.63
+B4,Memory headroom,cockroachdb_mem_available_min_gb,5.19
+B4,Memory headroom,cockroachdb_mem_total_gb,8.32
+B4,Memory headroom,postgresql_mem_available_min_gb,7.16
+B4,Memory headroom,postgresql_mem_total_gb,8.32
+B5,Replication traffic amplification,cockroachdb_c10_tx_kib_per_op,1.32
+B5,Replication traffic amplification,cockroachdb_c50_tx_kib_per_op,0.9
+B5,Replication traffic amplification,postgresql_c10_tx_kib_per_op,4.43
+B5,Replication traffic amplification,postgresql_c50_tx_kib_per_op,3.08
+B6,Cluster utilisation heatmap,cockroachdb_cpu_peak_pct,79.1
+B6,Cluster utilisation heatmap,postgresql_cpu_peak_pct,40.8
+B7,Cluster load imbalance,cockroachdb_cpu_imbalance_cv,0.35
+B7,Cluster load imbalance,cockroachdb_busiest_node,gcp-1
+B7,Cluster load imbalance,postgresql_cpu_imbalance_cv,0.347
+B7,Cluster load imbalance,postgresql_busiest_node,gcp-1
+C1,Probe attempt strip,cockroachdb_dead_attempts,622
+C1,Probe attempt strip,cockroachdb_dead_outcomes.ok,620
+C1,Probe attempt strip,cockroachdb_dead_outcomes.refused,1
+C1,Probe attempt strip,cockroachdb_dead_outcomes.conn_error,1
+C1,Probe attempt strip,cockroachdb_recover_attempts,1487
+C1,Probe attempt strip,cockroachdb_recover_outcomes.ok,1483
+C1,Probe attempt strip,cockroachdb_recover_outcomes.timeout,2
+C1,Probe attempt strip,cockroachdb_recover_outcomes.conn_error,2
+C1,Probe attempt strip,postgresql_dead_attempts,618
+C1,Probe attempt strip,postgresql_dead_outcomes.ok,584
+C1,Probe attempt strip,postgresql_dead_outcomes.conn_error,34
+C1,Probe attempt strip,postgresql_recover_attempts,1021
+C1,Probe attempt strip,postgresql_recover_outcomes.ok,1009
+C1,Probe attempt strip,postgresql_recover_outcomes.conn_error,12
+C2,Probe latency through the fault,cockroachdb_dead_pre_fault_p50_ms,121.31
+C2,Probe latency through the fault,cockroachdb_dead_post_fault_p50_ms,212.73
+C2,Probe latency through the fault,cockroachdb_recover_pre_fault_p50_ms,112.74
+C2,Probe latency through the fault,cockroachdb_recover_post_fault_p50_ms,88.46
+C2,Probe latency through the fault,postgresql_dead_pre_fault_p50_ms,72.42
+C2,Probe latency through the fault,postgresql_dead_post_fault_p50_ms,73.06
+C2,Probe latency through the fault,postgresql_recover_pre_fault_p50_ms,76.04
+C2,Probe latency through the fault,postgresql_recover_post_fault_p50_ms,225.6
+C3,Instrument agreement,CockroachDB_dead.audit_s,11.391
+C3,Instrument agreement,CockroachDB_dead.probe_s,7.098761
+C3,Instrument agreement,CockroachDB_recover.audit_s,10.597
+C3,Instrument agreement,CockroachDB_recover.probe_s,6.891528
+C3,Instrument agreement,PostgreSQL/Patroni_dead.audit_s,35.205
+C3,Instrument agreement,PostgreSQL/Patroni_dead.probe_s,31.056878
+C3,Instrument agreement,PostgreSQL/Patroni_recover.audit_s,36.009
+C3,Instrument agreement,PostgreSQL/Patroni_recover.probe_s,32.288059
+C4,Recovery decomposition,CockroachDB_dead.detection_s,10.420371
+C4,Recovery decomposition,CockroachDB_dead.outage_s,7.098761
+C4,Recovery decomposition,CockroachDB_recover.detection_s,8.379535
+C4,Recovery decomposition,CockroachDB_recover.outage_s,6.891528
+C4,Recovery decomposition,PostgreSQL/Patroni_dead.detection_s,4.026415
+C4,Recovery decomposition,PostgreSQL/Patroni_dead.outage_s,31.056878
+C4,Recovery decomposition,PostgreSQL/Patroni_recover.detection_s,13.813962
+C4,Recovery decomposition,PostgreSQL/Patroni_recover.outage_s,32.288059
+C5,Post-fault settling,cockroachdb_dead.settled,True
+C5,Post-fault settling,cockroachdb_dead.mean_tps,155.4
+C5,Post-fault settling,cockroachdb_dead.fraction_of_baseline,0.2453
+C5,Post-fault settling,cockroachdb_dead.cv,0.1037
+C5,Post-fault settling,cockroachdb_recover.settled,False
+C5,Post-fault settling,cockroachdb_recover.mean_tps,199.5
+C5,Post-fault settling,cockroachdb_recover.fraction_of_baseline,0.3352
+C5,Post-fault settling,cockroachdb_recover.cv,0.4047
+C5,Post-fault settling,postgresql_recover.settled,False
+C5,Post-fault settling,postgresql_recover.mean_tps,48.1
+C5,Post-fault settling,postgresql_recover.fraction_of_baseline,0.0796
+C5,Post-fault settling,postgresql_recover.cv,1.0154
+C6,Read and write paths after failover,cockroachdb_dead.read_p50_before_ms,1.0
+C6,Read and write paths after failover,cockroachdb_dead.read_p50_after_ms,27.3
+C6,Read and write paths after failover,cockroachdb_dead.update_p50_before_ms,75.5
+C6,Read and write paths after failover,cockroachdb_dead.update_p50_after_ms,218.1
+C6,Read and write paths after failover,cockroachdb_recover.read_p50_before_ms,1.0
+C6,Read and write paths after failover,cockroachdb_recover.read_p50_after_ms,18.9
+C6,Read and write paths after failover,cockroachdb_recover.update_p50_before_ms,79.7
+C6,Read and write paths after failover,cockroachdb_recover.update_p50_after_ms,109.1
+C6,Read and write paths after failover,postgresql_dead.read_p50_before_ms,0.7
+C6,Read and write paths after failover,postgresql_dead.read_p50_after_ms,0.0
+C6,Read and write paths after failover,postgresql_dead.update_p50_before_ms,75.5
+C6,Read and write paths after failover,postgresql_dead.update_p50_after_ms,0.0
+C6,Read and write paths after failover,postgresql_recover.read_p50_before_ms,0.7
+C6,Read and write paths after failover,postgresql_recover.read_p50_after_ms,0.0
+C6,Read and write paths after failover,postgresql_recover.update_p50_before_ms,79.7
+C6,Read and write paths after failover,postgresql_recover.update_p50_after_ms,0.0
+C7,Hardware through the failover,cockroachdb_dead_target,gcp-1
+C7,Hardware through the failover,cockroachdb_recover_target,gcp-1
+C7,Hardware through the failover,postgresql_dead_target,gcp-1
+C7,Hardware through the failover,postgresql_recover_target,gcp-1
+C8,RTO and RPO summary,CockroachDB_dead.availability_rto_s,11.391
+C8,RTO and RPO summary,CockroachDB_dead.probe_outage_s,7.098761
+C8,RTO and RPO summary,CockroachDB_dead.rpo_lost,0
+C8,RTO and RPO summary,CockroachDB_dead.rpo_acknowledged,132
+C8,RTO and RPO summary,CockroachDB_recover.availability_rto_s,10.597
+C8,RTO and RPO summary,CockroachDB_recover.probe_outage_s,6.891528
+C8,RTO and RPO summary,CockroachDB_recover.rpo_lost,0
+C8,RTO and RPO summary,CockroachDB_recover.rpo_acknowledged,252
+C8,RTO and RPO summary,PostgreSQL/Patroni_dead.availability_rto_s,35.205
+C8,RTO and RPO summary,PostgreSQL/Patroni_dead.probe_outage_s,31.056878
+C8,RTO and RPO summary,PostgreSQL/Patroni_dead.rpo_lost,0
+C8,RTO and RPO summary,PostgreSQL/Patroni_dead.rpo_acknowledged,76
+C8,RTO and RPO summary,PostgreSQL/Patroni_recover.availability_rto_s,36.009
+C8,RTO and RPO summary,PostgreSQL/Patroni_recover.probe_outage_s,32.288059
+C8,RTO and RPO summary,PostgreSQL/Patroni_recover.rpo_lost,0
+C8,RTO and RPO summary,PostgreSQL/Patroni_recover.rpo_acknowledged,165
+D1,Engine throughput-latency curves,cockroachdb_peak_tps,2930.9
+D1,Engine throughput-latency curves,cockroachdb_peak_concurrency,50
+D1,Engine throughput-latency curves,cockroachdb_saturated,False
+D1,Engine throughput-latency curves,postgresql_peak_tps,2957.3
+D1,Engine throughput-latency curves,postgresql_peak_concurrency,50
+D1,Engine throughput-latency curves,postgresql_saturated,False
+D2,Latency at matched throughput,points[0].throughput_tps,616.1
+D2,Latency at matched throughput,points[0].phase_ii_latency_ms,79.7
+D2,Latency at matched throughput,points[0].phase_iii_latency_ms,79.7
+D2,Latency at matched throughput,points[0].overhead_x,1.0
+D2,Latency at matched throughput,points[0].phase_ii_utilisation,0.21
+D2,Latency at matched throughput,points[0].phase_iii_utilisation,0.208
+D2,Latency at matched throughput,points[0].utilisation_gap,0.002
+D2,Latency at matched throughput,points[0].measured_in,PostgreSQL
+D2,Latency at matched throughput,points[1].throughput_tps,2930.9
+D2,Latency at matched throughput,points[1].phase_ii_latency_ms,79.7
+D2,Latency at matched throughput,points[1].phase_iii_latency_ms,79.7
+D2,Latency at matched throughput,points[1].overhead_x,1.0
+D2,Latency at matched throughput,points[1].phase_ii_utilisation,1.0
+D2,Latency at matched throughput,points[1].phase_iii_utilisation,0.991
+D2,Latency at matched throughput,points[1].utilisation_gap,0.009
+D2,Latency at matched throughput,points[1].measured_in,CockroachDB
+D2,Latency at matched throughput,least_confounded.throughput_tps,616.1
+D2,Latency at matched throughput,least_confounded.phase_ii_latency_ms,79.7
+D2,Latency at matched throughput,least_confounded.phase_iii_latency_ms,79.7
+D2,Latency at matched throughput,least_confounded.overhead_x,1.0
+D2,Latency at matched throughput,least_confounded.phase_ii_utilisation,0.21
+D2,Latency at matched throughput,least_confounded.phase_iii_utilisation,0.208
+D2,Latency at matched throughput,least_confounded.utilisation_gap,0.002
+D2,Latency at matched throughput,least_confounded.measured_in,PostgreSQL
+D3,Latency at matched utilisation,points[0].utilisation,0.208
+D3,Latency at matched utilisation,points[0].phase_ii_tps,610.6
+D3,Latency at matched utilisation,points[0].phase_iii_tps,616.1
+D3,Latency at matched utilisation,points[0].phase_ii_latency_ms,79.7
+D3,Latency at matched utilisation,points[0].phase_iii_latency_ms,79.7
+D3,Latency at matched utilisation,points[0].overhead_x,1.0
+D3,Latency at matched utilisation,points[1].utilisation,1.0
+D3,Latency at matched utilisation,points[1].phase_ii_tps,2930.9
+D3,Latency at matched utilisation,points[1].phase_iii_tps,2957.3
+D3,Latency at matched utilisation,points[1].phase_ii_latency_ms,79.7
+D3,Latency at matched utilisation,points[1].phase_iii_latency_ms,79.7
+D3,Latency at matched utilisation,points[1].overhead_x,1.0
+D3,Latency at matched utilisation,phase_ii_peak_tps,2930.9
+D3,Latency at matched utilisation,phase_iii_peak_tps,2957.3
+D4,Engine scorecard,peak throughput.cockroachdb,2930.9
+D4,Engine scorecard,peak throughput.postgresql,2957.3
+D4,Engine scorecard,write p50 at lightest load.cockroachdb,79.7
+D4,Engine scorecard,write p50 at lightest load.postgresql,79.7
+D4,Engine scorecard,"outage, recover fault.cockroachdb",6.891528
+D4,Engine scorecard,"outage, recover fault.postgresql",32.288059
+D4,Engine scorecard,"outage, dead fault.cockroachdb",7.098761
+D4,Engine scorecard,"outage, dead fault.postgresql",31.056878
+D5,Cost of consistency,quorum_floor_ms,75.119
+D5,Cost of consistency,CockroachDB_write_p50_ms,79.7
+D5,Cost of consistency,CockroachDB_x_over_floor,1.061
+D5,Cost of consistency,PostgreSQL/Patroni_write_p50_ms,79.7
+D5,Cost of consistency,PostgreSQL/Patroni_x_over_floor,1.061
+E1,Quorum floor derivation,gateway,crdb-gcp-1
+E1,Quorum floor derivation,recorded_quorum_floor_ms,74.905
+E1,Quorum floor derivation,derived_floor_ms,74.905
+E2,Link stability,links,20
+E2,Link stability,max_spread_ms,18.622
+E2,Link stability,worst_link,crdb-linode-1 -> crdb-azure-2
+E2,Link stability,max_loss_pct,0.0
+E3,Run provenance,runs_considered,8
+E3,Run provenance,runs_passing,8
+E4,Round-trip matrix,quorum_floor_ms,74.905

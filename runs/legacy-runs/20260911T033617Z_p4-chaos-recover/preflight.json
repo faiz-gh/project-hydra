@@ -1,0 +1,46 @@
+{
+  "ok": true,
+  "checks": [
+    {
+      "name": "clock_offset",
+      "passed": true,
+      "detail": "client-1: NTP offset 0.00 ms (limit 250 ms)",
+      "node": "client-1",
+      "offset_s": 2.721e-06
+    },
+    {
+      "name": "clock_offset",
+      "passed": true,
+      "detail": "gcp-1: NTP offset 0.01 ms (limit 250 ms)",
+      "node": "gcp-1",
+      "offset_s": 7.05e-06
+    },
+    {
+      "name": "fault_authorisation",
+      "passed": true,
+      "detail": "gcp-1: 'recover' fault is permitted as ubuntu",
+      "node": "gcp-1",
+      "mode": "recover",
+      "probe": "sudo -n tailscale status --json >/dev/null",
+      "returncode": 0,
+      "stderr": ""
+    },
+    {
+      "name": "probe_agent_ready",
+      "passed": true,
+      "detail": "python3 with psycopg 3.3.5",
+      "node": "client-1"
+    },
+    {
+      "name": "leaseholder_placement",
+      "passed": true,
+      "detail": "2/2 ycsb leaseholders in 'us-east1'",
+      "database": "ycsb",
+      "expected_region": "us-east1",
+      "waited_s": 6.5,
+      "distribution": {
+        "cloud=gcp,region=us-east1": 2
+      }
+    }
+  ]
+}

@@ -1,0 +1,51 @@
+{
+  "ok": true,
+  "checks": [
+    {
+      "name": "clock_offset",
+      "passed": true,
+      "detail": "linode-1: NTP offset 0.06 ms (limit 250 ms)",
+      "node": "linode-1",
+      "offset_s": 6.358e-05
+    },
+    {
+      "name": "clock_offset",
+      "passed": true,
+      "detail": "linode-2: NTP offset 0.55 ms (limit 250 ms)",
+      "node": "linode-2",
+      "offset_s": 0.000551305
+    },
+    {
+      "name": "clock_offset",
+      "passed": true,
+      "detail": "azure-1: NTP offset 0.00 ms (limit 250 ms)",
+      "node": "azure-1",
+      "offset_s": 1.211e-06
+    },
+    {
+      "name": "clock_offset",
+      "passed": true,
+      "detail": "azure-2: NTP offset 0.00 ms (limit 250 ms)",
+      "node": "azure-2",
+      "offset_s": 6.29e-07
+    },
+    {
+      "name": "clock_offset",
+      "passed": true,
+      "detail": "gcp-1: NTP offset 0.00 ms (limit 250 ms)",
+      "node": "gcp-1",
+      "offset_s": 1.203e-06
+    }
+  ],
+  "derived": {
+    "gateway": "crdb-gcp-1",
+    "gateway_rtt_ms": {
+      "crdb-linode-1": 24.75,
+      "crdb-linode-2": 70.387,
+      "crdb-azure-1": 233.049,
+      "crdb-azure-2": 200.393
+    },
+    "quorum_floor_ms": 70.387,
+    "voters": 5
+  }
+}
