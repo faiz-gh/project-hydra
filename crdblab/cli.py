@@ -908,6 +908,53 @@ def _cmd_probe(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_insights(args: argparse.Namespace) -> int:
+    """Render the chart catalogue from every run on disk (or one profile's).
+
+    Each invocation writes into its own ``<out>/<stamp>_<profile|all>/``, the
+    same naming idiom ``runs/`` uses for a measured run, so successive renders
+    coexist instead of the newest silently overwriting the last.
+    """
+    from datetime import datetime, timezone
+
+    from .insights import generate
+
+    settings = Settings.from_env()
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    out_dir = Path(args.out) / f"{stamp}_{args.profile or 'all'}"
+    if out_dir.exists():
+        print(f"{out_dir} already exists; renders are never overwritten", file=sys.stderr)
+        return 1
+
+    print(f"rendering {'profile ' + args.profile if args.profile else 'all profiles'} "
+          f"from {settings.runs_dir} into {out_dir}")
+
+    def progress(result) -> None:
+        if result.drawn:
+            print(f"  drawn    {result.chart.id:<3} {result.chart.title}")
+        else:
+            print(f"  skipped  {result.chart.id:<3} {result.chart.title}: {result.skipped}")
+
+    results, inventory = generate(out_dir, settings.runs_dir, args.profile, progress=progress)
+    if not inventory.entries:
+        print(
+            f"no runs{' of profile ' + repr(args.profile) if args.profile else ''} "
+            f"under {settings.runs_dir}; nothing to chart",
+            file=sys.stderr,
+        )
+    refused = [e for e in inventory.entries if not e.passing]
+    for entry in refused:
+        print(f"  refused  {entry.run_id}: {entry.refused}", file=sys.stderr)
+    drawn = sum(r.drawn for r in results)
+    print(
+        f"\n{drawn} of {len(results)} charts drawn from {len(inventory.passing)} of "
+        f"{len(inventory.entries)} runs"
+    )
+    print(f"report     {out_dir / 'insights.md'}")
+    print(f"dashboard  {out_dir / 'dashboard.html'}")
+    return 0 if inventory.entries else 1
+
+
 def _cmd_profile(args: argparse.Namespace) -> int:
     profile = Profile.load(args.name)
     print(json.dumps(profile.to_dict(), indent=2, default=str))
@@ -1162,6 +1209,23 @@ def build_parser() -> argparse.ArgumentParser:
     val.add_argument("--tps-ceiling", type=float, default=20_000.0)
     val.add_argument("--json", action="store_true")
     val.set_defaults(func=_cmd_validate)
+
+    ins = sub.add_parser(
+        "insights",
+        help="draw the 31-chart catalogue, report and dashboard from the runs on disk",
+    )
+    ins.add_argument(
+        "--out",
+        default="insights",
+        help="parent directory; each render goes into its own "
+        "<stamp>_<profile|all>/ beneath it (default: insights)",
+    )
+    ins.add_argument(
+        "--profile",
+        help="only consider runs recorded under this profile (default: every "
+        "profile, newest run of each kind per engine)",
+    )
+    ins.set_defaults(func=_cmd_insights)
 
     prof = sub.add_parser("profile", help="print a resolved experiment profile")
     prof.add_argument("name", default="thesis", nargs="?")
