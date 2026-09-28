@@ -233,7 +233,7 @@ see CLAUDE.md's "Known gotchas" for what was ported (the raw RTT matrix as
 chart E4, the raw throughput-by-concurrency curve as chart A7) and why the
 rest wasn't (already superseded by richer existing charts: A2 for per-op
 latency, C5 for the resilience timeline). `crdblab insights` (or
-`./generate-insights.sh`) is now the only figure-generation path: it sweeps
+`./generate_insights.sh`) is now the only figure-generation path: it sweeps
 every run directory, draws the full 31-chart catalogue and writes them beside
 three derived artefacts.
 

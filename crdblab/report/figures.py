@@ -40,192 +40,38 @@ from __future__ import annotations
 from collections.abc import Sequence
 from pathlib import Path
 
-import matplotlib
 import numpy as np
-
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.colors import LinearSegmentedColormap
 
 from ..analysis import resilience, steady_state
 from ..analysis.loader import NetworkRun, Run
 
-# --- palette ---------------------------------------------------------------
-# Light-surface values from the validated reference palette. Categorical slots
-# are assigned in fixed order and never cycled; text never wears a series colour.
-SURFACE = "#fcfcfb"
-INK = "#0b0b0b"
-INK_SECONDARY = "#52514e"
-INK_MUTED = "#898781"
-GRID = "#e1e0d9"
-AXIS = "#c3c2b7"
-
-SERIES = ("#2a78d6", "#eb6834", "#1baf7a")  # blue, orange, aqua
-MARKERS = ("o", "s", "^")
-DASHES = ("-", "--", "-.")
-CRITICAL = "#d03b3b"  # status: reserved for the fault, never for a series
-WARNING = "#fab219"
-
-#: Sequential ramp for magnitude: one hue, light to dark. Steps 100-700 of the
-#: reference blue ramp, which is what a continuous scale is allowed to use.
-_BLUE_RAMP = ["#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b"]
-SEQUENTIAL = LinearSegmentedColormap.from_list("crdblab_blue", _BLUE_RAMP)
-
-#: Minimum exported width in pixels. 4K (3840) so a figure survives being scaled
-#: to a full text column in print and still stands up to a reader zooming in on
-#: the printed page.
-#:
-#: Resolution is raised through the *export* DPI, never by enlarging the figure.
-#: Font sizes, line widths and marker sizes are all specified in points, so a
-#: higher DPI renders exactly the same layout onto more pixels; making the figure
-#: physically larger instead would shrink the text relative to the plot and
-#: quietly undo the label placement above.
-EXPORT_WIDTH_PX = 3840
-
-#: Vector companion. A raster figure has a resolution; a vector one does not, so
-#: for anything that will be printed this is the better artefact regardless of
-#: how many pixels the PNG has. Written alongside rather than instead, because
-#: Word handles PNG more predictably than a vector file for inline placement.
-#:
-#: SVG rather than PDF, at the user's request: both are vector and both are
-#: lossless, but SVG opens in a browser and in every vector editor without a
-#: conversion step. Nothing here depends on the format beyond the extension, so
-#: this is the only line that decides it.
-EXPORT_VECTOR_EXT = ".svg"
-
-
-def _slug(value: object) -> str:
-    """Filename-safe form of one provenance component."""
-    # ``_`` is kept, not replaced: run ids contain it (``..Z_bench_cluster``)
-    # and rewriting it would make the filename disagree with the run directory
-    # it names, which is the one thing this slug exists to state.
-    text = str(value or "unknown")
-    return "".join(c if c.isalnum() or c in "-._" else "-" for c in text).strip("-") or "unknown"
-
-
-def _manifest_field(run, *path: str, default: str = "unknown") -> str:
-    """One nested manifest value, for either a :class:`Run` or a :class:`NetworkRun`.
-
-    Read from the manifest rather than from a property because the two run types
-    do not share one: ``Run`` exposes ``.engine`` and ``.profile``, ``NetworkRun``
-    exposes neither, and both carry the manifest itself.
-    """
-    node = getattr(run, "manifest", None) or {}
-    for key in path:
-        if not isinstance(node, dict):
-            return default
-        node = node.get(key)
-    return str(node) if node else default
-
-
-def _provenance_slug(*runs) -> str:
-    """The filename tail naming the engine, profile and run(s) behind a figure.
-
-    Every figure is drawn from a specific run of a specific profile on a
-    specific engine, and until this existed the filename said none of it: a
-    ``smoke`` render and a thesis-scale render produced the same
-    ``fig2_throughput_sweep.png`` in the same directory, and the second silently
-    replaced the first. The footer stamped inside the image already carried the
-    run id, but a file cannot be told apart from its neighbour by a caption
-    printed inside it -- which is exactly how a figure from a pre-redeploy
-    cluster once sat unnoticed beside five from the current one.
-
-    Every figure is named this way, Phase I included. The engine does not change
-    what ping measures, but it does say which deployment the substrate belongs
-    to: switching engines replaces every cluster node, so a network matrix from
-    the CockroachDB deployment and one from the PostgreSQL deployment are two
-    different measurements of two different sets of machines. ``p1_network.run``
-    records the engine for that reason rather than the figure inferring one.
-
-    Where several runs disagree on engine or profile the component becomes
-    ``mixed``, rather than picking one and misattributing the figure to it; the
-    run ids that follow always name all of them.
-    """
-    present = [r for r in runs if r is not None]
-    engines = {_manifest_field(r, "engine", default="cockroachdb") for r in present}
-    parts: list[str] = [engines.pop() if len(engines) == 1 else "mixed-engine"]
-    profiles = {_manifest_field(r, "profile", "name") for r in present}
-    parts.append(profiles.pop() if len(profiles) == 1 else "mixed-profile")
-    parts.extend(getattr(r, "run_id", "unknown") for r in present)
-    return "".join(f"_{_slug(part)}" for part in parts)
-
-
-def _style() -> None:
-    """Recessive chrome: hairline solid grid, no top/right spines, sans text."""
-    plt.rcParams.update(
-        {
-            "figure.facecolor": SURFACE,
-            "axes.facecolor": SURFACE,
-            "savefig.facecolor": SURFACE,
-            "font.family": "sans-serif",
-            "font.sans-serif": ["Helvetica Neue", "Helvetica", "Arial", "DejaVu Sans"],
-            "font.size": 9,
-            "axes.edgecolor": AXIS,
-            "axes.labelcolor": INK_SECONDARY,
-            "axes.titlecolor": INK,
-            "axes.titlesize": 10,
-            "axes.titleweight": "bold",
-            "axes.grid": True,
-            "axes.axisbelow": True,
-            "grid.color": GRID,
-            "grid.linewidth": 0.8,
-            "grid.linestyle": "-",  # never dashed: dashing reads as a threshold
-            "xtick.color": INK_MUTED,
-            "ytick.color": INK_MUTED,
-            "xtick.labelcolor": INK_SECONDARY,
-            "ytick.labelcolor": INK_SECONDARY,
-            "legend.frameon": False,
-            "lines.linewidth": 2.0,
-            "lines.solid_capstyle": "round",
-            "figure.dpi": 160,
-        }
-    )
-
-
-def _finish(fig, ax_or_axes, provenance: Sequence[str], path: Path) -> Path:
-    """Strip the top/right spines and stamp the run ids the figure came from."""
-    axes = ax_or_axes if isinstance(ax_or_axes, (list, tuple)) else [ax_or_axes]
-    for ax in axes:
-        for side in ("top", "right"):
-            ax.spines[side].set_visible(False)
-        for side in ("left", "bottom"):
-            ax.spines[side].set_linewidth(0.8)
-
-    # Placed below the figure's own coordinate box rather than inside it. The
-    # tight bounding box expands to include it, which guarantees separation from
-    # the x-axis label; at a positive y it overlapped the axis label on every
-    # figure whose x-axis carried rotated tick labels.
-    fig.text(
-        0.0,
-        -0.045,
-        "source: " + "  ".join(provenance),
-        fontsize=6,
-        color=INK_MUTED,
-        ha="left",
-        va="top",
-    )
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Derive the export DPI from the *tight* bounding box, not from the declared
-    # figure size. Every figure here is saved with bbox_inches="tight", which
-    # crops or expands the canvas to fit its artists -- the provenance footer sits
-    # below the figure box on purpose -- so figsize alone does not predict the
-    # exported width. Measuring the box that will actually be written is what
-    # makes the guarantee hold for every figure rather than for the one whose
-    # aspect happened to be checked.
-    fig.canvas.draw()
-    bbox = fig.get_tightbbox(fig.canvas.get_renderer())
-    dpi = EXPORT_WIDTH_PX / bbox.width
-
-    fig.savefig(path, bbox_inches="tight", dpi=dpi)
-    fig.savefig(path.with_suffix(EXPORT_VECTOR_EXT), bbox_inches="tight")
-    plt.close(fig)
-    return path
-
-
-def _written_formats(png: Path) -> list[Path]:
-    """Every file :func:`_finish` wrote for one figure, for the caller to report."""
-    return [png, png.with_suffix(EXPORT_VECTOR_EXT)]
+# The palette, rcParams, provenance slug and PNG+SVG writer live in style.py so
+# that crdblab.insights draws with the same house style. Re-exported here under
+# the names this module used to define, so nothing that imported them broke.
+from .style import (  # noqa: F401  (re-exports)
+    AXIS,
+    BLUE_RAMP as _BLUE_RAMP,
+    CRITICAL,
+    DASHES,
+    EXPORT_VECTOR_EXT,
+    EXPORT_WIDTH_PX,
+    GRID,
+    INK,
+    INK_MUTED,
+    INK_SECONDARY,
+    MARKERS,
+    SEQUENTIAL,
+    SERIES,
+    SURFACE,
+    WARNING,
+    _finish,
+    _manifest_field,
+    _provenance_slug,
+    _slug,
+    _style,
+    _written_formats,
+)
 
 
 # --- Phase I ---------------------------------------------------------------

@@ -837,6 +837,24 @@ deployment — `./run-experiment.sh` for CockroachDB, `./run-experiment.sh
 --engine postgresql` after the redeploy — and then invoke `engine-comparison`
 by hand with both run ids.
 
+Once both deployments are measured, the whole of this section is also drawn as
+the insights catalogue:
+
+```bash
+./generate_insights.sh                            # asks which profile to cover
+./generate_insights.sh --profile thesis-extended  # or name it
+.venv/bin/crdblab insights --profile thesis-extended   # the same, without the wrapper
+```
+
+It loads every run under `runs/` through the same gated loader, takes the newest
+passing run of each kind per engine, and draws 31 charts in five groups — A
+benchmark and saturation, B hardware utilisation, C resilience, D engine
+comparison (`engine_comparison.compare()`, plotted), E network and provenance —
+into a fresh `insights/<stamp>_<profile|all>/`, beside `insights.md`, a
+self-contained `dashboard.html`, and `summary.json`/`summary.csv`/
+`chart_status.csv`. A chart whose inputs are absent is skipped with its reason,
+never dropped; see `docs/data-schema.md` for the layout.
+
 `engine-comparison` prints the same-concurrency delta under a **NOT A RESULT**
 banner. That is intentional: refuting the intuitive comparison is more useful
 than omitting it.
