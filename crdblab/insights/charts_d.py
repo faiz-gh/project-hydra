@@ -1,15 +1,7 @@
-"""Group D -- engine comparison, plotted from ``engine_comparison.compare()``.
+"""Group D: engine comparison, drawn from :func:`engine_comparison.compare`.
 
-The first time the comparison is drawn rather than printed. Everything comes from
-one call to :func:`engine_comparison.compare` on the newest benchmark run of each
-engine, so the refusal logic travels with it: two runs that differ in more than
-the engine are *not compared*, and every chart here skips with the comparison's
-own reason instead of drawing a ratio that is not replication cost.
-
-``phase_ii``/``phase_iii`` are ``engine_comparison.py``'s fixed labels for its two
-arms: ``phase_ii`` is always the CockroachDB run and ``phase_iii`` the PostgreSQL
-one. They do not refer to the experiment's phases -- every number in this group
-comes from Phase II (``bench``) runs of both engines.
+Uses the newest benchmark run of each engine. If the two runs are not
+comparable, every chart here skips with the comparison's own reason.
 """
 
 from __future__ import annotations
@@ -18,9 +10,20 @@ import numpy as np
 
 from ..analysis import engine_comparison, resilience
 from ..report.style import INK_MUTED, INK_SECONDARY
-from ._base import COLOR, DASH, LABEL, MARKER, Context, Drawn, Skip, chart, new_figure, save
+from ._base import (
+    COLOR,
+    DASH,
+    LABEL,
+    MARKER,
+    Context,
+    Drawn,
+    Skip,
+    chart,
+    new_figure,
+    save,
+)
 
-ARMS = {"cockroachdb": "phase_ii", "postgresql": "phase_iii"}
+ARMS = {"cockroachdb": "crdb", "postgresql": "pg"}
 
 
 def _pair(ctx: Context):
@@ -112,12 +115,12 @@ def d2_matched_throughput(ctx: Context) -> Drawn:
     fig, ax = new_figure(figsize=(6.2, 4.0))
     x = _paired_bars(
         ax, [f"{p['throughput_tps']:,.0f}" for p in points],
-        [p["phase_ii_latency_ms"] for p in points],
-        [p["phase_iii_latency_ms"] for p in points],
+        [p["crdb_latency_ms"] for p in points],
+        [p["pg_latency_ms"] for p in points],
     )
     for i, p in enumerate(points):
         star = " *" if best and p["throughput_tps"] == best.get("throughput_tps") else ""
-        top = max(p["phase_ii_latency_ms"], p["phase_iii_latency_ms"])
+        top = max(p["crdb_latency_ms"], p["pg_latency_ms"])
         ax.text(x[i], top, f"{p['overhead_x']:.2f}x{star}", ha="center", va="bottom",
                 fontsize=6, color=INK_SECONDARY)
     ax.set_xlabel("matched throughput (ops/s)")
@@ -146,11 +149,11 @@ def d3_matched_utilisation(ctx: Context) -> Drawn:
     fig, ax = new_figure(figsize=(6.2, 4.0))
     x = _paired_bars(
         ax, [f"{p['utilisation']:.0%}" for p in points],
-        [p["phase_ii_latency_ms"] for p in points],
-        [p["phase_iii_latency_ms"] for p in points],
+        [p["crdb_latency_ms"] for p in points],
+        [p["pg_latency_ms"] for p in points],
     )
     for i, p in enumerate(points):
-        ax.text(x[i], 1.0, f"{p['phase_ii_tps']:,.0f}\nvs {p['phase_iii_tps']:,.0f} ops/s",
+        ax.text(x[i], 1.0, f"{p['crdb_tps']:,.0f}\nvs {p['pg_tps']:,.0f} ops/s",
                 ha="center", va="bottom", fontsize=4.5, color=INK_MUTED)
     ax.set_xlabel("utilisation (fraction of each engine's own peak)")
     ax.set_ylabel("update p50 latency (ms)")
@@ -158,8 +161,8 @@ def d3_matched_utilisation(ctx: Context) -> Drawn:
     ax.legend()
     stats = {
         "points": points,
-        "phase_ii_peak_tps": util.get("phase_ii_peak_tps"),
-        "phase_iii_peak_tps": util.get("phase_iii_peak_tps"),
+        "crdb_peak_tps": util.get("crdb_peak_tps"),
+        "pg_peak_tps": util.get("pg_peak_tps"),
     }
     return Drawn(stats, save(ctx, "D3", fig, ax, [crdb, pg]))
 

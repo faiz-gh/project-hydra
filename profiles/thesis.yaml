@@ -1,124 +1,50 @@
-# Experimental profile for the dissertation sweep.
-# Copied verbatim into every run manifest, so a figure can always be traced
-# back to the parameters that produced it.
+# Profile for the dissertation sweep. Copied verbatim into every run manifest.
 name: thesis
 
 workload:
-  # ycsb, not kv: a kv read can only return a key written by the same run
-  # process, so a pre-loaded table is unreachable and the effective read working
-  # set co-varies with the concurrency being swept (D8).
-  generator: ycsb
-  ycsb_workload: CUSTOM      # holds the original 80/20 mix; A-F also available
+  generator: ycsb            # a kv read cannot reach rows loaded by another process
+  ycsb_workload: CUSTOM      # 80/20 read/update mix below
   read_freq: 0.8
   update_freq: 0.2
-  request_distribution: uniform  # CUSTOM defaults to zipfian, which would
-                                 # concentrate load on a hot subset unlike kv
-  read_percent: 80           # kv only, retained to reproduce the legacy setup
+  request_distribution: uniform  # CUSTOM defaults to zipfian (a hot subset)
+  read_percent: 80           # kv only
   duration_s: 60
-  warmup_s: 5              # discarded to remove connection ramp-up skew
+  warmup_s: 5                # discarded: connection ramp-up is not steady state
   display_every_s: 1
   concurrencies: [10, 50, 100, 200]
-  repetitions: 3           # single-shot measurement was the weakest point of the
-                           # original design; three runs permit interval estimates
-  randomise_tier_order: true   # controls for thermal and background drift across a sweep
-  cooldown_s: 15           # allows range rebalancing to quiesce between tiers
+  repetitions: 3             # three runs permit interval estimates
+  randomise_tier_order: true # controls for drift across the sweep
+  cooldown_s: 15             # lets range rebalancing quiesce between tiers
 
-  # Working set: 3.75M ycsb rows ~= 6.15 GB at the ~1.64 kB/row this schema
-  # measures (125k rows was ~205 MB).
-  #
-  # Raised 30x from 125k on 2026-09-09, in two steps, and the original sizing
-  # rationale is deliberately reversed. It read "sized to stay resident in page
-  # cache on a 3 GB node so throughput remains CPU- and network-bound and
-  # failover is not confounded by storage I/O". At 205 MB both engines served
-  # the whole dataset from memory, so the sweep measured CPU cost per operation
-  # and never touched the storage engines -- which is a large part of what
-  # separates CockroachDB's LSM from PostgreSQL's heap, and was invisible.
-  #
-  # 6.15 GB against ~4 GB nodes (measured MemTotal 4,007,004 kB) is ~1.5x RAM,
-  # so the working set no longer fits in memory at all, let alone in either
-  # engine's declared cache (shared_buffers and --cache are both a quarter of
-  # RAM, ~978 MB). This is a genuinely disk-bound operating point: reads miss,
-  # and storage becomes a first-order variable rather than an absent one.
-  #
-  # THREE THINGS THIS BREAKS IF NOT CHECKED FIRST.
-  #
-  # 1. Disk capacity. Every node holds a full copy: ~6.2 GB of table and index
-  #    for PostgreSQL plus WAL, and for CockroachDB a full replica plus LSM
-  #    compaction headroom that transiently runs 1.5-2x. Neither the GCP
-  #    boot_disk nor the Azure os_disk sets an explicit size, so both inherit
-  #    the image default -- 10 GB on GCP, which this will fill.
-  # 2. Disk IOPS, which is now the measurement. GCP pd-ssd IOPS scale with
-  #    capacity (~30/GB, so a default 10 GB volume is ~300 IOPS) and Azure
-  #    Premium_LRS is tiered by size (30 GB = P4 = 120 IOPS). Undersized, the
-  #    figure produced is a cloud storage tier, not a database. Size the disks
-  #    explicitly and record what they are.
-  # 3. Load time. The PostgreSQL load runs through the generator at
-  #    LOAD_CONCURRENCY=64 against a ~70 ms synchronous-replication commit, so
-  #    ~900 rows/s and falling as the index outgrows cache: budget 70-110
-  #    minutes, against ~2 minutes at 125k. Raising LOAD_CONCURRENCY is the
-  #    mitigation -- the load is latency-bound, not CPU-bound -- but that path
-  #    has failed three times historically, so change it deliberately.
-  #
-  # Every previously recorded run, on both engines, was taken at 125k rows and
-  # is NOT comparable against this setting. The comparability gate will not
-  # catch it: insert_count lives in the profile, not in the server config.
-  #
-  # seed MUST be identical when loading the table and when running against it.
-  # The generator picks a fresh seed per invocation by default, which decouples
-  # the loaded keyspace from the queried one: every lookup then matches zero
-  # rows and returns in ~3 ms instead of the ~75 ms a real quorum write costs,
-  # so the broken configuration reads as an excellent result (D8). Verified:
-  # matching the seed moves the row-match rate 0.0000 -> 1.0000.
+  # 3.75M rows ~= 6.15 GB, ~1.5x node RAM, so the sweep is disk-bound. Needs
+  # sized disks on every node and ~70-110 min to load on PostgreSQL.
+
+  # seed and insert_count MUST match the values the table was loaded with, or
+  # every lookup silently matches zero rows.
   seed: 42
   insert_count: 3750000
-  cycle_length: 1000000     # kv only
+  cycle_length: 1000000      # kv only
   block_bytes: 256
 
 chaos:
   duration_s: 180
-  inject_at_s: 60          # wall-clock, measured with a monotonic timer
+  inject_at_s: 60            # seconds of steady state before the fault
   concurrency: 100
   target: gcp-1
-  recovery_threshold: 0.80 # single definition, shared by runner and evaluator
+  recovery_threshold: 0.80
 
-  # Raised from the 60s default for the same reason as thesis-extended.yaml's
-  # (900s) -- see that file's comment for the full derivation: replaying real
-  # thesis-scale PostgreSQL chaos runs against resilience.py's CV<0.25
-  # settling test showed the window needs several hundred additional
-  # post-fault ticks before it can tell "still trending" from "genuinely
-  # plateaued low", not the ~10-15 the tick spacing alone would suggest.
-  # 450s -- half of thesis-extended's 900s -- deliberately by request, since
-  # this is the canonical cross-engine comparability profile and its overall
-  # run budget matters more here than in the extended variant.
+  # Long enough after the fault for the settled-state test (CV < 0.25) to
+  # resolve; half of thesis-extended's 900 s to keep the run budget down.
   min_post_fault_s: 450
 
-  # How long pre-flight may wait for the demoted primary to become a switchover
-  # candidate again before refusing to run. Raised from the 300 s default for
-  # the thesis-scale working set: after Phase III partitions the primary its
-  # timeline diverges, and if pg_rewind cannot fix it Patroni re-clones the node
-  # from the leader -- ~6.15 GB here against ~205 MB at smoke scale, and the
-  # leader it clones from may be in eastasia. Measured 2026-09-09 at smoke
-  # scale, that whole cycle took ~57 s; 30x the data does not fit in 300 s at
-  # any plausible WAN rate. The wait exits the moment the candidate reports
-  # streaming, so a healthy cluster pays nothing for the larger ceiling, and a
-  # node that is genuinely stuck still fails the check rather than hanging.
+  # Wait for a demoted primary to become a switchover candidate again; re-cloning
+  # 6 GB across a WAN link takes longer than the 300 s default.
   leaseholder_settle_s: 900
   recovery_hold_s: 10
   audit_interval_s: 0.02
 
-  # High-frequency RTO probe: a second, independent client on a background path,
-  # measuring how long the database could not serve a write. It is not a faster
-  # setting of the audit writer above -- that one is paced for RPO and is
-  # deliberately left alone -- but a separate pool of writers against a separate
-  # table. See crdblab/core/rto_probe.py.
-  #
-  # probe_workers is the dial between resolution and perturbation. From the
-  # workstation a canary write costs ~370 ms, dominated by the link rather than
-  # by the ~70 ms quorum, so the gap between observations is ~370/workers.
-  # Measured on the live cluster: 8 workers resolve to 125 ms at 18 writes/s
-  # (~5% of a C=100 tier's writes), 24 to 64 ms at 43 writes/s (~12%). Both ends
-  # of that trade are recorded per run (events.json -> probe), so the setting can
-  # be defended from the data rather than from this comment.
+  # High-frequency RTO probe (crdblab/core/rto_probe.py). More workers resolve
+  # outage edges more finely but add load; both are recorded per run.
   probe_enabled: true
   probe_interval_s: 0.002
   probe_workers: 8

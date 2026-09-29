@@ -1,19 +1,9 @@
-"""Tests for the insights catalogue.
-
-The unit tests pin the report conventions a reader relies on: how a number is
-printed, how nested stats flatten into ``summary.csv``, how a chart's filename
-carries its provenance, and that a chart with nothing to draw is *skipped with a
-reason* rather than silently missing. The end-to-end test renders the committed
-smoke runs and checks the numbers against values the 2026-09-23 render of the
-same runs recorded, so a change that moves a figure is caught here rather than
-in a viva.
-"""
+"""Tests for the insights catalogue."""
 
 from __future__ import annotations
 
 import csv
 import json
-from pathlib import Path
 
 import pytest
 

@@ -1,38 +1,13 @@
-"""Dissertation figures, rendered from validated runs.
+"""Dissertation figures (``crdblab report figures``), rendered from validated runs.
 
-Every figure here is resolved from a ``run_id`` through
-:mod:`crdblab.analysis.loader`, never from a bare path to a CSV. That loader
-refuses a run with no manifest and refuses a run that does not pass validation,
-so a figure that renders is a figure whose provenance can be stated. Each one
-also stamps the run ids it was drawn from into its own footer, because a figure
-separated from its caption must still be traceable to the measurement -- and
-carries the same provenance in its *filename* (:func:`_provenance_slug`),
-because a footer inside an image cannot distinguish two files sitting in one
-directory.
+Every input is loaded through :mod:`crdblab.analysis.loader`, so only runs
+with a manifest that pass validation are drawn. Each figure stamps its source
+run ids in its footer and its filename (:func:`_provenance_slug`), and is
+written as a PNG at :data:`EXPORT_WIDTH_PX` plus an SVG. Aggregation comes
+from the analysis layer, never recomputed here.
 
-Each figure is written twice, as a PNG at :data:`EXPORT_WIDTH_PX` and as a
-vector file beside it (:data:`EXPORT_VECTOR_EXT`).
-
-Aggregation is never recomputed here. Throughput sums and latency does not pool
-in :meth:`Run.ticks` / :meth:`Run.latency_by_op`; tier statistics come from
-:mod:`crdblab.analysis.steady_state`; the fault timeline comes from
-:class:`crdblab.analysis.resilience.Alignment`. A plotting module that did its
-own aggregation would be a second implementation of the policy D1 violated.
-
-One constraint falls directly out of the Stage 5 analysis and is enforced in
-code rather than left to the author's memory:
-
-* **The resilience figure takes its time axis from the run's clock alignment.**
-  Where the offset between the generator's clock and the harness's was measured,
-  the fault is a line; where it was only bounded, it is a **band** of the
-  unmeasured width. Drawing a band as a line is the figure-level form of D10.
-
-Design notes. These are print figures for a Word document, so they are rendered
-for a light surface only; a screen palette's dark mode does not apply. Series are
-distinguished by hue *and* by marker and dash pattern, so the figures survive
-greyscale printing, which is the paper equivalent of the colour-vision case. The
-two-hue categorical palette was validated rather than eyeballed (worst adjacent
-CVD Delta E 24.7 against a >= 8 target).
+In the resilience timeline the fault is a line when the clock offset was
+measured, and a band of the unmeasured width when it was only bounded.
 """
 
 from __future__ import annotations
@@ -40,23 +15,14 @@ from __future__ import annotations
 from collections.abc import Sequence
 from pathlib import Path
 
-import numpy as np
 import matplotlib.pyplot as plt
+import numpy as np
 
 from ..analysis import resilience, steady_state
 from ..analysis.loader import NetworkRun, Run
-
-# The palette, rcParams, provenance slug and PNG+SVG writer live in style.py so
-# that crdblab.insights draws with the same house style. Re-exported here under
-# the names this module used to define, so nothing that imported them broke.
-from .style import (  # noqa: F401  (re-exports)
-    AXIS,
-    BLUE_RAMP as _BLUE_RAMP,
+from .style import (
     CRITICAL,
     DASHES,
-    EXPORT_VECTOR_EXT,
-    EXPORT_WIDTH_PX,
-    GRID,
     INK,
     INK_MUTED,
     INK_SECONDARY,
@@ -66,24 +32,18 @@ from .style import (  # noqa: F401  (re-exports)
     SURFACE,
     WARNING,
     _finish,
-    _manifest_field,
     _provenance_slug,
     _slug,
     _style,
     _written_formats,
 )
 
-
 # --- Phase I ---------------------------------------------------------------
 
 def network_matrix(run: NetworkRun, out_dir: Path) -> Path:
     """All-pairs round-trip matrix.
 
-    A grid of magnitudes, so: heatmap on a single-hue sequential ramp, darker
-    for slower. The cell values are printed because a matrix of five nodes *is*
-    its own table view, and because the quorum floor argument depends on reading
-    two specific cells rather than on the overall pattern. In-cell text takes
-    white or ink by the fill's luminance so it always clears contrast.
+    Single-hue heatmap, darker for slower, with values printed in each cell.
     """
     _style()
     matrix = run.matrix("rtt_mean_ms")
@@ -188,11 +148,7 @@ def throughput_sweep(runs: Sequence[Run], out_dir: Path) -> Path:
 def latency_by_operation(run: Run, out_dir: Path) -> Path:
     """Per-operation latency by tier, as small multiples.
 
-    One panel per operation type rather than one axis, because read and write
-    latency differ by roughly two orders of magnitude on this topology and share
-    no useful scale. Plotting them together would either flatten the read curve
-    into the axis or need a second y-scale, and a dual-axis chart invents a
-    relationship the data does not contain.
+    Read and write latency differ by ~100x, so each op gets its own panel.
     """
     _style()
     per_op = steady_state.latency_by_op(run)
@@ -231,15 +187,7 @@ def latency_by_operation(run: Run, out_dir: Path) -> Path:
     )
 
 
-#: Output filename stem per fault class. Phases III-IV each run one fault and
-#: the two timelines are different figures, so the name is keyed on the class
-#: rather than fixed: rendering a second run through a single hard-coded
-#: ``fig5`` filename silently overwrote the first, which is why
-#: ``fig6_resilience_timeline_recover.png`` existed in ``figures/`` with no path
-#: through this module that could produce it. The figure *numbers* are constants
-#: and not derived from the run, so a caption citing fig5 or fig6 keeps meaning
-#: the same figure across a re-render; what varies after the number is the
-#: provenance, which is the point of :func:`_provenance_slug`.
+#: Filename stem per fault class; the numbers stay fixed so captions stay valid.
 _RESILIENCE_FIGURES = {
     "dead": "fig5_resilience_timeline",
     "recover": "fig6_resilience_timeline_recover",
@@ -247,13 +195,7 @@ _RESILIENCE_FIGURES = {
 
 
 def _resilience_filename(mode: str | None, provenance_slug: str = "") -> str:
-    """Filename for one fault class, distinct for any class not yet named.
-
-    ``provenance_slug`` from :func:`_provenance_slug` is inserted before the
-    extension rather than after it, so the recover timeline stays sorted next to
-    its own siblings under ``fig6_...`` rather than falling under a shared
-    engine or profile prefix.
-    """
+    """Filename for one fault class, with the provenance slug before the extension."""
     if mode in _RESILIENCE_FIGURES:
         stem = _RESILIENCE_FIGURES[mode]
     else:
@@ -266,14 +208,9 @@ def _resilience_filename(mode: str | None, provenance_slug: str = "") -> str:
 def resilience_timeline(run: Run, out_dir: Path) -> Path:
     """Throughput through a fault, on a single, explicitly stated clock.
 
-    The x-axis is whichever clock the run can actually support. When both clocks
-    were recorded per interval the offset between them is known, so throughput is
-    plotted on the harness clock and the fault is a **line** at its recorded
-    offset. When only the generator's clock was recorded the offset is bounded,
-    not measured, so throughput is plotted on the generator's clock and the fault
-    is a **band** spanning the whole uncertainty -- typically several seconds,
-    against recovery times of the same order. Collapsing that band to a line
-    would assert a measurement nobody made.
+    With a measured clock offset the x-axis is the harness clock and the fault a
+    line; with only a bounded offset it is the generator clock and the fault a
+    band spanning the uncertainty.
     """
     _style()
     alignment = resilience.align(run)
@@ -354,10 +291,7 @@ def render_all(
 ) -> list[Path]:
     """Render every figure whose inputs are available.
 
-    ``chaos`` accepts a sequence because Phases III-IV each produce one timeline per
-    fault class and they are separate figures. Calling
-    :func:`resilience_timeline` once here was the other half of the fig6
-    provenance gap: even with both runs loaded, only one could be drawn.
+    ``chaos`` may be a sequence: one timeline per fault class.
     """
     written: list[Path] = []
     if network is not None:

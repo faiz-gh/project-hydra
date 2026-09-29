@@ -1,9 +1,6 @@
-"""Experiment profiles and runtime settings.
+"""Experiment profiles (``profiles/*.yaml``) and runtime settings.
 
-Experimental parameters live in a version-controlled YAML profile rather than
-as constants scattered through the scripts, so that the exact sweep used for a
-figure is a citable artefact. The profile is copied verbatim into every run
-manifest.
+The resolved profile is copied verbatim into every run manifest.
 """
 
 from __future__ import annotations
@@ -22,72 +19,35 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PROFILE_DIR = PROJECT_ROOT / "profiles"
 DEFAULT_RUNS_DIR = PROJECT_ROOT / "runs"
 
-#: Password of the ``root`` role created by ``bootstrap-patroni.tftpl``. Kept
-#: here rather than inline in each DSN so the harness and the provisioning
-#: template have exactly one thing to agree on.
+#: Password of the ``root`` role created by ``bootstrap-patroni.tftpl``.
 DEFAULT_PG_PASSWORD = "rootpassword"
 
-#: PostgreSQL's own port on each cluster node. Distinct from ``Node.sql_port``
-#: (26257), which is CockroachDB's and is what that engine's DSNs use.
+#: PostgreSQL port on each cluster node (``Node.sql_port`` is CockroachDB's).
 PG_SQL_PORT = 5432
 
-#: The client node's pgbouncer, which forwards to the local HAProxy, which
-#: resolves to whichever node Patroni currently reports as primary (both are
-#: installed by ``bootstrap-client.tftpl``).
+#: The client node's pgbouncer, which forwards to HAProxy and on to the primary.
 PG_GENERATOR_HOSTPORT = "127.0.0.1:6432"
 
-#: How long libpq may spend on a single host in a multi-host DSN before moving
-#: on. Only ``pg_direct_dsn`` uses it; see that function for why the bound is a
-#: measurement decision. libpq's minimum is 2 s (it silently raises anything
-#: lower), and the slowest link on this testbed is 230 ms, so 2 s is both the
-#: floor and comfortably clear of a healthy-but-distant node.
+#: Per-host connect bound in a multi-host DSN. 2 s is libpq's minimum and well
+#: above the testbed's worst RTT (~230 ms).
 PG_CONNECT_TIMEOUT_S = 2
 
-#: How long an ESTABLISHED connection may go unanswered before libpq's kernel
-#: gives up on it, in milliseconds. Distinct from ``PG_CONNECT_TIMEOUT_S``,
-#: which bounds only the *opening* of a connection, and from the probe's
-#: ``statement_timeout``, which is server-side and therefore cannot arrive when
-#: packets cannot. See ``pg_direct_dsn`` for why this exists and why it is
-#: deliberately looser than that statement timeout.
+#: How long an established connection may go unanswered before the kernel drops
+#: it. Looser than the probe's 5 s statement timeout; see ``pg_direct_dsn``.
 PG_TCP_USER_TIMEOUT_MS = 10_000
 
-#: Keepalive geometry for the same purpose: probe an idle-looking connection so
-#: that a black hole is discovered rather than waited on. Idle 2 s so detection
-#: begins promptly relative to the ~70 ms writes these clients issue, and the
-#: interval/count are what ``PG_TCP_USER_TIMEOUT_MS`` then bounds overall.
+#: TCP keepalives, so a black-holed connection is detected rather than waited on.
 PG_KEEPALIVE_IDLE_S = 2
 PG_KEEPALIVE_INTERVAL_S = 2
 PG_KEEPALIVE_COUNT = 3
 
 
 def pg_generator_dsn(database: str, password: str) -> str:
-    """Connection string for the generator: one host, the local pgbouncer.
+    """Connection string for the generator: the client node's local pgbouncer.
 
-    Two hops, each there for a reason the other cannot cover.
-
-    HAProxy is why *one* URL suffices. The generator is
-    ``cockroach workload run``, which must be given exactly one URL -- more
-    than one and it dials its ``--concurrency`` connections serially, ~2.65 s
-    each (see ``bench.py``'s module docstring) -- and HAProxy is what makes a
-    single URL follow a failover.
-
-    pgbouncer is why the generator can speak to PostgreSQL **at all**.
-    ``cockroach workload`` v26.3.0 sends ``allow_unsafe_internals`` as a
-    startup parameter on every connection it opens; PostgreSQL rejects unknown
-    startup parameters outright, so both ``workload init`` and ``workload run``
-    die at connect with ``FATAL: unrecognized configuration parameter
-    "allow_unsafe_internals" (SQLSTATE 42704)``. No flag on the tool suppresses
-    it -- the only related knob is a CockroachDB *cluster* setting -- so the
-    alternative was to drive the two arms of the comparison with two different
-    generator builds, which is a confound in the one component the design
-    requires to be identical. pgbouncer's ``ignore_startup_parameters`` drops
-    the parameter and passes everything else through; it runs in session
-    pooling mode, so it is a passthrough rather than a semantic change.
-
-    The cost is disclosed rather than hidden: the PostgreSQL path carries two
-    local proxy hops that the CockroachDB path does not have. Both are on the
-    client node's loopback, ahead of the wide-area link the measurement is
-    about.
+    ``cockroach workload`` accepts only one URL, and HAProxy makes that URL
+    follow a failover. pgbouncer strips the ``allow_unsafe_internals`` startup
+    parameter the generator sends, which PostgreSQL would otherwise reject.
     """
     return (
         f"postgresql://root:{quote(password, safe='')}@{PG_GENERATOR_HOSTPORT}"
@@ -96,78 +56,17 @@ def pg_generator_dsn(database: str, password: str) -> str:
 
 
 def pg_direct_dsn(topology: Topology, database: str, password: str) -> str:
-    """Connection string for measurement clients: every node, primary selected.
+    """Multi-host DSN for the audit writer and RTO probe, bypassing HAProxy.
 
-    Deliberately *not* through HAProxy. The RPO audit writer and the RTO probe
-    exist to observe the cluster through a fault, and routing both through one
-    proxy on the client node makes them observations of the proxy as much as of
-    the cluster: a hiccup there is indistinguishable from an outage, its
-    ``on-marked-down shutdown-sessions`` drops their in-flight connections at
-    every failover, and two measurements the design keeps independent would
-    share a single point of failure. libpq's own multi-host support does the
-    same job in the client: it tries each host and, with
-    ``target_session_attrs=read-write``, keeps the one that is not in recovery
-    -- i.e. the primary. This is the direct counterpart of the multi-host DSN
-    the CockroachDB branch already uses for these two clients, and it is safe
-    for the same reason: these are single connections (or a small worker pool),
-    not ``--concurrency``-many, so the serial-dial cost that rules multi-host
-    out for the generator does not apply.
+    libpq tries each host in turn and keeps the writable one
+    (``target_session_attrs=read-write``). The gateway goes first because it is
+    the designated primary.
 
-    Two details about the host list are load-bearing.
-
-    **The gateway goes first.** libpq walks the list in order, and every host
-    it tries before the primary costs a full connect attempt. The gateway is
-    the designated Patroni primary (``bootstrap-patroni.tftpl`` pins it and
-    ``preflight.check_patroni_primary_placement`` asserts it), so putting it
-    first normally makes the very first attempt the winning one. In
-    ``topology.nodes`` order it was *last*, behind two Azure nodes measured at
-    204-230 ms RTT on 2026-09-09 -- a cost paid twice per tier by the row-match
-    probe, 24 times across a thesis sweep, for nothing.
-
-    **``connect_timeout`` is bounded, and that is a measurement decision rather
-    than a tuning knob.** In ``recover`` mode the fault is a network partition
-    (``tailscale down``), so the partitioned node does not refuse connections,
-    it swallows them: without a bound, libpq waits out the OS TCP timeout
-    before moving to the next host, and an RTO derived from these clients would
-    be reporting the client library's timeout rather than the cluster's
-    failover. Bounding it keeps the number a property of the database. It is
-    set well above the 230 ms worst-case RTT so a merely-distant node is never
-    mistaken for a dead one, and it is disclosed alongside the two proxy hops
-    on the generator path.
-
-    **An ESTABLISHED connection is bounded too, at the TCP layer, and that is
-    what keeps a silent instrument from reading as a healthy one.**
-    ``connect_timeout`` covers only the opening of a connection. In ``recover``
-    mode the fault is a partition, and the connections these two clients
-    already hold are the ones that matter: ``tailscale down`` does not close
-    them, it black-holes them, and a write in flight over a black-holed socket
-    never returns. On 2026-09-09 that stopped both instruments dead 3.6 s after
-    the fault -- the probe's last attempt completed at offset 28.42 s of a 45 s
-    run with **515 of 515 attempts recorded ``ok`` and not one timeout,
-    conn_error or refusal**, and the audit writer's last acknowledgement landed
-    at 28.49 s and was followed by a single ``ambiguous`` row 48 seconds later.
-    Neither had observed anything after the fault, and the harness reported the
-    resulting silence as an availability RTO of **0.082 s** and "no
-    interruption in served writes was detectable", for an outage the generator
-    recorded as two consecutive ticks of ``tps = 0.0``. Understatement in the
-    flattering direction, from two instruments that are supposed to be
-    independent, agreeing because they had failed the same way.
-
-    **Why TCP and not a tighter statement timeout.** ``rto_probe``'s module
-    docstring states a design commitment this must not break: *a blocked write
-    is the measurement, not a failed one*. During a lease transfer the INSERT
-    waits and then commits, and its completion timestamp is a direct
-    observation of the instant service resumed -- a short client deadline would
-    abort exactly the write whose return times the recovery, and replace a
-    millisecond-accurate edge with a poll at the timeout period. TCP-level
-    bounds leave that case alone: a server genuinely working on a query still
-    has a live kernel that acknowledges keepalives, so the connection survives
-    for as long as the server is reachable. They fire only when the *peer* is
-    unreachable, which is the partition and nothing else. ``tcp_user_timeout``
-    is set to 10 s, deliberately **looser** than the probe's own 5 s
-    server-side ``statement_timeout``, so the client-side bound can only ever
-    fire in the case where the server never received the statement or its
-    answer never came back -- never in preference to the server's own reply.
+    Connections are bounded at the TCP layer (connect timeout, keepalives,
+    ``tcp_user_timeout``) so a partition that black-holes an open socket is
+    detected instead of silently stalling the instrument. A tighter statement
+    timeout is avoided on purpose: a write that blocks through a failover and
+    then commits is the most precise observation of recovery.
     """
     gateway = topology.gateway
     ordered = [gateway] + [n for n in topology.nodes if n.host != gateway.host]
@@ -183,24 +82,16 @@ def pg_direct_dsn(topology: Topology, database: str, password: str) -> str:
     )
 
 
-#: The client node's HAProxy, which follows Patroni's leader. ``DB_URI`` for
-#: PostgreSQL points here rather than at pgbouncer (:6432) because it is used by
-#: psql and ``crdblab capture``, which need no startup-parameter filtering.
+#: The client node's HAProxy, which follows Patroni's leader. Used for
+#: ``DB_URI`` (psql, data loading, ``capture``).
 PG_HAPROXY_HOSTPORT = "127.0.0.1:5000"
 
 
 def default_db_uri(engine: str, topology: Topology, password: str) -> str:
-    """``DB_URI`` for the engine currently deployed, derived rather than hand-written.
+    """Derive ``DB_URI`` for the deployed engine.
 
-    ``DB_URI`` feeds only data loading and ``crdblab capture``; the two engines
-    need different ones, and keeping it as a single hand-edited line in ``.env``
-    meant editing it between every redeploy. Both forms are the ones
-    ``.env.example`` documents:
-
-    * **cockroachdb** -- every cluster member, gateway first, each with its own
-      ``:26257`` (a single trailing port only covers hosts that omit one).
-    * **postgresql** -- the client node's HAProxy, the only endpoint that
-      follows a Patroni failover, with the ``root`` role's password.
+    * **cockroachdb**: every cluster member, gateway first, each with ``:26257``.
+    * **postgresql**: the client node's HAProxy, with the ``root`` password.
     """
     if engine == "cockroachdb":
         gateway = topology.gateway
@@ -219,18 +110,10 @@ DEFAULT_ENV_FILE = PROJECT_ROOT / ".env"
 
 
 def load_env_file(path: Path | None = None) -> bool:
-    """Populate the process environment from the project's ``.env`` file.
+    """Load the project's ``.env`` into the environment.
 
-    The connection string is held outside version control, so every entry point
-    must load it before :meth:`Settings.from_env` is consulted. The file is
-    resolved relative to the package rather than the working directory: a
-    measurement invoked from an arbitrary directory must not silently fall back
-    to a different credential, or worse, to none at all and a confusing failure
-    partway through a sweep.
-
-    Returns ``True`` if a file was found and read. Values already present in the
-    environment take precedence, so an explicit ``DB_URI=... crdblab ...`` still
-    overrides the file.
+    Resolved relative to the package, not the working directory. Existing
+    environment variables win. Returns ``True`` if a file was read.
     """
     target = Path(path) if path is not None else DEFAULT_ENV_FILE
     if not target.exists():
@@ -244,15 +127,12 @@ def load_env_file(path: Path | None = None) -> bool:
 @dataclass
 class WorkloadSpec:
     generator: str = "ycsb"
-    #: ycsb mix. CUSTOM with an explicit split preserves the original design's
-    #: 80/20 read/write ratio so corrected figures stay comparable with the
-    #: legacy ones; uniform matches kv's scattered keys rather than CUSTOM's
-    #: zipfian default, which would concentrate accesses on a hot subset.
+    #: ycsb mix: CUSTOM with an explicit 80/20 read/update split, uniform keys.
     ycsb_workload: str = "CUSTOM"
     read_freq: float = 0.8
     update_freq: float = 0.2
     request_distribution: str = "uniform"
-    #: kv only, retained to reproduce the legacy configuration for comparison.
+    #: kv only.
     read_percent: int = 80
     duration_s: int = 60
     warmup_s: int = 5
@@ -262,15 +142,8 @@ class WorkloadSpec:
     randomise_tier_order: bool = True
     cooldown_s: int = 15
 
-    # Working set. 125k ycsb rows is ~205 MB, sized to stay resident in page
-    # cache on a 3 GB node so throughput remains CPU- and network-bound and
-    # failover is not confounded by storage I/O.
-    #
-    # ``seed`` must be identical at load time and at run time. The generator
-    # defaults to a fresh seed per invocation, which silently decouples the
-    # loaded keyspace from the queried one and yields a 0.0 row-match rate
-    # (defect D8). It is recorded here, and hence in every run manifest, because
-    # a run whose seed is unknown cannot be reproduced or interpreted.
+    # ``seed`` and ``insert_count`` must match the values used at load time, or
+    # every lookup silently matches no rows.
     seed: int = 42
     insert_count: int = 125_000
     cycle_length: int = 1_000_000
@@ -286,78 +159,31 @@ class ChaosSpec:
     duration_s: int = 180
     inject_at_s: int = 60
     concurrency: int = 100
-    #: For CockroachDB: the node ``lease_preferences`` pins as leaseholder,
-    #: asserted by ``preflight.check_leaseholder_placement`` before the fault
-    #: fires. For PostgreSQL: the node ``bootstrap-patroni.tftpl`` pins as
-    #: primary and ``preflight.check_patroni_primary_placement`` restores by
-    #: switchover before the fault fires -- the same node, deliberately, since
-    #: where the write path is led from is a property of the deployment rather
-    #: than of the engine. It is still never *assumed*:
-    #: ``p4_chaos.resolve_patroni_primary`` reads the live cluster and faults
-    #: whichever node actually answers as primary, overriding this value if it
-    #: disagrees.
+    #: Node leading the write path (leaseholder or Patroni primary). On PostgreSQL
+    #: the live primary is resolved at fault time and overrides this.
     target: str = "gcp-1"
     recovery_threshold: float = 0.80
     recovery_hold_s: int = 10
-    #: The generator must keep sampling for at least this long *after* the
-    #: fault. ``duration_s`` alone cannot guarantee it: ``inject_at_s`` is
-    #: measured from the generator's first sample, so a profile that moved the
-    #: injection later without lengthening the run would silently shrink the
-    #: post-fault series -- and the post-fault series is the measurement. The
-    #: run is extended to ``inject_at_s + min_post_fault_s`` when
-    #: ``duration_s`` is shorter than that; it is never shortened.
-    #:
-    #: In ``recover`` mode it is counted from the instant the partition heals
-    #: rather than from the fault, because until then there is no recovery to
-    #: observe -- see ``p4_chaos.generator_duration_s``, which adds
-    #: ``RECOVER_HEAL_DELAY_S`` for that mode only.
+    #: Minimum generator sampling after the fault (after the heal, in ``recover``
+    #: mode). ``duration_s`` is extended to cover it, never shortened.
     min_post_fault_s: int = 60
-    #: How long pre-flight may wait for ``ycsb``'s leaseholders to return to the
-    #: gateway's region before refusing to measure. A chaos run that follows
-    #: another chaos run starts against a cluster whose lease placement is still
-    #: being restored by the replication queue: Phase III's partition moved both
-    #: leaseholders to Linode and Phase IV, starting immediately afterwards,
-    #: read that and aborted. The assertion is unchanged -- placement must be
-    #: correct before anything is measured -- this only lets the cluster finish
-    #: converging first. CockroachDB only -- Patroni's primary is restored by an
-    #: explicit switchover rather than by waiting, because it never fails back
-    #: on its own (see ``preflight.check_patroni_primary_placement``).
+    #: How long pre-flight waits for leaseholders to return to the gateway region
+    #: after a previous chaos run (CockroachDB only).
     leaseholder_settle_s: int = 300
-    #: Cadence of the RPO audit writer, which writes one sequence at a time on
-    #: one connection. It bounds the resolution of the availability RTO derived
-    #: from ``audit.csv`` at the cost of a quorum write (~69 ms here), not at this
-    #: value. The high-frequency probe below exists because of that bound; this
-    #: number is left alone so the RPO series keeps the cadence its recorded runs
-    #: were measured at.
+    #: RPO audit writer cadence. Its real resolution is bounded by the quorum
+    #: write cost (~70 ms), which is why the RTO probe exists.
     audit_interval_s: float = 0.02
 
-    # --- high-frequency RTO probe ----------------------------------------
-    #
-    # A second, independent client on a background path, measuring how long the
-    # database could not serve a write. It is separate from the RPO audit above
-    # rather than a faster setting of it because the two are paced for different
-    # questions; see crdblab/core/rto_probe.py.
-    #
-    # These are profile parameters rather than constants because they are the
-    # dial between resolution and perturbation -- more workers observe the outage
-    # edges more finely and add more writes to the cluster being measured -- and a
-    # run must record which way that dial was set. They land in the manifest with
-    # the rest of the profile.
+    # High-frequency RTO probe (crdblab/core/rto_probe.py). More workers resolve
+    # outage edges more finely but add load; the setting is recorded per run.
     probe_enabled: bool = True
-    #: Dispatch cadence. Sub-5 ms. What the probe *achieves* is bounded by
-    #: ``probe_workers`` over the write latency and is measured per run.
+    #: Dispatch cadence; the achieved rate is measured per run.
     probe_interval_s: float = 0.002
-    #: Eight in-flight writes. The gap between observations is the write cost over
-    #: the pool size. From the client node -- where the probe now runs -- a canary
-    #: write costs ~123 ms, so 8 workers resolve to 21-29 ms at ~59 writes/s.
-    #: (From the operator's workstation the same write cost 332 ms and 8 workers
-    #: resolved only 64 ms at 21 writes/s, which is why the probe moved.)
-    #: Concurrency is the cheap axis here and the dispatch interval is not.
-    #: See crdblab/core/rto_probe.py and crdblab/core/remote_probe.py.
+    #: In-flight canary writes. Resolution is roughly write cost / workers
+    #: (~123 ms / 8 = ~21-29 ms from the client node).
     probe_workers: int = 8
-    #: Generous on purpose: a write that blocks through a lease transfer and then
-    #: commits is the most precise observation of recovery there is, and a tight
-    #: timeout would abort it.
+    #: Generous on purpose: a write that blocks through a failover and then
+    #: commits is the most precise observation of recovery.
     probe_statement_timeout_ms: int = 5000
     probe_connect_timeout_s: float = 2.0
     probe_table: str = "rto_canary"
@@ -365,19 +191,10 @@ class ChaosSpec:
 
 @dataclass
 class HardwareMetricsSpec:
-    """Per-node CPU/memory/disk/network polling during Phase II-IV.
-
-    A profile-declared tradeoff, not a hardcoded constant, for the same reason
-    ``probe_workers``/``probe_interval_s`` above are: it trades resolution
-    against overhead, and a run must record which way that dial was set. It
-    lands in the manifest with the rest of the profile via ``Profile.to_dict``.
-    """
+    """Per-node CPU/memory/disk/network polling during Phase II-IV."""
 
     enabled: bool = True
-    #: Polling cadence across all 6 nodes (5 cluster + client). 5s keeps
-    #: aggregate scrape traffic light (6 requests/5s) while resolving load
-    #: transitions well inside the 15s LIVENESS_SETTLE_S window
-    #: crdblab/analysis/resilience.py already excludes from settling analysis.
+    #: Polling cadence across all six nodes.
     sample_interval_s: float = 5.0
 
 
@@ -393,7 +210,7 @@ class Profile:
         return asdict(self)
 
     @classmethod
-    def load(cls, name_or_path: str) -> "Profile":
+    def load(cls, name_or_path: str) -> Profile:
         path = Path(name_or_path)
         if not path.exists():
             path = DEFAULT_PROFILE_DIR / f"{name_or_path}.yaml"
@@ -420,20 +237,12 @@ class Settings:
     db_uri: str | None = None
     runs_dir: Path = DEFAULT_RUNS_DIR
     topology: Topology = field(default_factory=lambda: DEFAULT_TOPOLOGY)
-    #: Password for the ``root`` role on the PostgreSQL/Patroni deployment.
-    #:
-    #: Required, unlike CockroachDB's, which runs ``--insecure`` and accepts
-    #: ``root`` with no password at all. Patroni's bootstrap writes a `pg_hba`
-    #: of ``host all all 0.0.0.0/0 md5``, so *every* connection the harness
-    #: makes over TCP -- the generator, the RPO audit writer, the RTO probe
-    #: agent, the DDL that creates their tables -- is refused without one. The
-    #: default matches the ``root`` user created by
-    #: ``terraform/scripts/bootstrap-patroni.tftpl``; change both together, or
-    #: set ``PG_PASSWORD`` in ``.env``.
+    #: ``root`` password for PostgreSQL (``PG_PASSWORD`` in ``.env``). Must match
+    #: ``terraform/scripts/bootstrap-patroni.tftpl``.
     pg_password: str = DEFAULT_PG_PASSWORD
 
     @classmethod
-    def from_env(cls) -> "Settings":
+    def from_env(cls) -> Settings:
         return cls(
             db_uri=os.environ.get("DB_URI"),
             runs_dir=Path(os.environ.get("CRDBLAB_RUNS_DIR", DEFAULT_RUNS_DIR)),

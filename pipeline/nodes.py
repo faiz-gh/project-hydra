@@ -1,8 +1,6 @@
-"""The six testbed VMs as the pipeline addresses them: over SSH, via Tailscale.
+"""The six testbed VMs, reached over SSH via Tailscale.
 
-Resolved from :mod:`crdblab.topology` -- the same source ``run-experiment.sh``
-reads -- so the pipeline cannot drift from the harness on which hosts exist or
-which login each one takes (root on Linode, ubuntu on GCP and Azure).
+Resolved from :mod:`crdblab.topology`, the same source ``run-experiment.sh`` reads.
 """
 
 from __future__ import annotations
@@ -12,9 +10,8 @@ from dataclasses import dataclass
 
 from crdblab.topology import CLIENT_NODE, DEFAULT_TOPOLOGY
 
-#: Same options as run-experiment.sh's SSH_OPTS, for the same reasons: the
-#: testbed is rebuilt constantly and addresses are reused, and -n stops ssh from
-#: swallowing a caller's stdin.
+#: Matches run-experiment.sh's SSH_OPTS: hosts are rebuilt and addresses reused,
+#: and -n stops ssh from swallowing stdin.
 SSH_OPTS = [
     "-q", "-n",
     "-o", "StrictHostKeyChecking=no",

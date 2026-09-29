@@ -1,22 +1,14 @@
 """Remove the testbed's devices from the tailnet, so a redeploy gets its names back.
 
-Terraform destroys the VMs but not their Tailscale registrations. The devices
-stay in the tailnet as offline machines, and the next deployment's
-``tailscale up --hostname=crdb-gcp-1`` is renamed ``crdb-gcp-1-1`` because the
-name is taken. Every MagicDNS lookup in the harness then resolves the dead
-machine.
+Terraform destroys the VMs but not their Tailscale registrations, so the next
+deploy's hostnames would get a ``-1`` suffix and MagicDNS would resolve dead
+machines. Two layers:
 
-The ``tailscale`` CLI can only log out the machine it runs on, so this works in
-two layers:
+* :func:`logout_vms`: before destroy, each reachable VM logs itself out.
+* :func:`purge_devices`: after destroy, the Tailscale API deletes every device
+  with a testbed hostname, then verifies none remain. This step fails loudly.
 
-* :func:`logout_vms` -- before destroy, each VM logs itself out. Best-effort: a
-  VM that is unreachable or already gone is simply skipped.
-* :func:`purge_devices` -- after destroy, the Tailscale API deletes every device
-  still carrying a testbed hostname, then lists again to prove none remain.
-  This is the authoritative step and it fails loudly.
-
-Needs ``TS_API_KEY`` (admin console -> Settings -> Keys -> API access token) and
-optionally ``TS_TAILNET`` (default ``-``, the key's own tailnet).
+Needs ``TS_API_KEY`` and optionally ``TS_TAILNET`` (default ``-``).
 """
 
 from __future__ import annotations

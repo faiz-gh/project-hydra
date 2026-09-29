@@ -1,11 +1,9 @@
-"""The five artefacts a render writes beside its charts.
+"""The files a render writes beside its charts.
 
-``insights.md`` and ``dashboard.html`` carry the same content -- every chart with
-its caption and numbers, the runs behind them, and every chart that was skipped
-and why -- one for a document, one as a single self-contained page with the SVGs
-inlined (no external stylesheet, script or image). ``summary.json``,
-``summary.csv`` and ``chart_status.csv`` carry the numbers and the drawn/skipped
-record in machine-readable form.
+``insights.md`` and a self-contained ``dashboard.html`` (SVGs inlined) carry
+every chart with its caption and numbers, the runs behind them, and every
+skipped chart with its reason. ``summary.json``, ``summary.csv`` and
+``chart_status.csv`` hold the same record in machine-readable form.
 """
 
 from __future__ import annotations
@@ -43,10 +41,7 @@ class Result:
 def fmt(value: Any) -> str:
     """One stat as a report cell: four significant figures, thousands separated.
 
-    Integers are counts and are printed exactly; a float is a measurement and is
-    printed to the precision the report can defend. A nested dict becomes
-    ``key=value`` pairs, and a list (a series of points) is summarised by its
-    length -- the full series is in ``summary.json``.
+    Integers print exactly; dicts become ``key=value`` pairs; lists show their length.
     """
     if isinstance(value, bool) or value is None:
         return str(value)
@@ -212,7 +207,7 @@ def _inline_svg(path: Path) -> str:
 
 def write_dashboard(out_dir: Path, results: list[Result], inventory: Inventory,
                     generated: datetime) -> Path:
-    e = lambda s: html.escape(str(s), quote=True)  # noqa: E731
+    e = lambda s: html.escape(str(s), quote=True)
     drawn = sum(r.drawn for r in results)
     parts = [
         "<!doctype html><html lang='en'><head><meta charset='utf-8'>",

@@ -1,21 +1,20 @@
-"""Tests for the pre-flight assertions.
-
-``RowMatchProbe`` is the only detector this project has for a workload that
-completes without touching data (D8). Its failure modes 
-matter as much as its success path -- a probe that
-cries wolf gets disabled, and a probe that passes silently on reset counters is
-worse than none.
-"""
+"""Tests for the pre-flight assertions."""
 
 from __future__ import annotations
+
+from unittest.mock import patch
+
+import pytest
 
 from crdblab.analysis.validation import host_hardware
 from crdblab.core.preflight import (
     PreflightReport,
     RowMatchProbe,
+    check_leaseholder_placement,
     format_hardware,
     parse_hardware,
 )
+from crdblab.core.ssh import RemoteResult
 from crdblab.topology import CLIENT_NODE
 
 
@@ -37,7 +36,7 @@ def test_a_clean_window_reports_the_differenced_rate():
 
 
 def test_a_seed_mismatch_still_fails_on_a_clean_window():
-    """D8's signature: statements execute, no rows are touched."""
+    """The seed-mismatch signature: statements execute, no rows are touched."""
     report = PreflightReport()
     rate = _probe((0.0, 0.0), (50_000.0, 0.0)).finish(report)
     assert rate == 0.0
@@ -45,18 +44,7 @@ def test_a_seed_mismatch_still_fails_on_a_clean_window():
 
 
 def test_a_mid_tier_statistics_flush_does_not_read_as_no_work():
-    """CockroachDB flushes in-memory statement statistics every 10 minutes.
-
-    A tier straddling that boundary differences a large "before" against a small
-    "after" and gets a non-positive delta. Observed on the 2026-09-02 thesis
-    sweep: eleven of twelve tiers matched at 1.0000 and the twelfth reported no
-    statements while sustaining 2,431 ops/s, which aborted the sweep before
-    Phase III ever started.
-
-    The absolute counters survive and are attributable: a reset detected here
-    happened after ``start()``, so everything since belongs to this tier. The
-    window narrows; the assertion does not relax.
-    """
+    """CockroachDB flushes in-memory statement statistics every 10 minutes."""
     report = PreflightReport()
     rate = _probe((238_710.0, 238_710.0), (9_000.0, 9_000.0)).finish(report)
     assert rate == 1.0
@@ -66,7 +54,7 @@ def test_a_mid_tier_statistics_flush_does_not_read_as_no_work():
 
 
 def test_the_flush_fallback_still_catches_a_seed_mismatch():
-    """The narrowed window must not become an escape hatch for D8."""
+    """The narrowed window must not become an escape hatch for a no-rows workload."""
     report = PreflightReport()
     rate = _probe((238_710.0, 238_710.0), (9_000.0, 0.0)).finish(report)
     assert rate == 0.0
@@ -74,16 +62,7 @@ def test_the_flush_fallback_still_catches_a_seed_mismatch():
 
 
 def test_a_vanished_counter_fails_whatever_it_is_called():
-    """Counters that stood at 1000 and now read 0 fail, uncorroborated.
-
-    This case was originally read as an idle workload and asserted the message
-    "may not have run at all". That reading was wrong: a non-zero ``c0`` means
-    statements *were* recorded, so the view was flushed rather than the workload
-    being idle, and the tier that provoked it in the field had just sustained
-    611.7 ops/s. The verdict is unchanged -- absent corroboration there is
-    nothing to assert on -- but the stated reason now matches the evidence.
-    Genuine idleness is ``c0 == c1 == 0``, covered separately below.
-    """
+    """Counters that stood at 1000 and now read 0 fail, uncorroborated."""
     report = PreflightReport()
     rate = _probe((1000.0, 1000.0), (0.0, 0.0)).finish(report)
     assert rate == 0.0
@@ -91,11 +70,8 @@ def test_a_vanished_counter_fails_whatever_it_is_called():
     assert "flushed after this tier ended" in report.checks[-1].detail
 
 
-# --- hardware capture ------------------------------------------------------
-#
-# The hardware baseline fell 22% across the redeployment of 2026-09-02 with every
-# recorded field identical, because nothing recorded the machine. These pin the
-# parse so that the *next* such shift is answerable from the artefact.
+# --- hardware capture ---
+# The manifest must record the machine, so a throughput shift across redeploys is explainable.
 
 def test_the_hardware_block_is_parsed_into_its_three_fields():
     parsed = parse_hardware(
@@ -110,7 +86,7 @@ def test_the_hardware_block_is_parsed_into_its_three_fields():
 
 def test_a_missing_field_is_recorded_as_unknown_never_as_a_default():
     """A defaulted CPU count would compare equal to a real reading and so make
-    two unlike machines look alike -- the D5 failure, not a lesser one."""
+    two unlike machines look alike."""
     parsed = parse_hardware("2\n")
     assert parsed["cpus"] == 2
     assert parsed["cpu_model"] is None
@@ -123,13 +99,8 @@ def test_the_note_round_trips_through_the_manifest():
     assert host_hardware({"notes": [note]}) == hardware
 
 
-# --- the post-tier flush race ----------------------------------------------
-#
-# A flush landing *during* a tier is recovered by the partial-window fallback.
-# A flush landing after the tier's workload has stopped cannot be: there is no
-# evidence left. Observed 2026-09-03, where twenty of twenty-one Phase II tiers
-# matched at >= 0.9999 and the twenty-first reported nothing while having just
-# sustained 611.7 ops/s.
+# --- the post-tier flush race ---
+# A stats flush after a tier ends destroys its evidence; only the quorum floor can vouch for it.
 
 def test_a_post_tier_flush_is_not_reported_as_the_workload_never_running():
     """The old message said "the workload may not have run at all" about a tier
@@ -157,7 +128,7 @@ def test_a_post_tier_flush_is_survivable_when_the_quorum_floor_corroborates():
 def test_corroboration_never_rescues_a_measured_seed_mismatch():
     """Corroboration applies only where there is no evidence. A window that did
     produce a measurement is asserted on, whatever the floor check said -- an
-    escape hatch here would disable D8's only detector."""
+    escape hatch here would disable the only no-rows detector."""
     probe = _probe((0.0, 0.0), (10000.0, 0.0))
     report = PreflightReport()
     probe.finish(report, corroborated=True)
@@ -165,8 +136,7 @@ def test_corroboration_never_rescues_a_measured_seed_mismatch():
 
 
 def test_a_run_with_no_statements_at_all_still_fails_outright():
-    """c0 == 0 and c1 == 0 is genuinely no work, not a flush, and keeps the
-    original message."""
+    """c0 == 0 and c1 == 0 is genuinely no work, not a flush."""
     probe = _probe((0.0, 0.0), (0.0, 0.0))
     report = PreflightReport()
     probe.finish(report, corroborated=True)
@@ -183,20 +153,8 @@ def test_an_unmeasured_rate_is_null_in_the_manifest_not_zero_or_nan():
     assert json.loads(json.dumps({"row_match_rate": rate})) == {"row_match_rate": None}
 
 
-# --------------------------------------------------------------------------
-# Leaseholder placement is asserted before every chaos run, but a chaos run may
-# follow another one: Phase III's partition moved both ycsb leaseholders to
-# Linode, and Phase IV -- which starts as soon as Phase III returns -- read that
-# and refused to measure. It was right to refuse. The settle window lets the
-# cluster finish converging first without weakening what must be true.
-# --------------------------------------------------------------------------
-
-from unittest.mock import patch
-
-import pytest
-
-from crdblab.core.preflight import PreflightReport, check_leaseholder_placement
-from crdblab.core.ssh import RemoteResult
+# --- leaseholder settle window ---
+# A chaos run may follow another; placement may converge first, but must still hold.
 
 _GATEWAY = CLIENT_NODE
 
@@ -256,18 +214,10 @@ def test_placement_that_never_converges_still_fails():
     assert "cloud=linode" in check.detail
 
 
-# --- the PostgreSQL arm of the pre-flight gates -----------------------------
-#
-# These exist because until 2026-09-08 all of the above ran on the CockroachDB
-# arm only, which meant the engine comparison was exactly as trustworthy as the
-# arm that had no detector.
+# --- the PostgreSQL arm of the pre-flight gates ---
 
 def test_the_postgresql_server_probe_cannot_match_its_own_command_line():
-    """`pgrep -f` searches full command lines, including the one carrying the
-    probe. Both occurrences of the binary's path are bracketed, because the
-    whole probe -- argv, version and hardware -- travels as one command line
-    and the version glob was what kept matching: against crdb-gcp-1 the capture
-    came back reporting this shell's own `bash -c pgrep ...` as the server."""
+    """The PostgreSQL server probe's pgrep patterns cannot match the probe's own command line."""
     from crdblab.core.preflight import _SERVER_PROBES
 
     argv_cmd, version_cmd = _SERVER_PROBES["postgresql"]
@@ -279,7 +229,7 @@ def test_the_postgresql_server_probe_cannot_match_its_own_command_line():
 def test_hardware_is_captured_for_both_engines():
     """The half of the capture that must not differ between the engines. The
     server's flags and version are expected to differ -- that is the comparison
-    -- but a cross-engine result drawn across unlike machines is D9 again."""
+    -- but a cross-engine result drawn across unlike machines is still confounded."""
     from crdblab.core.preflight import _SERVER_PROBES
 
     assert set(_SERVER_PROBES) == {"cockroachdb", "postgresql"}
@@ -307,7 +257,7 @@ def test_pg_row_match_passes_when_every_scan_fetches_a_row():
 
 
 def test_pg_row_match_catches_a_workload_touching_nothing():
-    """D8's signature on PostgreSQL: the scans happen, no rows come back, and
+    """The seed-mismatch signature on PostgreSQL: the scans happen, no rows come back, and
     throughput goes *up* because an operation that matches nothing does no
     work."""
     from crdblab.core.preflight import PreflightReport
@@ -374,12 +324,7 @@ def test_row_match_probe_factory_picks_the_detector_per_engine():
 
 
 def test_pg_row_match_ignores_rows_merely_read_by_a_sequential_scan():
-    """The counter that would have made this detector decorative.
-    `seq_tup_read` counts rows *read*, not matched: measured on the testbed,
-    twenty sequential scans matching nothing reported 100,000 rows read against
-    a 5,000-row table, so counting it gave a "match rate" of 5000 for a workload
-    that touched no data. A sequential scan is reported as its own failure --
-    this workload addresses rows by primary key -- and never as matches."""
+    """seq_tup_read counts rows read, not matched, so it must not inflate the match rate."""
     from crdblab.core.preflight import PreflightReport
 
     report = PreflightReport()
@@ -398,12 +343,8 @@ def test_the_pg_stats_query_reads_no_sequential_row_counter():
     assert "idx_tup_fetch" in _PG_STATS_QUERY and "idx_scan" in _PG_STATS_QUERY
 
 
-# --- PostgreSQL cache-budget probe ------------------------------------------
-#
-# shared_buffers/effective_cache_size never appear on the postmaster's own
-# argv -- Patroni sets them as postgresql.conf parameters -- so they were
-# never captured, and the cross-engine cache-budget check had nothing to
-# compare CockroachDB's --cache against. This is what closes that gap.
+# --- PostgreSQL cache-budget probe ---
+# shared_buffers is set in postgresql.conf, not argv, so it is read via SQL.
 
 def test_pg_memory_note_round_trips_through_the_manifest():
     from crdblab.analysis.validation import pg_cache_config

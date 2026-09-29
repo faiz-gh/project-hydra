@@ -1,28 +1,12 @@
-"""Tests for figure filenames carrying their own provenance.
-
-A figure's filename is the only thing that distinguishes it from its neighbours
-in ``figures/``: the run ids stamped into the image's footer are invisible to
-anything listing the directory. Three failures of that have happened here.
-``fig6_..._recover.png`` once had no code path that produced it (fixed by
-keying on fault mode). A CockroachDB run's figures would silently be
-overwritten by a PostgreSQL run's, since nothing in a filename recorded which
-engine produced it. And a smoke render and a thesis-scale render of the same
-engine still collided, because nothing recorded the profile or the run either
--- which is what :func:`_provenance_slug` now does. These pin all of it without
-needing to render an actual figure.
-"""
+"""Tests for figure filenames carrying their own provenance."""
 
 from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
 
-from crdblab.report.figures import (
-    EXPORT_VECTOR_EXT,
-    _provenance_slug,
-    _resilience_filename,
-    _written_formats,
-)
+from crdblab.report.figures import _resilience_filename
+from crdblab.report.style import EXPORT_VECTOR_EXT, _provenance_slug, _written_formats
 
 
 def _run(engine="cockroachdb", profile="thesis", run_id="20260908T053558Z_bench_cluster"):
@@ -73,11 +57,9 @@ def test_runs_that_disagree_get_mixed_rather_than_a_guess():
 
 
 def test_phase_one_is_named_like_every_other_figure():
-    """The network substrate does not depend on the engine, but the deployment
-    it was measured on does: switching engines replaces every cluster node, so
-    a matrix from the CockroachDB deployment and one from the PostgreSQL
-    deployment are measurements of two different sets of machines.
-    `p1_network.run` records the engine so the name can say which."""
+    """Phase I figures carry engine and profile too: each deployment is a different set of
+    machines.
+    """
     net = SimpleNamespace(
         manifest={
             "run_id": "20260908T053439Z_p1-network",

@@ -120,9 +120,7 @@ def profiles() -> list[str]:
     return sorted(names, key=lambda n: (order.get(n, 9), n))
 
 
-# ----------------------------------------------------------------------------
-# state shared by the runner thread and the UI
-# ----------------------------------------------------------------------------
+# --- state shared by the runner thread and the UI ---
 
 class Step:
     def __init__(self, key: str, title: str, engine: str = ""):
@@ -165,7 +163,7 @@ class State:
         self.abort = threading.Event()
         self.cleaning = False
         # Held open for the pipeline's lifetime; closed at interpreter exit.
-        self.logfile = open(LOGS / f"pipeline-{utc_stamp()}.log", "a", buffering=1)  # noqa: SIM115
+        self.logfile = open(LOGS / f"pipeline-{utc_stamp()}.log", "a", buffering=1)
 
     def step(self, key: str) -> Step:
         return next(s for s in self.steps if s.key == key)
@@ -183,9 +181,7 @@ class State:
         self.logfile.write(ANY_ANSI.sub("", text) + "\n")
 
 
-# ----------------------------------------------------------------------------
-# the pipeline itself (runs on a worker thread)
-# ----------------------------------------------------------------------------
+# --- the pipeline itself (runs on a worker thread) ---
 
 class Runner:
     def __init__(self, state: State, ui: BaseUI):
@@ -309,7 +305,7 @@ class Runner:
             self.s.result["ok"] = True
         except (StepFailed, Aborted, tailscale.TailscaleError) as e:
             self.fail(e)
-        except Exception as e:  # noqa: BLE001 -- an orchestrator bug must still offer cleanup
+        except Exception as e:
             self.fail(StepFailed(f"internal error: {type(e).__name__}: {e}"))
         finally:
             with self.s.lock:
@@ -566,9 +562,7 @@ def _fake_run(chaos: bool) -> list[str]:
     return out
 
 
-# ----------------------------------------------------------------------------
-# UIs
-# ----------------------------------------------------------------------------
+# --- UIs ---
 
 class BaseUI:
     def __init__(self, state: State):
@@ -896,9 +890,7 @@ class _View(Screen):
             self.put(y0 + 3 + i, x0 + 2, line[: bw - 4], curses.A_BOLD if line[:2] in ("d ", "l ") else 0)
 
 
-# ----------------------------------------------------------------------------
-# setup
-# ----------------------------------------------------------------------------
+# --- setup ---
 
 def choose_curses(scr, title: str, options: list[tuple[str, str]], default: int,
                   body: list[str] | None = None) -> int:
@@ -989,7 +981,7 @@ def setup_plain(args) -> None:
         raise SystemExit(0)
 
 
-# ----------------------------------------------------------------------------
+# --- command line ---
 
 def parse_args(argv):
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0],

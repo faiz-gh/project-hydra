@@ -1,39 +1,22 @@
 #!/usr/bin/env python3
 """Replay the recorded thesis-extended experiment as a terminal UI, in minutes.
 
-The whole workflow is one command, ``./run-experiment.sh`` (pipeline/run_all.py):
-provision CockroachDB, run every phase, tear down and free the Tailscale names,
-redeploy as PostgreSQL/Patroni, run every phase again, tear down, and draw the
-insights. For thesis-extended that is the better part of seven hours of wall
-clock. This plays it back in a few minutes for a demo, and it plays back what
-actually happened:
+The full two-engine workflow (``./run-experiment.sh``) takes most of seven
+hours. This plays back what actually happened, compressed in time:
 
-* **The experiment output is the recorded output.** Every line under
-  ``run-experiment.sh`` comes from the 2026-09-11 thesis-extended runs in
-  ``runs/_logs``, and every throughput graph is drawn from the ``metrics.csv``
-  of the run that line reports. Nothing is simulated except the passage of time.
-* **Terraform, the VM wait and the Tailscale cleanup are recorded too**, from the
-  first full pipeline run (``PIPELINE_LOG``, 2026-09-29, smoke profile).
-  Terraform does not depend on the profile, so the same 30 resources are created
-  and destroyed either way, and every step keeps its recorded duration. Cloud
-  account ids and the workstation's tailnet identity are masked.
-* **The closing insights** are the recorded ``generate_insights.sh --profile
-  thesis-extended`` render and ``crdblab analyze engine-comparison`` on the two
-  thesis-extended bench runs.
-* **Three splices within the experiment output, each from the same profile and
-  deployment:** the CockroachDB run's Phase IV comes from
-  ``chaos-dead-resume-*.log`` (the sweep's own Phase IV attempt timed out on a
-  leaseholder query and was re-run by hand); the PostgreSQL run's data load comes
-  from the thesis-profile run on the same deployment, since the thesis-extended
-  run reused that data with ``--skip-load``; and the CockroachDB run's closing
-  summary, which the aborted sweep never printed, is rebuilt from its own
-  recorded numbers. ``--as-recorded`` shows those logs unspliced instead.
+* Experiment output comes from the recorded thesis-extended logs in
+  ``runs/_logs``; throughput graphs come from each run's ``metrics.csv``.
+* Terraform, VM waits and Tailscale cleanup come from a recorded pipeline run
+  (``PIPELINE_LOG``), with account identifiers masked.
+* The closing insights are the recorded render and engine comparison.
+* A few splices fill gaps from the same profile and deployment (a re-run
+  Phase IV, a reused data load, a rebuilt summary). ``--as-recorded`` skips them.
 
 Usage (from the repository root)::
 
     ./demo.sh                       # ~4 minutes, full-screen
     ./demo.sh --minutes 3           # tighter
-    ./demo.sh --plain               # no full-screen UI; plain scrolling output
+    ./demo.sh --plain               # plain scrolling output
 
 Keys: space pause - n skip to the next step - + / - speed - q quit.
 """
@@ -61,9 +44,8 @@ CRDB_LOG = "experiment-20260911T164025Z.log"
 CRDB_P4_LOG = "chaos-dead-resume-20260911T182028Z.log"
 PG_LOG = "experiment-20260911T084546Z.log"
 PG_LOAD_LOG = "experiment-20260911T052424Z.log"
-#: The first full pipeline run (smoke profile, 2026-09-29): the source of every
-#: terraform, VM-wait and tailscale line. Terraform does not depend on the
-#: profile, so its output is the same for a thesis-extended run.
+#: Recorded pipeline run supplying terraform, VM-wait and tailscale lines
+#: (terraform output does not depend on the profile).
 PIPELINE_LOG = "pipeline-20260929T134252Z.log"
 #: `generate_insights.sh --profile thesis-extended` over the runs above.
 INSIGHTS_LOG = "insights-20260928T143346Z.log"
@@ -72,9 +54,7 @@ COMPARISON_LOG = "engine-comparison-20260929T151755Z.log"
 
 ANSI = re.compile(r"\x1b\[([0-9;]*)m")
 
-# ----------------------------------------------------------------------------
-# events
-# ----------------------------------------------------------------------------
+# --- events ---
 
 
 @dataclass
@@ -144,9 +124,7 @@ def chaos_series(run_id: str) -> list:
     return sorted((w, t) for _, w, t in rows)
 
 
-# ----------------------------------------------------------------------------
-# run-experiment.sh log -> events
-# ----------------------------------------------------------------------------
+# --- run-experiment.sh log -> events ---
 
 def _section_for(header: str, engine: str) -> tuple[str, str]:
     h = _plain(header)
@@ -269,9 +247,7 @@ def parse_run_log(lines: list[str], engine: str) -> list[Event]:
     return events
 
 
-# ----------------------------------------------------------------------------
-# splicing the recorded logs into one coherent story
-# ----------------------------------------------------------------------------
+# --- splicing the recorded logs into one coherent story ---
 
 def _manifest(run_id: str) -> dict:
     try:
@@ -300,7 +276,7 @@ def crdb_lines(as_recorded: bool) -> list[str]:
     body = main[: cut + 1] + resume
 
     # The sweep never reached its summary; rebuild it from its own numbers.
-    stamp = lambda name: datetime.strptime(re.search(r"\d{8}T\d{6}Z", name).group(0), "%Y%m%dT%H%M%SZ")  # noqa: E731
+    stamp = lambda name: datetime.strptime(re.search(r"\d{8}T\d{6}Z", name).group(0), "%Y%m%dT%H%M%SZ")
     started, resume_start = stamp(CRDB_LOG), stamp(CRDB_P4_LOG)
     p3 = _utc(_manifest("20260911T174234Z_p4-chaos-recover").get("finished_utc"))
     p4 = _utc(_manifest("20260911T182217Z_p4-chaos-dead").get("finished_utc"))
@@ -335,7 +311,7 @@ def crdb_headlines(main: list[str], resume: list[str]) -> list[str]:
             by_c.setdefault(c, []).append((tps, rd, up))
         peak_c = max(by_c, key=lambda c: sum(t for t, _, _ in by_c[c]) / len(by_c[c]))
         vals = by_c[peak_c]
-        mean = lambda i: sum(v[i] for v in vals) / len(vals)  # noqa: E731
+        mean = lambda i: sum(v[i] for v in vals) / len(vals)
         out.append(f"20260911T170805Z_bench_cluster  peak {mean(0):,.0f} ops/s @ C={peak_c} "
                    f"· read p50 {mean(1):.1f} ms · update p50 {mean(2):.1f} ms")
 
@@ -363,12 +339,11 @@ def pg_lines(as_recorded: bool) -> list[str]:
     main = [l.replace("./generate-insights.sh", "./generate_insights.sh") for l in main]
     if as_recorded:
         return main
-    # run-experiment.sh no longer prints its "next: ./generate_insights.sh"
-    # hint: the pipeline runs the insights itself, right after the teardown.
+    # Drop the recorded "next: ./generate_insights.sh" hint; the pipeline runs
+    # the insights itself after teardown.
     main = [l for l in main if "next: ./generate_insights.sh" not in l]
-    # The thesis-extended run reused the working set the thesis run had loaded on
-    # the same deployment (--skip-load). After a fresh apply the load has to be
-    # shown, so the real load from that run takes the place of the skip notice.
+    # The recorded run skipped the load (--skip-load); splice in the real load
+    # from the thesis run on the same deployment.
     start = next(i for i, l in enumerate(main) if "Working set" in l)
     end = next(i for i in range(start, len(main)) if "ok" in _plain(main[i]) and "database:" in main[i])
     load = read_log(PG_LOAD_LOG)
@@ -377,9 +352,7 @@ def pg_lines(as_recorded: bool) -> list[str]:
     return main[: start + 1] + load[ls + 1: le + 1] + main[end + 1:]
 
 
-# ----------------------------------------------------------------------------
-# the pipeline: terraform, VM waits and tailscale from the recorded pipeline log
-# ----------------------------------------------------------------------------
+# --- the pipeline: terraform, VM waits and tailscale from the recorded pipeline log ---
 
 def tf_resources() -> list[tuple[str, str]]:
     """``(address, type)`` for every resource the root module would create."""
@@ -411,9 +384,7 @@ TF_DONE = re.compile(r"\.([a-z0-9]+_[a-z0-9_]+)\.[^.:\s]+: (Creation|Destruction
 TF_TICK = re.compile(r": (Still (creating|destroying)\.\.\. \[|(Creation|Destruction) complete after)")
 OK_DUR = re.compile(r"^  ok  .+\((\d+m\d\ds|\d+h\d\dm)\)$")
 
-#: The recording is from a real account. What it would expose on a shared
-#: screen -- cloud account ids, the workstation's tailnet identity, the home
-#: directory -- is masked; nothing else is altered.
+#: Masks for account ids, tailnet identity and home directory; nothing else changes.
 MASKS = [
     (re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"), "<subscription>"),
     (re.compile(r"project-[0-9a-f]{8}-[0-9a-f-]+"), "<gcp-project>"),
@@ -560,9 +531,7 @@ def storyboard(as_recorded: bool) -> list[Event]:
     return ev
 
 
-# ----------------------------------------------------------------------------
-# the storyboard
-# ----------------------------------------------------------------------------
+# --- the storyboard ---
 
 #: The pipeline's steps, as pipeline/run_all.py names them.
 PIPE_STEPS = [("plan", "terraform plan"), ("apply", "terraform apply"),
@@ -616,24 +585,18 @@ def schedule(events: list[Event], total_s: float) -> None:
         if left > 0 and total_w > 0:
             for e, w in zip(items, weights):
                 e.playback += left * w / total_w
-    # Sections whose events carry no recorded time cannot absorb their share, and
-    # a very short target can be smaller than the per-line minimums alone; one
-    # last uniform scale makes the replay last exactly as long as asked.
+    # Final uniform scale so the replay lasts exactly as long as asked.
     planned = sum(e.playback for e in events)
     if planned > 0:
         for e in events:
             e.playback *= total_s / planned
 
 
-# ----------------------------------------------------------------------------
-# rendering
-# ----------------------------------------------------------------------------
+# --- rendering ---
 
 SPARK = " ▁▂▃▄▅▆▇█"
 
-#: Every non-ASCII glyph the UI draws itself (recorded log text is shown as-is).
-#: Progress bars use none: they are coloured cells of spaces, which render the
-#: same in every font. ``--ascii`` swaps the rest for plain ASCII.
+#: Non-ASCII glyphs the UI draws; ``--ascii`` swaps them for plain ASCII.
 GLYPHS = {"done": "✓", "active": "▶", "sub": "▸", "pending": "·", "vline": "│",
           "hline": "─", "prompt": "❯", "fault": "▌"}
 ASCII_GLYPHS = {"done": "+", "active": ">", "sub": ">", "pending": "-", "vline": "|",
@@ -900,7 +863,6 @@ class Screen:
             self.put(y0 + 1, x0 + width - len(info) - 2, info, self.C["red"] if "fault" in info else self.C["grey"])
         elif p["kind"] == "wait":
             self.put(y0 + 1, x0 + 2, p["label"], curses.A_BOLD)
-            done = int(inner * p["progress"])
             self.bar(y0 + 3, x0 + 2, inner, p["progress"], "crdb" if p["engine"] == "cockroachdb" else "pg")
             real = p["real_s"] * p["progress"]
             self.put(y0 + 4, x0 + 2, f"{int(real) // 60}m {int(real) % 60:02d}s of {int(p['real_s']) // 60}m {int(p['real_s']) % 60:02d}s recorded", self.C["grey"])
@@ -956,10 +918,8 @@ class Screen:
     def sleep(self, seconds: float, frame=None) -> None:
         """Advance the schedule by ``seconds`` of playback, drawing as it goes.
 
-        Playback runs on a virtual clock that advances at ``speed`` times real
-        time. Each call moves the *target* on by its scheduled duration, so time
-        spent drawing is absorbed by the next wait instead of adding up across a
-        thousand lines -- the replay lasts as long as it was scheduled to.
+        Playback runs on a virtual clock; time spent drawing is absorbed by the
+        next wait, so the replay lasts exactly as long as scheduled.
         """
         start_v = self.vclock
         self.vtarget += seconds
@@ -1136,9 +1096,7 @@ class Screen:
         self.recorded_s = start + e.real_s
 
 
-# ----------------------------------------------------------------------------
-# plain mode (no curses): for recording in a plain terminal or piping
-# ----------------------------------------------------------------------------
+# --- plain mode (no curses): for recording in a plain terminal or piping ---
 
 def play_plain(events: list[Event], speed: float) -> None:
     out = sys.stdout
@@ -1176,7 +1134,7 @@ def play_plain(events: list[Event], speed: float) -> None:
     out.write("\n")
 
 
-# ----------------------------------------------------------------------------
+# --- command line ---
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])

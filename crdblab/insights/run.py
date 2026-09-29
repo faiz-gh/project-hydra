@@ -1,9 +1,6 @@
-"""Render the whole catalogue into one directory.
+"""Render the whole chart catalogue into one directory.
 
-:func:`generate` writes exactly into the ``out_dir`` it is given. Choosing a
-fresh subdirectory per render (``<stamp>_<profile|all>``) is the caller's job --
-``cli._cmd_insights`` does it -- so that successive renders sit side by side
-instead of the newest silently overwriting the last.
+The caller chooses a fresh ``out_dir`` per render (``cli._cmd_insights`` does).
 """
 
 from __future__ import annotations
@@ -30,10 +27,8 @@ def generate(
 ) -> tuple[list[Result], Inventory]:
     """Draw every chart whose inputs exist, and write the report beside them.
 
-    A chart that cannot draw skips with a stated reason. An *exception* from a
-    chart is caught too, as a last resort, and recorded as a skip naming the
-    error: one broken chart must not cost the other thirty, and a failure that
-    silently removed a chart would look exactly like a chart with nothing to say.
+    A chart that cannot draw, or raises, is recorded as skipped with the reason,
+    so one broken chart never costs the rest.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)

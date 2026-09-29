@@ -1,108 +1,19 @@
-"""High-frequency availability probe, for measuring RTO in milliseconds.
+"""High-frequency availability probe: how long could the database not serve a write?
 
-The question this exists to answer is narrow: **for how long was the database
-unable to serve a write?** Nothing else in the harness answers it at a useful
-resolution.
+The RPO audit writer issues one write at a time, so its resolution is bounded
+by the quorum write cost (~70 ms). This probe keeps several canary writes in
+flight on separate connections, so the gap between observations is roughly the
+write cost divided by the worker count (~21-29 ms from the client node).
 
-*Performance RTO* -- throughput back to a fraction of baseline, from
-``metrics.csv`` -- is sampled once a second by the generator and is a statement
-about the workload recovering, not about the database being available. It is also
-undefined whenever the cluster settles into a new stable state below the
-threshold, which on this topology it does whenever a member of the fast triangle
-is down.
+Design points:
 
-*Availability RTO* as measured by :class:`crdblab.phases.p4_chaos.AuditWriter` is
-the right quantity, but that client exists to establish RPO and is paced for it:
-one write at a time, at ``audit_interval_s``, on a single connection. Because a
-committed write on this topology costs a quorum round trip -- 69-73 ms from the
-gateway across the recorded Phase I matrices -- its *achieved* cadence is around fourteen attempts a second no matter
-what the profile asks for, and its own docstring says so. An RTO derived from it
-cannot be quoted below ~70 ms, and ``resilience.availability`` correctly refuses
-to quote one that is.
-
-This probe raises the resolution by making the attempts concurrent rather than by
-making them faster, which is the only thing that can work: a single client cannot
-observe a 70 ms round trip more often than every 70 ms. A small pool of workers
-holds several writes in flight at once, so the interval between *observations* is
-the write cost divided by the pool size rather than the write cost itself.
-
-Four properties of the implementation are load-bearing.
-
-**It is on a background path, and takes nothing from the workload's.** It runs in
-this process, in its own threads, over its own connections, and touches its own
-table. It never reads the generator's stream, is never read by it, and its
-failures cannot fail a benchmark tier -- a probe that could would be a new way to
-lose a sweep. Its cost is not free and is not pretended to be: it is a measured
-number of extra writes per second against the same cluster, reported in
-``summary()`` as ``achieved_rate_per_s`` so that it can be set against the
-workload's own write rate and judged rather than assumed negligible.
-
-**Where it writes from sets the arithmetic, so it is stated.** It runs on the
-dedicated client node (:mod:`crdblab.core.remote_probe` ships this module there
-and executes it), which is a Tailscale peer of every cluster member. A canary
-write costs 123 ms measured -- the cross-region quorum (~70 ms floor) plus the
-client's own hop -- and the pool achieves ~59 writes a second, resolving 21-29 ms.
-
-It used to run in the harness process on the operator's workstation, where the
-same write cost 332 ms, the pool achieved 21 a second and the probe resolved
-only 64 ms; the recorded figures below from 2026-09-05 are from that
-arrangement and are kept because they are what the design decisions were made
-against. Three consequences, none of which are worked around silently:
-
-* Resolution is the write cost over the worker count, and it is measured per
-  run rather than asserted. Two 60 s runs against the live cluster on
-  2026-09-05, with the median write at 369-375 ms: eight workers gave a p95 gap
-  of 125 ms and a p50 of 47 ms (= 369/8, as the arithmetic predicts);
-  twenty-four gave a p95 of 64 ms. The returns are sub-linear because the tail
-  is jitter on the link rather than the pool being short of workers.
-* The load the probe puts on the cluster is *lower* than a naive reading
-  suggests, because concurrency here buys observations against a link rather than
-  work against the database: eight workers is 18 writes a second, roughly 5% of
-  the ~371 writes/s a Phase III/IV tier at C=100 issues, and twenty-four is 43/s or
-  ~12%. Concurrency is therefore the cheap axis on this testbed and the interval
-  is not.
-* **The link, not the design, is what caps the resolution.** A client on the
-  gateway would pay ~70 ms a write instead of ~370 ms, so the same eight workers
-  would resolve to single-digit milliseconds. Running the probe from here is a
-  deliberate choice -- it matches the RPO audit writer, keeps the log on the
-  machine that will analyse it, and survives the node under test going away --
-  but it means a run's resolution is a property of where you are sitting. That is
-  why every figure is reported with the resolution that produced it.
-* Every timestamp carries about half that round trip as a *systematic* offset:
-  the write commits, and the client learns about it 188 ms later. The offset is
-  the same on both edges of an outage, so it cancels in ``observed_outage_s`` --
-  which is why that quantity is reported beside ``rto_s`` rather than being
-  treated as a footnote. ``rto_s`` measures from a fault timestamped by a
-  different mechanism and does not enjoy the cancellation.
-
-**The dispatch cadence and the achieved cadence are different numbers, and both
-are recorded.** The dispatcher ticks on absolute monotonic deadlines at
-``interval_s`` -- 2 ms by default, and it does not accumulate drift because each
-deadline is computed from the epoch rather than by adding to the last one. But a
-tick only becomes an attempt if a worker is free, and with writes costing ~123 ms
-from the client node and eight workers, the overwhelming majority of ticks find
-none. Reporting the configured 2 ms as the
-resolution of an RTO would be false precision of exactly the kind this
-project's recorded instrumentation defects are made of, so what
-:func:`RtoProbe.summary` reports as
-``resolution_s`` is the *observed* median gap between completed observations, and
-``dispatch_saturation`` says how often a tick was dropped.
-
-**A blocked write is the measurement, not a failed one.** During a lease transfer
-an ``INSERT`` does not fail; it waits, and then commits the moment the range is
-served again. Its completion timestamp is therefore a direct observation of the
-instant service resumed, accurate to the process that observed it rather than to
-the polling interval. This is why ``statement_timeout`` defaults to five seconds
-rather than to something tight: a short timeout would abort exactly the write
-whose return would have timed the recovery, and replace a millisecond-accurate
-edge with a poll at the timeout period. The probe wants writes in flight *through*
-the outage.
-
-**Every attempt takes a fresh sequence number, and none is ever retried.** This is
-the same discipline as the RPO audit writer and is here for the same reason: the
-legacy audit client retried a ``seq_id`` after a failure and livelocked against
-its own duplicate key precisely when the interesting thing was happening. A
-retried number would also silently make one observation look like several.
+* It runs on its own threads, connections and table, and cannot fail the
+  workload. Its extra write rate is reported as ``achieved_rate_per_s``.
+* ``resolution_s`` is measured from the observed gaps, not taken from the
+  configured 2 ms dispatch interval.
+* A write that blocks through a failover and then commits is the measurement,
+  so ``statement_timeout`` is generous (5 s).
+* Every attempt uses a fresh sequence number and is never retried.
 """
 
 from __future__ import annotations
@@ -112,57 +23,27 @@ import queue
 import threading
 import time
 from collections import deque
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, TextIO
+from typing import Any, TextIO
 
 from .recorder import PROBE_OUTCOMES, utcnow_us
 
-#: Default dispatch cadence. Sub-5 ms as specified; see the module docstring for
-#: why the achieved rate is lower and why both numbers are reported.
+#: Dispatch cadence. The achieved rate is lower and reported separately.
 DEFAULT_INTERVAL_S = 0.002
 
-#: Concurrent in-flight writes. The gap between observations is roughly the write
-#: cost over the pool size, and from the client node that cost is ~123 ms measured
-#: -- the cross-region quorum (~70 ms floor) plus the client's hop, rather than
-#: the 332 ms it was when the probe ran from the operator's workstation.
-#:
-#: Measured against the live cluster rather than reasoned about, because the first
-#: version of this constant was reasoned about and was wrong by a factor of two:
-#:
-#:     workers   p95 gap   p50 gap   writes/s   share of a C=100 tier's writes
-#:           8    125 ms     47 ms       18.1                             ~5%
-#:          24     64 ms     23 ms       43.2                            ~12%
-#:
-#: Eight rather than more because the returns are sub-linear while the cost is
-#: linear -- tripling the pool bought less than double the resolution and more
-#: than double the load -- and because every worker is a connection the gateway
-#: holds open through a fault; a probe that contributes to the outage it is
-#: measuring is worthless. Eight rather than fewer because 18 writes a second is
-#: small enough to argue is not what moved the throughput series, and the argument
-#: is checkable: ``achieved_rate_per_s`` sits in the same events.json as the run's
-#: own throughput.
-#:
-#: Raise it when the outage being timed is short enough that 125 ms matters, and
-#: read ``resolution_s`` from the run afterwards rather than assuming the table
-#: above still holds -- it is a property of the link on the day.
+#: Concurrent in-flight writes. More workers give finer resolution but add load
+#: and connections; check ``resolution_s`` per run.
 DEFAULT_WORKERS = 8
 
-#: Server-side budget for one canary write. Generous on purpose: an ``INSERT``
-#: that blocks through a lease transfer and then commits is the most precise
-#: observation of recovery available, and a tight timeout would abort it. It is a
-#: hang detector, not a latency budget.
+#: Server-side budget per canary write: a hang detector, not a latency budget.
 DEFAULT_STATEMENT_TIMEOUT_MS = 5_000
 
-#: Budget for opening a connection. Short, because a connection that cannot be
-#: made is itself an observation and the worker should record it and try again
-#: rather than sit on it.
+#: A connection that cannot be made is itself an observation, so keep this short.
 DEFAULT_CONNECT_TIMEOUT_S = 2.0
 
-#: Table the canary rows go to. Dedicated: it must not share a range, a schema or
-#: a lease with either the workload's ``usertable`` or the RPO audit's
-#: ``rpo_audit``, or an outage of one would be indistinguishable from an outage of
-#: the other.
+#: Dedicated table, so its outage cannot be confused with the workload's or audit's.
 DEFAULT_TABLE = "rto_canary"
 
 CREATE_TABLE_SQL = (
@@ -174,13 +55,10 @@ CREATE_TABLE_SQL = (
 
 @dataclass(frozen=True)
 class ProbeAttempt:
-    """One canary write, as the client saw it.
+    """One canary write as the client saw it.
 
-    Offsets are seconds on the harness's monotonic clock from the probe's epoch,
-    which the caller supplies so that they share an origin with ``events.json``
-    and with ``wall_offset_s`` in ``metrics.csv``. Comparing an offset here with
-    one from another clock is the error ``wall_offset_s`` was added to prevent
-    (D5), so the epoch is passed in rather than taken here.
+    Offsets are seconds from the caller-supplied epoch, shared with
+    ``events.json`` and ``metrics.csv``'s ``wall_offset_s``.
     """
 
     seq_id: int
@@ -216,19 +94,8 @@ class ProbeAttempt:
 def classify(exc: BaseException) -> tuple[str, str]:
     """Map a driver exception to a :data:`PROBE_OUTCOMES` member and a detail.
 
-    The classification is by exception *type name* rather than by matching the
-    message, because messages are not part of psycopg's interface and change
-    between releases, whereas the class hierarchy is documented. It is also
-    deliberately coarse: the probe needs to know whether the database served the
-    write, failed to answer, or answered with a rejection, and inventing finer
-    categories here would mean asserting things about the failure that the client
-    is not in a position to know.
-
-    A ``timeout`` is separated from a general connection error because it is the
-    signature of the outage this probe measures: during a lease transfer the
-    statement is accepted and simply not answered. A connection that is refused
-    outright is a different event -- the process is gone -- and conflating them
-    would hide which of the two a run actually saw.
+    ``timeout`` (statement accepted, never answered) is the outage signature and
+    is kept apart from ``conn_error`` (connection lost or refused).
     """
     name = type(exc).__name__
     text = str(exc).strip().splitlines()[0] if str(exc).strip() else name
@@ -236,10 +103,8 @@ def classify(exc: BaseException) -> tuple[str, str]:
     lowered = f"{name} {text}".lower()
     if "timeout" in lowered or "canceling statement" in lowered:
         return "timeout", detail
-    # psycopg raises OperationalError for connection-level trouble and
-    # InterfaceError for a connection used after it broke. Everything else --
-    # ProgrammingError, IntegrityError, DataError -- means a reachable database
-    # rejected the statement, which is a fault in the probe rather than an outage.
+    # Connection-level errors vs. a reachable database rejecting the statement
+    # (a probe bug, not an outage).
     if "operational" in lowered or "interface" in lowered or "connection" in lowered:
         return "conn_error", detail
     return "refused", detail
@@ -248,15 +113,8 @@ def classify(exc: BaseException) -> tuple[str, str]:
 class _EventLog:
     """Append-only JSON-lines log of connection lifecycle events.
 
-    Flushed on every write. The point of this file is to survive the run: a chaos
-    run that is interrupted while the fault is in place -- which happens, and is
-    the case whose timings matter most -- leaves the CSV unwritten because that is
-    assembled at the end, but leaves this complete up to the last event.
-
-    Successful writes are *not* logged here. There are tens of thousands of them
-    and they are in the CSV; what this file carries is the edges -- every failure,
-    every connection opened or lost, and every first success after a failure --
-    which is what a downtime calculation actually reads.
+    Flushed on every write so it survives a run killed mid-fault. Only the
+    edges are logged (failures, connects, disconnects), not every success.
     """
 
     def __init__(self, path: Path | None) -> None:
@@ -291,14 +149,10 @@ class _EventLog:
 
 
 class RtoProbe:
-    """A pool of canary writers on a background path.
+    """A pool of canary writers on a background path, used as a context manager.
 
-    Use as a context manager; the pool starts on ``__enter__`` and is stopped and
-    joined on ``__exit__``. It never raises out of the workers: a probe that could
-    abort the run it is observing would be a new failure mode for the sweep, so
-    every exception becomes a classified observation instead. Anything that stops
-    the probe entirely -- a missing driver, a table that cannot be created -- is
-    recorded in :attr:`error` and left for the caller to report.
+    Worker exceptions become classified observations; anything that stops the
+    probe entirely is stored in :attr:`error` instead of raised.
     """
 
     def __init__(
@@ -329,60 +183,37 @@ class RtoProbe:
         )
         self.epoch_utc = utcnow_us()
 
-        #: When set, every attempt is also written to this stream as one JSON
-        #: object per line, as it completes. This is how the probe reports from
-        #: the client node: the harness reads the stream over SSH instead of
-        #: holding the attempts in a process on the operator's workstation.
-        #: Streaming rather than buffering means a probe that is killed -- or an
-        #: SSH session that drops -- still yields every observation it had
-        #: already made, which for an outage measurement is the interesting part.
+        #: Optional stream that receives each attempt as a JSON line as it
+        #: completes; this is how the remote agent reports back over SSH.
         self._emit = emit
         self._emit_lock = threading.Lock()
 
         self._log = _EventLog(log_path)
         self._stop = threading.Event()
         self._queue: queue.Queue[tuple[int, float]] = queue.Queue(maxsize=self.workers)
-        #: One permit per worker, released when a worker finishes an attempt. The
-        #: queue's own ``maxsize`` is not sufficient: a slot frees as soon as a
-        #: worker *takes* a job, so a bounded queue alone would let the dispatcher
-        #: keep enqueuing while every thread was mid-write, and those jobs would
-        #: then be recorded with a dispatch timestamp from long before anything
-        #: attempted them. Since a dispatch offset is what the leading edge of an
-        #: outage is measured against, that queueing delay would be indis-
-        #: tinguishable from the database being slow. The permit is held for the
-        #: whole attempt, so a job is enqueued only when a thread is genuinely free.
+        #: One permit per worker, held for a whole attempt, so a job is only
+        #: dispatched (and timestamped) when a worker is actually free.
         self._idle = threading.Semaphore(self.workers)
         self._threads: list[threading.Thread] = []
         self._seq_lock = threading.Lock()
         self._seq = 0
         self._results_lock = threading.Lock()
 
-        #: Every attempt, in completion order. Ordered by completion rather than
-        #: by sequence because that is the order the observations were made in,
-        #: and with several writes in flight the two differ.
+        #: Every attempt, in completion order.
         self.attempts: list[ProbeAttempt] = []
-        #: Ticks that found no free worker. See the module docstring.
+        #: Ticks that found no free worker.
         self.dispatch_saturation = 0
-        #: Ticks skipped because firing would have bunched against the previous
-        #: dispatch rather than spreading the observations. See :meth:`_spacing`.
+        #: Ticks skipped to keep dispatches spread out; see :meth:`_spacing`.
         self.ticks_spaced_out = 0
         self.ticks = 0
-        #: Rolling median of recent served-write latencies, in seconds, used to
-        #: space dispatches. Kept as a small window rather than a run-long mean
-        #: so the spacing follows the link if it changes -- and it does change:
-        #: during an outage writes block, and the pool should not keep firing at
-        #: the healthy rate into a database that is not answering.
+        #: Rolling window of served-write latencies, used to space dispatches.
         self._recent_latencies: deque[float] = deque(maxlen=32)
         self._median_latency: float | None = None
         #: A fatal, probe-wide failure. Not an outage; a broken probe.
         self.error: str | None = None
 
-    # --- clock ------------------------------------------------------------
-
     def offset(self) -> float:
         return time.monotonic() - self.epoch_monotonic
-
-    # --- lifecycle --------------------------------------------------------
 
     def _next_seq(self) -> int:
         with self._seq_lock:
@@ -393,21 +224,17 @@ class RtoProbe:
         with self._results_lock:
             self.attempts.append(attempt)
         if self._emit is not None:
-            # Workers record concurrently, so the write is serialised: a torn
-            # line would be an unparseable observation on the reading side, and
-            # the reader cannot tell that apart from a probe that crashed.
+            # Serialised so concurrent workers never emit a torn line.
             line = json.dumps(attempt.to_row(), separators=(",", ":"))
             with self._emit_lock:
                 self._emit.write(line + "\n")
                 self._emit.flush()
 
     def _note_latency(self, seconds: float) -> None:
-        """Fold a served write into the estimate that spaces dispatches.
+        """Fold a served write's latency into the dispatch-spacing estimate.
 
-        Only served writes count. A write that failed fast tells us nothing about
-        how long the database takes to answer, and letting a burst of instant
-        connection refusals collapse the estimate would make the probe hammer the
-        cluster hardest at exactly the moment it is unwell.
+        Failed writes are excluded so fast refusals cannot make the probe fire
+        harder at an unhealthy cluster.
         """
         with self._results_lock:
             self._recent_latencies.append(seconds)
@@ -420,10 +247,7 @@ class RtoProbe:
         conn = psycopg.connect(
             self.dsn, autocommit=True, connect_timeout=self.connect_timeout_s
         )
-        # Server-side, so a statement the client has given up on does not keep
-        # holding a range on the server. Set per connection rather than in the
-        # DSN so it survives a reconnect without depending on how the caller
-        # spelled the connection string.
+        # Set per connection so it survives reconnects.
         with conn.cursor() as cur:
             cur.execute(f"SET statement_timeout = '{self.statement_timeout_ms}ms'")
         return conn
@@ -451,7 +275,7 @@ class RtoProbe:
                     cur.execute(
                         f"INSERT INTO {self.table} (seq_id) VALUES (%s)", (seq,)
                     )
-            except BaseException as exc:  # noqa: BLE001 - classification is the point
+            except BaseException as exc:
                 outcome, detail = classify(exc)
                 self._log.write(
                     "attempt_failed",
@@ -465,7 +289,7 @@ class RtoProbe:
                 if conn is not None:
                     try:
                         conn.close()
-                    except BaseException:  # noqa: BLE001
+                    except BaseException:
                         pass
                 conn = None
 
@@ -489,37 +313,16 @@ class RtoProbe:
         if conn is not None:
             try:
                 conn.close()
-            except BaseException:  # noqa: BLE001
+            except BaseException:
                 pass
             self._log.write("disconnect", self.offset(), worker=worker)
 
     def _spacing(self) -> float:
-        """Minimum interval between dispatches, adapted to the observed latency.
+        """Minimum interval between dispatches: median write latency / workers.
 
-        Without this the pool **phase-locks** and the probe silently loses almost
-        all of its resolution. Measured against the live testbed before this was
-        added: eight workers, a 2 ms dispatch interval and a 368 ms write. All
-        eight start within 16 ms of each other, all eight therefore finish within
-        16 ms of each other, all eight permits are released together, and the
-        dispatcher -- which is free to fire the moment a permit exists -- issues
-        the next eight 2 ms apart. The phase relationship is then preserved
-        forever. What comes back is not one observation every 46 ms but a burst of
-        eight inside 16 ms, once per round trip, with a 350 ms hole between
-        bursts: p50 gap 0.22 ms, p90 gap 342 ms, worst 918 ms. An outage of a
-        third of a second could begin and end inside one of those holes and be
-        recorded as nothing at all.
-
-        The fix is to space dispatches by the round trip divided by the pool size,
-        which is the interval the pool can actually sustain and the one the module
-        docstring claims. Eight workers against a 368 ms write is a dispatch every
-        46 ms, and the workers spread out and stay spread.
-
-        It is derived from the run's own observations rather than configured. The
-        write cost here is a property of the link on the day -- 123 ms from the
-        client node, 332 ms when this ran from the workstation -- so a constant would be
-        wrong for one of them and unmaintainable for both. Until enough writes
-        have completed to estimate it, dispatch is governed by ``interval_s``
-        alone, which fills the pool quickly at the start of a run.
+        Without it the workers phase-lock: they all finish together, get
+        re-dispatched together, and return in bursts with long blind gaps between.
+        Until latency is known, ``interval_s`` alone applies.
         """
         latency = self._median_latency
         if latency is None:
@@ -527,18 +330,9 @@ class RtoProbe:
         return max(self.interval_s, latency / self.workers)
 
     def _dispatcher(self) -> None:
-        """Tick on absolute deadlines so the cadence cannot drift.
+        """Tick on absolute deadlines (``epoch + n * interval``) so cadence cannot drift.
 
-        Each deadline is ``epoch + n * interval`` rather than ``now + interval``.
-        The difference matters over a three-minute run at 2 ms: adding to the last
-        wake-up accumulates every scheduling delay, and the recorded cadence would
-        then be a property of the machine's load rather than of the configuration
-        -- which is D4's shape, a clock that ran at the wrong rate because it was
-        derived from work done instead of from time passing.
-
-        The tick is the *upper bound* on the dispatch rate. What actually gates a
-        dispatch is a free worker and :meth:`_spacing`; see there for why the
-        second condition is not optional.
+        A tick dispatches only if a worker is free and :meth:`_spacing` allows it.
         """
         tick = 0
         last_dispatch = 0.0
@@ -550,24 +344,15 @@ class RtoProbe:
                 if self._stop.wait(delay):
                     return
             elif -delay > self.interval_s:
-                # Behind by more than a whole tick: skip forward rather than
-                # firing a burst to catch up, which would misreport the cadence.
+                # Behind by more than a tick: skip forward instead of bursting.
                 tick = int((time.monotonic() - self.epoch_monotonic) / self.interval_s)
                 continue
             self.ticks += 1
             now = time.monotonic()
             if now - last_dispatch < self._spacing():
-                # Too soon after the previous dispatch. Not counted as saturation:
-                # saturation means the pool was busy, and this means the pool was
-                # free but firing now would bunch this observation against the last
-                # one instead of spreading it.
                 self.ticks_spaced_out += 1
                 continue
             if not self._idle.acquire(blocking=False):
-                # Every worker is mid-write. Expected and frequent; it is the
-                # normal state when the write cost exceeds the tick interval, and
-                # it is counted rather than waited on so that the achieved cadence
-                # stays an observation.
                 self.dispatch_saturation += 1
                 continue
             try:
@@ -577,7 +362,7 @@ class RtoProbe:
                 self.dispatch_saturation += 1
                 self._idle.release()
 
-    def start(self) -> "RtoProbe":
+    def start(self) -> RtoProbe:
         self._log.open()
         self._log.write(
             "probe_start",
@@ -612,20 +397,18 @@ class RtoProbe:
         self._log.write("probe_stop", self.offset(), **summary)
         self._log.close()
 
-    def __enter__(self) -> "RtoProbe":
+    def __enter__(self) -> RtoProbe:
         try:
             return self.start()
-        except BaseException as exc:  # noqa: BLE001
+        except BaseException as exc:
             self.error = f"{type(exc).__name__}: {exc}"
             return self
 
     def __exit__(self, *exc) -> None:
         try:
             self.stop()
-        except BaseException as stop_exc:  # noqa: BLE001
+        except BaseException as stop_exc:
             self.error = self.error or f"{type(stop_exc).__name__}: {stop_exc}"
-
-    # --- derived quantities ----------------------------------------------
 
     def rows(self) -> Iterable[dict[str, Any]]:
         """Attempts as rows under :data:`PROBE_COLUMNS`, in completion order."""
@@ -647,23 +430,13 @@ class RtoProbe:
         return measure_rto(self.attempts, fault_offset_s, observation_end_s)
 
 
-# --- analysis, as free functions so the same code reads a recorded CSV -------
-#
-# Kept out of the class deliberately. `resilience.py` re-derives every published
-# figure from the run directory rather than trusting what the phase recorded at
-# measurement time, and it can only do that if the derivation is reachable
-# without a live probe object. This is the same reason `find_recovery` and
-# `availability_rto` live at module scope in `p4_chaos`.
+# Analysis is at module scope so resilience.py can re-derive figures from a
+# recorded CSV without a live probe.
 
 
 def _when(offset_s: float) -> str:
-    """Phrase an offset from the fault that may legitimately be slightly negative.
-
-    The last write served before an outage can predate the fault by up to one
-    sampling gap, because the fault lands between two observations. Printing that
-    as "-0.0s after the fault" reads as a defect in the measurement rather than as
-    the resolution limit it actually is.
-    """
+    """Phrase an offset from the fault; the last write before an outage can
+    slightly predate the fault."""
     if offset_s < -0.05:
         return f"{-offset_s:.1f}s before the fault was injected"
     if offset_s < 0.05:
@@ -682,8 +455,7 @@ def _median(values: list[float]) -> float | None:
 
 
 def _quantile(values: list[float], q: float) -> float | None:
-    """Nearest-rank quantile. No interpolation: every value returned is one that
-    was actually observed, which is the property that lets it be quoted."""
+    """Nearest-rank quantile, so every value returned was actually observed."""
     if not values:
         return None
     ordered = sorted(values)
@@ -692,29 +464,10 @@ def _quantile(values: list[float], q: float) -> float | None:
 
 
 def resolution_of(gaps: list[float]) -> float | None:
-    """The interval an RTO from these observations may be quoted to.
+    """The interval an RTO may be quoted to: the 95th percentile of the gaps.
 
-    **Not the median gap.** The distribution of intervals between observations is
-    strongly bimodal for a concurrent probe, and the median describes the wrong
-    mode. Measured against the live testbed with eight workers before the
-    dispatcher was taught to stagger them: p50 0.22 ms, p90 342 ms, worst 918 ms
-    -- 65% of the gaps under a millisecond because the pool completed in bursts,
-    and a third of a second of dead air between the bursts. The median said
-    0.2 ms. An outage of 300 ms could have begun and ended in one of those holes
-    and been recorded as no interruption at all.
-
-    What bounds the claim is the long tail, because that is what the probe might
-    have been in the middle of when the database came back. The 95th percentile
-    is used rather than the maximum: the maximum of a few thousand samples is a
-    single scheduling accident and would move the reported precision of every run
-    by whatever the worst hiccup of that run happened to be, while p95 is stable
-    and still describes the tail. The maximum is reported separately, because a
-    p95 of 50 ms next to a worst of 900 ms is a fact about the run that a reader
-    should see rather than a number to average away.
-
-    Staggering the dispatches (see :meth:`RtoProbe._spacing`) is what makes this
-    number small; reporting it honestly is what stops it from being asserted when
-    it is not.
+    The median is misleading for a bursty, bimodal gap distribution, and the
+    maximum is a single scheduling accident. ``summarise`` reports both anyway.
     """
     return _quantile(gaps, 0.95)
 
@@ -728,14 +481,7 @@ def summarise(
     interval_s: float = DEFAULT_INTERVAL_S,
     workers: int = DEFAULT_WORKERS,
 ) -> dict[str, Any]:
-    """What the probe achieved, as distinct from what it was asked for.
-
-    ``resolution_s`` is the number an RTO from this probe may be quoted to. It is
-    the observed median gap between *served* writes, not ``interval_s``: the
-    configured cadence is an upper bound on the sampling rate that the cost of a
-    quorum write makes unreachable, and reporting it as the resolution would
-    assert a precision the observations never had.
-    """
+    """What the probe achieved, as distinct from what it was configured to do."""
     served = sorted(a.complete_offset_s for a in served_attempts(attempts))
     gaps = [b - a for a, b in zip(served, served[1:])]
     resolution = resolution_of(gaps)
@@ -759,11 +505,7 @@ def summarise(
         "ticks_spaced_out": spaced_out,
         "achieved_rate_per_s": round(len(attempts) / span, 2) if span > 0 else None,
         "served_rate_per_s": round(len(served) / span, 2) if span > 0 else None,
-        # The figure to quote against. See resolution_of: it is the tail of the
-        # gap distribution, not its middle.
         "resolution_s": round(resolution, 6) if resolution else None,
-        # Both modes of the distribution, so a bimodal one is visible as bimodal
-        # rather than collapsing into a single flattering number.
         "gap_p50_s": round(_median(gaps), 6) if gaps else None,
         "gap_max_s": round(max(gaps), 6) if gaps else None,
         "median_write_ms": round(_median(latencies), 3) if latencies else None,
@@ -789,11 +531,7 @@ def outage_windows(
 ) -> list[dict[str, float]]:
     """Intervals between consecutive served writes, longest first.
 
-    An "outage" here is defined by observation and nothing else: a gap between
-    two writes the database served. It is bounded above by the truth -- the
-    database may have recovered at any point between the two -- and that is why
-    the returned window carries both edges rather than a single duration to be
-    quoted as if it were the outage itself.
+    Each window carries both edges: the true recovery lies somewhere inside it.
     """
     served = sorted(served_attempts(attempts), key=lambda a: a.complete_offset_s)
     windows = []
@@ -805,9 +543,7 @@ def outage_windows(
                     "from_s": round(previous.complete_offset_s, 6),
                     "to_s": round(current.complete_offset_s, 6),
                     "duration_s": round(gap, 6),
-                    # A write already in flight when service resumed dates the
-                    # recovery more tightly than one dispatched afterwards: it was
-                    # waiting, so it returned as soon as the range was served.
+                    # An in-flight write dates the recovery more tightly.
                     "closed_by_in_flight_write": current.dispatch_offset_s
                     <= previous.complete_offset_s,
                 }
@@ -820,33 +556,11 @@ def tail_attribution(
     pre_gaps: list[float],
     post_gaps: list[float],
 ) -> dict[str, Any]:
-    """Is the post-fault tail heavier than the pre-fault one, or merely longer?
+    """Is the post-fault gap tail heavier than the pre-fault one, or just longer?
 
-    This exists because of a specific false positive on real data. In the
-    ``dead`` run of 2026-09-05 the probe reported an 869 ms outage 40 s after the
-    fault, having cleared a noise floor of 862 ms. The floor was the largest
-    healthy gap (638 ms) plus one sampling period, and 869 ms duly exceeded it --
-    but the pre-fault window held 711 observations and the post-fault window
-    1462. Drawing twice as many samples from the same heavy-tailed link
-    distribution produces a larger maximum on its own, with nothing having gone
-    wrong at all. The rate of gaps over 500 ms was 2/711 before and 5/1462 after:
-    identical to within counting noise.
-
-    Comparing a maximum against a maximum is therefore the wrong test whenever
-    the two windows differ in length, which they always do -- the fault is
-    injected a third of the way into the run by design. The comparison that does
-    hold is between *rates*: pick a threshold from the healthy distribution and
-    ask how often it is exceeded per observation on each side. If the post-fault
-    rate is not meaningfully higher, the longest post-fault gap is a draw from the
-    same distribution and attributing it to the fault would be inventing a
-    failover event out of the probe's own jitter.
-
-    The threshold is the healthy 95th percentile rather than a constant: it is
-    scale-free, so this works identically for a probe on the client node paying
-    123 ms a write and one on a workstation paying 332 ms.
-
-    Returns the evidence rather than a verdict alone, so a marginal call can be
-    inspected instead of trusted.
+    The post-fault window is usually longer, so its maximum gap is larger by
+    chance alone. This compares *rates* of gaps over the healthy 95th percentile
+    instead, and returns the evidence as well as the verdict.
     """
     if len(pre_gaps) < 20 or not post_gaps:
         return {
@@ -863,7 +577,6 @@ def tail_attribution(
     post_over = sum(1 for g in post_gaps if g > reference)
     pre_rate = pre_over / len(pre_gaps)
     post_rate = post_over / len(post_gaps)
-    # Expected count after the fault if nothing changed, from the healthy rate.
     expected = pre_rate * len(post_gaps)
     ratio = (post_rate / pre_rate) if pre_rate > 0 else None
 
@@ -876,19 +589,13 @@ def tail_attribution(
         "post_fault_exceedances": post_over,
         "expected_post_fault_exceedances": round(expected, 1),
         "exceedance_rate_ratio": round(ratio, 2) if ratio is not None else None,
-        # 1.5x is a deliberately loose bar. The quantity being separated -- "the
-        # tail got heavier" from "the window got longer" -- is coarse, and a tight
-        # threshold would reject real events on a link that jitters. A check that
-        # rejects sound data gets disabled, which is how check_littles_law came to
-        # be corrected.
+        # Deliberately loose: a tight bar would reject real events on a jittery link.
         "heavier_after_fault": bool(ratio is not None and ratio >= 1.5),
     }
 
 
-#: How far short of the run's end the probe's last observation may fall before
-#: its silence counts as loss of coverage, as a multiple of the observed
-#: sampling period. See :data:`crdblab.phases.p4_chaos.COVERAGE_SLACK_CADENCES`
-#: -- the same judgement, applied to the other instrument.
+#: How far (in sampling periods) the last observation may fall short of the run's
+#: end before the probe counts as having stopped observing.
 COVERAGE_SLACK_PERIODS = 20.0
 
 
@@ -897,81 +604,38 @@ def measure_rto(
     fault_offset_s: float,
     observation_end_s: float | None = None,
 ) -> dict[str, Any]:
-    """How long the database could not serve a write, and when that began.
+    """How long the database could not serve a write after the fault.
 
-    The naive derivation -- fault to the next write served afterwards -- is
-    wrong on this testbed and is not what this returns. A five-voter cluster
-    losing one member keeps committing for as long as it takes to notice, which
-    is ~6 s here for liveness alone. The next write after the fault therefore
-    usually succeeds, and a figure built on it would report an RTO of one
-    sampling gap while the actual interruption had not started yet.
+    A cluster keeps serving for a few seconds before it notices a lost member,
+    so "fault to next served write" is wrong. Instead the outage is the largest
+    post-fault gap in served writes that exceeds the noise floor (the longest
+    gap that closed before the fault, plus one sampling period).
 
-    What is measured instead is the **first gap in served writes that is longer
-    than anything the probe saw while the system was healthy**, and the RTO is
-    from the fault to the end of that gap. The comparison is against the run's own
-    pre-fault gaps rather than a fixed threshold: how often this probe manages to
-    observe the database is a property of the link, the pool size and the day, and
-    a constant here would be a threshold that fires on a slow link and misses on a
-    fast one. Where there are too few pre-fault observations to characterise that,
-    twice the median gap is used and the fallback is named in the output.
-
-    The keys, and what each may be used for:
+    Key results:
 
     ``rto_s``
-        Fault to service restored. The RTO to quote -- and ``None``, with a claim
-        saying so, when no gap exceeded the noise floor. "No interruption was
-        detectable at this resolution" is a result; a number smaller than the
-        sampling gap is not.
+        Fault to service restored, or ``None`` when no gap cleared the floor.
     ``outage``
-        The gap itself, with both edges, so the claim can be checked against the
-        series and drawn on a timeline.
+        The gap itself, with both edges.
     ``detection_lag_s``
-        Fault to the first blocked or failed attempt. The cluster's detection
-        time, reported separately because folding it into the RTO would credit
-        the recovery with the interval before anything was wrong. The legacy
-        pipeline's 6.0 s and 5.2 s "RTOs" were an artefact of exactly this
-        conflation.
+        Fault to the first blocked or failed attempt, reported separately.
     ``next_write_after_fault_s``
-        Fault to the next served write, whatever it was. Kept because it is the
-        quantity the RPO audit log's ``availability_rto`` reports, and the two
-        artefacts should be comparable term for term rather than only in spirit.
+        Fault to the next served write, comparable with the audit log's figure.
+    ``observed_outage_s``
+        The gap between two probe observations, where link delay cancels out.
 
-    A run that ended while the outage was still open reports ``rto_s`` of ``None``
-    and ``truncated``, never the time remaining: the probe cannot see a recovery
-    that happened after it stopped, and reporting the truncation as a measurement
-    would put a floor into the figure that is an artefact of the run's duration.
-
-    ``observation_end_s`` is when the run ended, on the probe's own offset
-    clock, and it guards a *different* hole from ``truncated``. ``truncated``
-    catches a gap that is still open when the probe stops -- there is a missing
-    closing observation, so the trouble is visible in the series. This catches
-    the case where nothing is missing from the series because the probe stopped
-    producing one: every attempt it made succeeded, and it simply made no more.
-    On 2026-09-09 that is exactly what happened. The probe's workers blocked on
-    connections the partition had black-holed, and because a server-side
-    ``statement_timeout`` cannot arrive when packets cannot, they never returned
-    and never errored. The recorded artefact was 515 attempts, 515 ``ok``, zero
-    failures of any kind, spanning 20.3 s of a 45 s run and ending 3.6 s after
-    the fault -- and this function, finding no qualifying gap in it, reported
-    "no interruption in served writes was detectable" for an outage of roughly
-    70 s. ``None`` skips the check, so runs recorded before the field existed
-    read exactly as they did before.
+    An outage still open when the probe stopped is ``truncated``. If
+    ``observation_end_s`` is given and the probe's last attempt falls well
+    short of it, ``coverage_truncated`` is set: the probe stopped observing
+    (e.g. blocked on a black-holed socket), so absence of an outage means nothing.
     """
     served = sorted(served_attempts(attempts), key=lambda a: a.complete_offset_s)
     gaps = [
         (a, b, b.complete_offset_s - a.complete_offset_s)
         for a, b in zip(served, served[1:])
     ]
-    # Sampling resolution is characterised from the gaps that closed *before* the
-    # fault, not from the whole run. The whole-run tail includes the outage gap
-    # itself, so using it here would let a long outage raise the very threshold
-    # that detects it -- the longer the interruption, the less detectable. The
-    # same circularity in a different form as judging a gap healthy by when it
-    # opened, which the noise floor below also avoids.
-    #
-    # summarise() has no fault to partition on and legitimately reports the
-    # whole-run figure; that one describes the instrument over the run, this one
-    # describes it while the system was working.
+    # Resolution comes from pre-fault gaps only, so a long outage cannot raise the
+    # threshold that should detect it.
     healthy_gaps = [gap for _, b, gap in gaps if b.complete_offset_s < fault_offset_s]
     resolution = resolution_of(healthy_gaps) or resolution_of([g for _, _, g in gaps])
 
@@ -992,9 +656,7 @@ def measure_rto(
         else None
     )
 
-    # How much of the run the probe actually watched. Judged on the last
-    # attempt of any outcome, not the last success, so a probe that was still
-    # failing loudly at the end counts as having covered the run.
+    # Coverage is judged on the last attempt of any outcome, not the last success.
     last_offset = max((a.complete_offset_s for a in attempts), default=None)
     coverage_gap = (
         observation_end_s - last_offset
@@ -1034,20 +696,8 @@ def measure_rto(
             ),
         }
 
-    # The noise floor: the longest gap seen while the system was demonstrably
-    # healthy, plus one sampling period. Anything at or below that is
-    # indistinguishable from the probe's ordinary sampling.
-    #
-    # A gap counts as healthy only if it *closed* before the fault. Judging by
-    # when it opened would admit the gap that spans the fault -- the outage
-    # itself -- into the evidence for what healthy looks like, and the floor would
-    # then be raised to exactly the interval it exists to detect.
-    #
-    # The added sampling period is not a fudge factor. Two observations that
-    # differ by less than the interval between observations differ by less than
-    # the instrument can resolve, and without it ordinary scheduling jitter -- or
-    # simple floating-point noise in a series of round numbers -- puts a gap a
-    # microsecond over the previous maximum and manufactures an outage from it.
+    # Noise floor: longest gap that closed before the fault, plus one sampling
+    # period so jitter cannot manufacture an outage.
     healthy = healthy_gaps
     period = resolution or 0.0
     if healthy:
@@ -1066,36 +716,8 @@ def measure_rto(
     base["noise_floor_s"] = round(floor, 6)
     base["noise_floor_source"] = floor_source
 
-    # The outage is the LARGEST qualifying gap after the fault, not the first
-    # one. Taking the first was a defect that reported a 72-second interruption
-    # as 348 milliseconds -- a 208x understatement, and understating in the
-    # flattering direction, which is the exact class of failure this harness
-    # exists to prevent.
-    #
-    # It fails because the noise floor is calibrated on pre-fault gaps only,
-    # while the gaps that follow a fault are drawn from a *worse* distribution:
-    # the cluster is failing over, the client is reconnecting, and the pool is
-    # completing in bursts. The floor is therefore routinely exceeded by
-    # post-fault jitter that is not an outage at all. Compounding it, a fault
-    # need not take effect when the injection command returns -- `tailscale
-    # down` exits 0 while established flows keep working for seconds -- so the
-    # interval right after the fault is often still healthy, and its jitter is
-    # what a first-match latches onto.
-    #
-    # Measured on runs/20260908T232245Z_p4-chaos-recover (Phase III, PostgreSQL,
-    # fault at 72.076s): nine post-fault gaps cleared the 0.148s floor. The
-    # first was 0.152s -- four milliseconds over the floor -- opening 0.196s
-    # after the fault, while writes were still being served normally. The real
-    # interruption was the second: 68.963s, opening 3.530s after the fault, with
-    # service restored 72.49s after it. Six of the remaining seven were between
-    # 0.156s and 0.307s, i.e. ordinary noise that would each have been picked
-    # ahead of the true outage had they landed earlier.
-    #
-    # Maximum is the right estimator because RTO is a claim about the worst
-    # interruption the fault caused, and every gap considered here has already
-    # passed the floor and the `heavier_after_fault` attribution test below.
-    # Where several genuine outages occur, the largest is the defensible figure
-    # to quote and the rest are disclosed in `qualifying_gaps`.
+    # Take the largest qualifying gap, not the first: post-fault jitter often
+    # clears the floor before the real outage begins.
     qualifying = [
         (a, b, gap)
         for a, b, gap in gaps
@@ -1103,8 +725,7 @@ def measure_rto(
     ]
     outage = max(qualifying, key=lambda t: t[2]) if qualifying else None
 
-    # A gap that is still open when the probe stops does not appear in `gaps` at
-    # all -- there is no closing observation -- so it is looked for separately.
+    # A gap still open at the end has no closing observation; check it separately.
     last_served = served[-1]
     last_attempt = max(attempts, key=lambda a: a.complete_offset_s)
     open_gap = last_attempt.complete_offset_s - last_served.complete_offset_s
@@ -1129,11 +750,7 @@ def measure_rto(
         }
 
     if outage is None and coverage_truncated:
-        # Kept ahead of the "nothing detectable" branch below, and distinct from
-        # `below_resolution`: that one says the outage was shorter than the
-        # instrument can resolve, which is a result. This one says the
-        # instrument was not there, which is not. Conflating them is what let a
-        # ~70 s outage be reported as undetectable -- see the docstring.
+        # Distinct from `below_resolution`: here the instrument was absent.
         return {
             **base,
             "rto_s": None,
@@ -1168,11 +785,6 @@ def measure_rto(
             "truncated": False,
             "below_resolution": True,
             "quotable_value_s": None,
-            # `floor` is the detection threshold, not the sampling resolution:
-            # it is the longest healthy gap plus one sampling period, so it is
-            # always the larger of the two. Calling it "resolution" here would
-            # quote a number ~3x the instrument's actual precision and would
-            # disagree with the `resolution_s` in the same dict.
             "claim": (
                 "no interruption in served writes was detectable after the fault"
                 + (
@@ -1192,48 +804,22 @@ def measure_rto(
         }
 
     before, after, duration = outage
-    # Every post-fault gap that cleared the floor, longest first, so a reader can
-    # see what the maximum was chosen against rather than taking it on trust. A
-    # long list of sub-second entries beside one long one is the signature of a
-    # floor that is barely separating signal from noise.
     base["qualifying_gaps_s"] = sorted(
         (round(g, 6) for _, _, g in qualifying), reverse=True
     )[:10]
     base["qualifying_gap_count"] = len(qualifying)
     rto = after.complete_offset_s - fault_offset_s
-    # The write that closes the gap can be dispatched before the gap even
-    # opens -- workers run concurrently, so `after` need not wait for `before`
-    # to complete before starting. Its own flight time (dispatch to complete)
-    # can then exceed the gap's duration, and the fraction this is meant to
-    # report -- "how much of the gap was this write already in flight for" --
-    # is the OVERLAP between its flight window and the gap window, not its
-    # flight time on its own. Dividing flight time by gap duration without
-    # that clamp gives values above 1 whenever the write started earlier than
-    # `before` finished, which is common with several workers in flight: found
-    # on the retained 2026-09-05 dead-fault run, seq_id 1169 (dispatched
-    # 99.762s, before `before`'s own completion at 100.220s) read back as
-    # in_flight_fraction = 1.526 -- a fraction greater than one, which is not a
-    # fraction of anything.
+    # Fraction of the gap the closing write was in flight for: overlap of its
+    # flight window with the gap (it may have been dispatched before the gap opened).
     overlap_start = max(after.dispatch_offset_s, before.complete_offset_s)
     overlap = max(0.0, after.complete_offset_s - overlap_start)
     attribution = tail_attribution(
         healthy_gaps,
         [gap for _, b, gap in gaps if b.complete_offset_s >= fault_offset_s],
     )
-    # A gap can clear the noise floor and still be the healthy distribution
-    # showing its tail over a longer window. When the exceedance rate has not
-    # risen, the interval is reported with its evidence and explicitly not
-    # offered as a recovery time.
+    # A gap that clears the floor but without a heavier tail is not offered as an RTO.
     attributable = attribution.get("heavier_after_fault", True)
-    # The last write served before the outage may predate the fault by up to one
-    # sampling gap -- the fault lands between two observations -- so this is
-    # routinely a small negative number and must not be printed as "-0.0s after".
     started_after = before.complete_offset_s - fault_offset_s
-    # A write that spent most of the gap in flight returns the instant the range
-    # is served again, so it dates the recovery to itself. One dispatched after
-    # the fact only dates it to the next poll. The fraction is reported rather
-    # than only the verdict, because it is the difference between an observation
-    # and an upper bound.
     in_flight_fraction = min(1.0, overlap / duration) if duration else 0.0
     return {
         **base,
@@ -1250,10 +836,7 @@ def measure_rto(
                 before.complete_offset_s - fault_offset_s, 6
             ),
         },
-        # Both edges are the probe's own observations, so the systematic delay
-        # between a write committing and the client learning of it appears in
-        # both and cancels here. It does not cancel in `rto_s`, whose other edge
-        # is the injector's timestamp.
+        # Both edges are probe observations, so link delay cancels (unlike `rto_s`).
         "observed_outage_s": round(duration, 6),
         "closed_by_in_flight_write": in_flight_fraction >= 0.5,
         "in_flight_fraction": round(in_flight_fraction, 4),
@@ -1287,12 +870,7 @@ def measure_rto(
 
 
 def attempts_from_rows(rows: Iterable[dict[str, Any]]) -> list[ProbeAttempt]:
-    """Rebuild attempts from a recorded ``rto_probe.csv``.
-
-    So the analysis layer re-derives an RTO from the observations on disk rather
-    than reading back the summary the phase wrote at measurement time. A figure
-    whose underlying observations cannot be recomputed cannot be disputed.
-    """
+    """Rebuild attempts from a recorded ``rto_probe.csv`` for re-analysis."""
     out = []
     for row in rows:
         out.append(
@@ -1309,34 +887,10 @@ def attempts_from_rows(rows: Iterable[dict[str, Any]]) -> list[ProbeAttempt]:
     return out
 
 
-# --- running as the agent on the client node --------------------------------
-#
-# The probe used to run in the harness process on the operator's workstation.
-# Every canary write then carried a full workstation-to-cluster round trip --
-# 332 ms median on this testbed -- so a pool of eight workers achieved 21 writes
-# a second against the 500 it dispatched, and the resolution of the outage
-# measurement was 64 ms rather than the ~2 ms the profile asks for. Worse, the
-# figure was partly a measurement of the operator's own link: a hiccup at home
-# during the fault window is indistinguishable from one in the cluster.
-#
-# Running the same code on `crdb-client-1` removes both problems. It is the
-# *same code*: this module is copied to the client node and executed there, not
-# reimplemented for it. A second implementation of the probe would be a second
-# thing to keep in step with the analysis that reads its output, and divergence
-# between two copies of one measurement is the failure this project exists to
-# rule out.
-#
-# The agent reports on stdout as JSON lines and never on stderr, which carries
-# diagnostics only. Offsets it reports are on *its own* monotonic clock from
-# *its own* epoch; the harness converts them using the two epochs' UTC stamps
-# and records the NTP offset between the machines as the uncertainty on that
-# conversion. Both nodes run chrony and `preflight.check_clock_offset` asserts
-# the offset is small (0.01 ms measured, 250 ms limit) before the run proceeds,
-# so the conversion rests on a measurement rather than an assumption -- which is
-# the whole of D5.
+# Agent mode: launched on the client node by remote_probe.py. Attempts go to
+# stdout as JSON lines; diagnostics go to stderr.
 
-#: Marks the agent's final stdout line, which carries its epoch and summary
-#: rather than an attempt. Chosen not to collide with any PROBE_COLUMNS key.
+#: Key marking the agent's start/stop lines (vs. attempt rows).
 AGENT_RESULT_KEY = "__agent__"
 
 
@@ -1367,10 +921,8 @@ def _agent_main(argv: list[str] | None = None) -> int:
         type=float,
         required=True,
         help=(
-            "hard upper bound on the probe's life. The harness stops the agent "
-            "by closing the SSH channel when the measurement ends; this bound "
-            "only guarantees an abandoned agent cannot outlive the run and keep "
-            "writing to the cluster."
+            "hard upper bound on the probe's life, so an abandoned agent "
+            "cannot outlive the run"
         ),
     )
     args = parser.parse_args(argv)
@@ -1384,8 +936,7 @@ def _agent_main(argv: list[str] | None = None) -> int:
         connect_timeout_s=args.connect_timeout_s,
         emit=sys.stdout,
     )
-    # The epoch is announced before any attempt is emitted, so the reader can
-    # convert every offset that follows without buffering the stream.
+    # Announce the epoch first so the reader can rebase every later offset.
     sys.stdout.write(
         json.dumps(
             {

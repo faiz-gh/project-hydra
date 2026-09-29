@@ -1,9 +1,7 @@
-"""Group E -- network and provenance.
+"""Group E: network and provenance.
 
-E1, E2 and E4 all draw one Phase I matrix, chosen by
-:meth:`data.Inventory.network`, so the three always describe the same machines.
-E3 draws the inventory itself: every run the render considered and what the
-loader's gate said about it.
+E1, E2 and E4 draw the same Phase I matrix (:meth:`data.Inventory.network`).
+E3 draws the run inventory and what the loader said about each run.
 """
 
 from __future__ import annotations

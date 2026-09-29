@@ -1,9 +1,7 @@
-"""Group A -- benchmark and saturation, one Phase II sweep per engine.
+"""Group A: benchmark and saturation, from each engine's newest Phase II sweep.
 
-Aggregation is never redone here: tier throughput comes from
-:func:`steady_state.per_tier` (summed across operation types, interval across
-repetitions), per-operation latency from :func:`steady_state.latency_by_op`
-(never pooled across types). What these charts add is a view of the same tiers.
+Tier statistics come from :mod:`crdblab.analysis.steady_state`; nothing is
+re-aggregated here.
 """
 
 from __future__ import annotations
@@ -13,11 +11,21 @@ import pandas as pd
 
 from ..analysis import steady_state
 from ..report.style import INK_MUTED, INK_SECONDARY, SURFACE
-from ._base import COLOR, DASH, LABEL, MARKER, Context, Drawn, chart, need, new_figure, save
+from ._base import (
+    COLOR,
+    DASH,
+    LABEL,
+    MARKER,
+    Context,
+    Drawn,
+    chart,
+    need,
+    new_figure,
+    save,
+)
 
-#: p99 budgets for A6, in ms. Spans the read path (a few ms) to well past the
-#: write path's quorum floor (~70 ms), so every engine's capacity curve is
-#: visible from the budget where nothing qualifies to where everything does.
+#: p99 budgets for A6, in ms: from the read path (a few ms) to well past the
+#: write quorum floor (~70 ms).
 BUDGETS_MS: tuple[int, ...] = (10, 25, 50, 100, 200, 400, 800)
 
 _QUANTILE_DASHES = {"p50_ms": "-", "p95_ms": "--", "p99_ms": "-.", "pmax_ms": ":"}
@@ -152,9 +160,8 @@ def a3_slot_occupancy(ctx: Context) -> Drawn:
     return Drawn(stats, save(ctx, "A3", fig, ax, list(runs.values())))
 
 
-#: A tier whose within-tier coefficient of variation exceeds this was still
-#: moving while it was recorded. The same threshold resilience analysis uses to
-#: call a post-fault state settled.
+#: Within-tier coefficient of variation above which a tier was still moving
+#: (same threshold as resilience analysis).
 SETTLED_CV = 0.25
 
 
@@ -272,9 +279,7 @@ def a7_throughput_by_concurrency(ctx: Context) -> Drawn:
     any_interval = False
     for engine, run in runs.items():
         tiers = steady_state.per_tier(run)
-        # The Student's t 95% interval over repetitions, absent (not zero) for a
-        # single-repetition tier: a zero-width bar would assert agreement between
-        # repetitions that were never run.
+        # 95% interval over repetitions; zero-width (not drawn) for a single repetition.
         errors = [0.0 if v is None or pd.isna(v) else float(v) for v in tiers["ci95_half_width_tps"]]
         has_interval = any(e > 0 for e in errors)
         any_interval |= has_interval
