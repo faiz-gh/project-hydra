@@ -19,6 +19,28 @@ A wider briefing — the project's history, settled decisions, results and open
 questions — is kept outside the repository in `project-hydra-context/context.md`,
 alongside the session log it was distilled from.
 
+## Full pipeline, one command
+
+`./run-experiment.sh` with no arguments, on a terminal, runs the whole study as a
+full-screen TUI (`pipeline/run_all.py`, styled like `demo.sh`). For CockroachDB
+and then PostgreSQL/Patroni, it:
+
+1. Runs `terraform plan -out plan.out -var=database_engine=<engine>` and then `terraform apply plan.out`. Any error aborts.
+2. Waits for SSH and cloud-init on all six VMs.
+3. Runs `./run-experiment.sh --engine <engine> --profile <profile>`. `DB_URI` is derived per engine, so there is no `.env` edit between engines.
+4. Logs out Tailscale on every VM, runs `terraform destroy -auto-approve`, then deletes the VMs' devices through the Tailscale API and checks that none remain. This frees the MagicDNS names for the next deploy.
+
+When both engines are done, it runs `./generate_insights.sh --profile <profile>` and
+`crdblab analyze engine-comparison`. If a step fails or you press Ctrl-C while VMs
+are up, it asks whether to destroy them or leave them up for debugging.
+
+It needs `TS_API_KEY` in `.env` (see `.env.example`). A thesis-extended run takes
+hours, so start it inside `tmux`. `pipeline/run_all.py --help` lists the flags:
+`--profile/--yes` for unattended runs, `--engines postgresql` to resume,
+`--cleanup --engine <e>`, `--tailscale-list`, `--plain` and `--dry-run`.
+With any arguments, `run-experiment.sh` still measures just the one engine that
+is currently deployed, as below.
+
 ## Order of operations
 
 0. `python3 -m venv .venv && .venv/bin/python -m pip install -e ".[dev]"`

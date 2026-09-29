@@ -1,0 +1,125 @@
+{
+  "run_id": "20260929T141532Z_p1-network",
+  "phase": "p1_network",
+  "schema_version": "2.1",
+  "engine": "postgresql",
+  "started_utc": "2026-09-29T14:15:32.996597Z",
+  "finished_utc": "2026-09-29T14:16:18.216540Z",
+  "git_revision": "c68ce076ac1851454cdc0edd0617b8013ce2c592",
+  "profile": {
+    "name": "smoke",
+    "workload": {
+      "generator": "ycsb",
+      "ycsb_workload": "CUSTOM",
+      "read_freq": 0.8,
+      "update_freq": 0.2,
+      "request_distribution": "uniform",
+      "read_percent": 80,
+      "duration_s": 15,
+      "warmup_s": 3,
+      "display_every_s": 1,
+      "concurrencies": [
+        10,
+        50
+      ],
+      "repetitions": 1,
+      "randomise_tier_order": false,
+      "cooldown_s": 5,
+      "seed": 42,
+      "insert_count": 125000,
+      "cycle_length": 1000000,
+      "block_bytes": 256
+    },
+    "chaos": {
+      "duration_s": 45,
+      "inject_at_s": 15,
+      "concurrency": 10,
+      "target": "gcp-1",
+      "recovery_threshold": 0.8,
+      "recovery_hold_s": 10,
+      "min_post_fault_s": 45,
+      "leaseholder_settle_s": 300,
+      "audit_interval_s": 0.02,
+      "probe_enabled": true,
+      "probe_interval_s": 0.002,
+      "probe_workers": 2,
+      "probe_statement_timeout_ms": 5000,
+      "probe_connect_timeout_s": 2.0,
+      "probe_table": "rto_canary"
+    },
+    "hardware_metrics": {
+      "enabled": true,
+      "sample_interval_s": 5.0
+    },
+    "tps_ceiling": 20000.0
+  },
+  "topology": [
+    {
+      "name": "linode-1",
+      "host": "crdb-linode-1",
+      "provider": "linode",
+      "region": "us-east",
+      "locality": "cloud=linode,region=us-east",
+      "gateway": false
+    },
+    {
+      "name": "linode-2",
+      "host": "crdb-linode-2",
+      "provider": "linode",
+      "region": "us-west",
+      "locality": "cloud=linode,region=us-west",
+      "gateway": false
+    },
+    {
+      "name": "azure-1",
+      "host": "crdb-azure-1",
+      "provider": "azure",
+      "region": "centralindia",
+      "locality": "cloud=azure,region=centralindia",
+      "gateway": false
+    },
+    {
+      "name": "azure-2",
+      "host": "crdb-azure-2",
+      "provider": "azure",
+      "region": "eastasia",
+      "locality": "cloud=azure,region=eastasia",
+      "gateway": false
+    },
+    {
+      "name": "gcp-1",
+      "host": "crdb-gcp-1",
+      "provider": "gcp",
+      "region": "us-east1",
+      "locality": "cloud=gcp,region=us-east1",
+      "gateway": true
+    }
+  ],
+  "clock_epoch_utc": null,
+  "server_version": null,
+  "cockroach_version": null,
+  "generator_command": "ping -c 100 -i 0.1 (all pairs, bidirectional)",
+  "ssh_options": [
+    "-q",
+    "-o",
+    "StrictHostKeyChecking=no",
+    "-o",
+    "UserKnownHostsFile=/dev/null",
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "ServerAliveInterval=5",
+    "-o",
+    "ServerAliveCountMax=3"
+  ],
+  "client_platform": "macOS-27.0-arm64-arm-64bit",
+  "notes": [
+    "2026-09-29T14:16:18.215348Z crdb-linode-1: tailscale MTU 1280",
+    "2026-09-29T14:16:18.215771Z crdb-linode-2: tailscale MTU 1280",
+    "2026-09-29T14:16:18.215941Z crdb-azure-1: tailscale MTU 1280",
+    "2026-09-29T14:16:18.216101Z crdb-azure-2: tailscale MTU 1280",
+    "2026-09-29T14:16:18.216257Z crdb-gcp-1: tailscale MTU 1280"
+  ],
+  "generator_totals": {},
+  "validation": {}
+}

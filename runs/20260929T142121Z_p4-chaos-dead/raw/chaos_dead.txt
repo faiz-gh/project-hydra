@@ -1,0 +1,147 @@
+I260929 14:21:44.320975 1 workload/cli/run.go:702  [-] 1  random seed: 42
+I260929 14:21:44.321112 1 workload/cli/run.go:487  [-] 2  creating load generator...
+I260929 14:21:44.530171 1 workload/cli/run.go:536  [-] 3  creating load generator... done (took 209.056307ms)
+_elapsed___errors__ops/sec(inst)___ops/sec(cum)__p50(ms)__p95(ms)__p99(ms)_pMax(ms)
+    1.0s        0          409.3          494.9      0.8      1.4      3.0      4.2 read
+    1.0s        0           76.1           92.0     71.3    335.5    335.5    335.5 update
+    2.0s        0          524.6          509.7      0.7      1.1      1.5      2.1 read
+    2.0s        0          138.9          115.4     71.3     75.5     75.5     75.5 update
+    3.0s        0          501.1          506.9      0.7      0.9      1.2      1.8 read
+    3.0s        0          137.0          122.6     71.3     75.5     75.5     75.5 update
+    4.0s        0          520.1          510.2      0.7      1.0      1.3      2.2 read
+    4.0s        0          120.0          122.0     71.3     71.3     75.5     75.5 update
+    5.0s        0          330.1          474.2      0.9      1.4      1.5      1.8 read
+    5.0s        0           83.0          114.2     71.3    352.3    385.9    385.9 update
+    6.0s        0          656.4          504.6      0.7      1.0      1.3      1.8 read
+    6.0s        0          135.9          117.8     71.3     75.5     75.5     75.5 update
+    7.0s        0          542.5          510.0      0.7      0.9      1.5      3.0 read
+    7.0s        0          137.1          120.6     71.3     71.3     75.5     75.5 update
+    8.0s        0          491.5          507.7      0.7      0.9      1.0      1.7 read
+    8.0s        0          136.9          122.6     71.3     71.3     75.5     75.5 update
+    9.0s        0          492.3          506.0      0.7      0.9      1.3      2.0 read
+    9.0s        0          138.1          124.3     71.3     71.3     75.5     75.5 update
+   10.0s        0          379.8          493.4      0.7      1.1      1.4      2.4 read
+   10.0s        0          121.9          124.1     71.3    159.4    192.9    201.3 update
+_elapsed___errors__ops/sec(inst)___ops/sec(cum)__p50(ms)__p95(ms)__p99(ms)_pMax(ms)
+   11.0s        0          564.4          499.8      0.8      1.5      2.8      5.0 read
+   11.0s        0          136.1          125.2     71.3     79.7     79.7     79.7 update
+   12.0s        0          499.6          499.8      0.7      1.0      2.0    209.7 read
+   12.0s        0          132.9          125.8     71.3     71.3     75.5     75.5 update
+   13.0s        0          583.1          506.2      0.7      0.9      1.2      1.8 read
+   13.0s        0          138.0          126.8     71.3     71.3     75.5     75.5 update
+   14.0s        0          527.1          507.7      0.7      0.9      1.0      1.4 read
+   14.0s        0          137.0          127.5     71.3     71.3     75.5     75.5 update
+   15.0s        0          544.2          510.1      0.7      0.9      1.1      1.2 read
+   15.0s        0          137.1          128.1     71.3     75.5     79.7     79.7 update
+   16.0s        0          349.0          500.1      0.7      0.9      1.2      2.2 read
+   16.0s        0          103.0          126.6     71.3     71.3     75.5     75.5 update
+   17.0s        0          357.7          491.7      0.7      1.2      1.3      2.9 read
+   17.0s        0          108.9          125.5     71.3    335.5    369.1    369.1 update
+   18.0s        0          504.3          492.4      0.7      0.9      1.1      2.0 read
+   18.0s        0          139.1          126.3     71.3     71.3     75.5     75.5 update
+   19.0s        0          463.0          490.8      0.7      0.9      1.2      2.1 read
+   19.0s        0          134.0          126.7     71.3     75.5     75.5     75.5 update
+   20.0s        0          529.1          492.7      0.7      0.9      1.3      5.2 read
+   20.0s        0          138.0          127.2     71.3     71.3     75.5     75.5 update
+_elapsed___errors__ops/sec(inst)___ops/sec(cum)__p50(ms)__p95(ms)__p99(ms)_pMax(ms)
+   21.0s        0          569.1          496.4      0.7      0.9      1.3      2.0 read
+   21.0s        0          137.0          127.7     71.3     75.5     75.5     79.7 update
+E260929 14:22:06.260732 1 workload/cli/run.go:624  [-] 4  FATAL: server conn crashed? (SQLSTATE 08P01)
+   22.0s       10          393.8          491.7      0.7      1.0      1.6      3.5 read
+   22.0s       10           99.0          126.4     71.3     71.3     75.5     75.5 update
+   23.0s       10            0.0          470.3      0.0      0.0      0.0      0.0 read
+   23.0s       10            0.0          120.9      0.0      0.0      0.0      0.0 update
+   24.0s       10            0.0          450.7      0.0      0.0      0.0      0.0 read
+   24.0s       10            0.0          115.9      0.0      0.0      0.0      0.0 update
+   25.0s       10            0.0          432.7      0.0      0.0      0.0      0.0 read
+   25.0s       10            0.0          111.2      0.0      0.0      0.0      0.0 update
+   26.0s       10            0.0          416.1      0.0      0.0      0.0      0.0 read
+   26.0s       10            0.0          107.0      0.0      0.0      0.0      0.0 update
+   27.0s       10            0.0          400.7      0.0      0.0      0.0      0.0 read
+   27.0s       10            0.0          103.0      0.0      0.0      0.0      0.0 update
+   28.0s       10            0.0          386.3      0.0      0.0      0.0      0.0 read
+   28.0s       10            0.0           99.3      0.0      0.0      0.0      0.0 update
+   29.0s       10            0.0          373.0      0.0      0.0      0.0      0.0 read
+   29.0s       10            0.0           95.9      0.0      0.0      0.0      0.0 update
+   30.0s       10            0.0          360.6      0.0      0.0      0.0      0.0 read
+   30.0s       10            0.0           92.7      0.0      0.0      0.0      0.0 update
+_elapsed___errors__ops/sec(inst)___ops/sec(cum)__p50(ms)__p95(ms)__p99(ms)_pMax(ms)
+   31.0s       10            0.0          349.0      0.0      0.0      0.0      0.0 read
+   31.0s       10            0.0           89.7      0.0      0.0      0.0      0.0 update
+   32.0s       10            0.0          338.1      0.0      0.0      0.0      0.0 read
+   32.0s       10            0.0           86.9      0.0      0.0      0.0      0.0 update
+   33.0s       10            0.0          327.8      0.0      0.0      0.0      0.0 read
+   33.0s       10            0.0           84.3      0.0      0.0      0.0      0.0 update
+   34.0s       10            0.0          318.2      0.0      0.0      0.0      0.0 read
+   34.0s       10            0.0           81.8      0.0      0.0      0.0      0.0 update
+   35.0s       10            0.0          309.1      0.0      0.0      0.0      0.0 read
+   35.0s       10            0.0           79.5      0.0      0.0      0.0      0.0 update
+   36.0s       10            0.0          300.5      0.0      0.0      0.0      0.0 read
+   36.0s       10            0.0           77.2      0.0      0.0      0.0      0.0 update
+   37.0s       10            0.0          292.4      0.0      0.0      0.0      0.0 read
+   37.0s       10            0.0           75.2      0.0      0.0      0.0      0.0 update
+   38.0s       10            0.0          284.7      0.0      0.0      0.0      0.0 read
+   38.0s       10            0.0           73.2      0.0      0.0      0.0      0.0 update
+   39.0s       10            0.0          277.4      0.0      0.0      0.0      0.0 read
+   39.0s       10            0.0           71.3      0.0      0.0      0.0      0.0 update
+   40.0s       10            0.0          270.4      0.0      0.0      0.0      0.0 read
+   40.0s       10            0.0           69.5      0.0      0.0      0.0      0.0 update
+_elapsed___errors__ops/sec(inst)___ops/sec(cum)__p50(ms)__p95(ms)__p99(ms)_pMax(ms)
+   41.0s       10            0.0          263.8      0.0      0.0      0.0      0.0 read
+   41.0s       10            0.0           67.8      0.0      0.0      0.0      0.0 update
+   42.0s       10            0.0          257.6      0.0      0.0      0.0      0.0 read
+   42.0s       10            0.0           66.2      0.0      0.0      0.0      0.0 update
+   43.0s       10            0.0          251.6      0.0      0.0      0.0      0.0 read
+   43.0s       10            0.0           64.7      0.0      0.0      0.0      0.0 update
+   44.0s       10            0.0          245.9      0.0      0.0      0.0      0.0 read
+   44.0s       10            0.0           63.2      0.0      0.0      0.0      0.0 update
+   45.0s       10            0.0          240.4      0.0      0.0      0.0      0.0 read
+   45.0s       10            0.0           61.8      0.0      0.0      0.0      0.0 update
+   46.0s       10            0.0          235.2      0.0      0.0      0.0      0.0 read
+   46.0s       10            0.0           60.5      0.0      0.0      0.0      0.0 update
+   47.0s       10            0.0          230.2      0.0      0.0      0.0      0.0 read
+   47.0s       10            0.0           59.2      0.0      0.0      0.0      0.0 update
+   48.0s       10            0.0          225.4      0.0      0.0      0.0      0.0 read
+   48.0s       10            0.0           57.9      0.0      0.0      0.0      0.0 update
+   49.0s       10            0.0          220.8      0.0      0.0      0.0      0.0 read
+   49.0s       10            0.0           56.8      0.0      0.0      0.0      0.0 update
+   50.0s       10            0.0          216.4      0.0      0.0      0.0      0.0 read
+   50.0s       10            0.0           55.6      0.0      0.0      0.0      0.0 update
+_elapsed___errors__ops/sec(inst)___ops/sec(cum)__p50(ms)__p95(ms)__p99(ms)_pMax(ms)
+   51.0s       10            0.0          212.1      0.0      0.0      0.0      0.0 read
+   51.0s       10            0.0           54.5      0.0      0.0      0.0      0.0 update
+   52.0s       10            0.0          208.0      0.0      0.0      0.0      0.0 read
+   52.0s       10            0.0           53.5      0.0      0.0      0.0      0.0 update
+   53.0s       10            0.0          204.1      0.0      0.0      0.0      0.0 read
+   53.0s       10            0.0           52.5      0.0      0.0      0.0      0.0 update
+   54.0s       10            0.0          200.3      0.0      0.0      0.0      0.0 read
+   54.0s       10            0.0           51.5      0.0      0.0      0.0      0.0 update
+   55.0s       10            0.0          196.7      0.0      0.0      0.0      0.0 read
+   55.0s       10            0.0           50.6      0.0      0.0      0.0      0.0 update
+   56.0s       10            0.0          193.2      0.0      0.0      0.0      0.0 read
+   56.0s       10            0.0           49.7      0.0      0.0      0.0      0.0 update
+   57.0s       10            0.0          189.8      0.0      0.0      0.0      0.0 read
+   57.0s       10            0.0           48.8      0.0      0.0      0.0      0.0 update
+   58.0s       10            0.0          186.5      0.0      0.0      0.0      0.0 read
+   58.0s       10            0.0           47.9      0.0      0.0      0.0      0.0 update
+   59.0s       10            0.0          183.4      0.0      0.0      0.0      0.0 read
+   59.0s       10            0.0           47.1      0.0      0.0      0.0      0.0 update
+   60.0s       10            0.0          180.3      0.0      0.0      0.0      0.0 read
+   60.0s       10            0.0           46.3      0.0      0.0      0.0      0.0 update
+W260929 14:22:44.530600 65 workload/pgx_helpers.go:299  [-] 5  error setting up new connection, retrying: preparing update7: context canceled
+W260929 14:22:44.530735 60 workload/pgx_helpers.go:299  [-] 6  error setting up new connection, retrying: preparing readFieldForUpdate2: context canceled
+W260929 14:22:44.530763 56 workload/pgx_helpers.go:299  [-] 7  error setting up new connection, retrying: preparing readFieldForUpdate3: context canceled
+W260929 14:22:44.530768 57 workload/pgx_helpers.go:299  [-] 8  error setting up new connection, retrying: preparing update5: context canceled
+W260929 14:22:44.530799 58 workload/pgx_helpers.go:299  [-] 9  error setting up new connection, retrying: preparing readFieldForUpdate3: context canceled
+W260929 14:22:44.530850 63 workload/pgx_helpers.go:299  [-] 10  error setting up new connection, retrying: preparing readFieldForUpdate3: context canceled
+
+_elapsed___errors_____ops(total)___ops/sec(cum)__avg(ms)__p50(ms)__p95(ms)__p99(ms)_pMax(ms)__total
+   60.0s       10          10818          180.3      0.8      0.7      1.0      1.5    209.7  read
+
+_elapsed___errors_____ops(total)___ops/sec(cum)__avg(ms)__p50(ms)__p95(ms)__p99(ms)_pMax(ms)__total
+W260929 14:22:44.530889 61 workload/pgx_helpers.go:299  [-] 11  error setting up new connection, retrying: preparing update5: context canceled
+   60.0s       10           2781           46.3     74.3     71.3     75.5    318.8    385.9  update
+
+_elapsed___errors_____ops(total)___ops/sec(cum)__avg(ms)__p50(ms)__p95(ms)__p99(ms)_pMax(ms)__result
+W260929 14:22:44.530600 59 workload/pgx_helpers.go:299  [-] 12  error setting up new connection, retrying: preparing update5: context canceled
+   60.0s       10          13599          226.6     15.8      0.7     71.3     75.5    385.9  
