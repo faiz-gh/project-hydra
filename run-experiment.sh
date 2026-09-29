@@ -2,17 +2,26 @@
 #
 # run-experiment.sh — measure all four phases end to end.
 #
+# Run with no arguments on a terminal, this launches the full pipeline TUI
+# (pipeline/run_all.py): terraform apply CockroachDB, measure, destroy and
+# clean the Tailscale devices, then the same for PostgreSQL/Patroni, then the
+# insights. See `pipeline/run_all.py --help`.
+#
+# With arguments it measures the one engine that is currently deployed.
 # Preconditions: `terraform apply` has completed, cloud-init has finished on
-# every node, Tailscale is up on this machine, and `.env` names the gateway.
-# Everything after that is automated here.
+# every node and Tailscale is up on this machine. Everything after that is
+# automated here. DB_URI is derived from --engine (override it with
+# DB_URI_COCKROACHDB / DB_URI_POSTGRESQL in the environment or .env).
 #
 # The script is deliberately noisy and deliberately fragile: it stops at the
 # first failure rather than continuing with a testbed that is not fit to be
 # measured. Every defect this project has on record produced *plausible* output,
 # so a run that limps past a failed check is worse than no run at all.
 #
-#   ./run-experiment.sh                     # full sweep, ~75 min
+#   ./run-experiment.sh                     # full two-engine pipeline (TUI)
+#   ./run-experiment.sh --profile thesis-extended  # one engine, full sweep, ~75 min
 #   ./run-experiment.sh --smoke             # harness self-test, ~14 min
+#   ./run-experiment.sh --ask               # one engine, asks for the options
 #   ./run-experiment.sh --skip-load         # working set already loaded
 #   ./run-experiment.sh --no-chaos          # phases I-II only, no fault injection
 #   ./run-experiment.sh --engine postgresql # measure the PostgreSQL/Patroni deployment
@@ -45,7 +54,9 @@ export PYTHONUNBUFFERED=1
 
 # --- output -----------------------------------------------------------------
 
-if [ -t 1 ]; then
+# CRDBLAB_COLOR=1 keeps the colours when stdout is a pipe -- the pipeline TUI
+# reads this script's output through one and renders the colours itself.
+if [ -t 1 ] || [ "${CRDBLAB_COLOR:-0}" = "1" ]; then
   B=$'\033[1m'; R=$'\033[31m'; G=$'\033[32m'; Y=$'\033[33m'; D=$'\033[2m'; N=$'\033[0m'
 else
   B=""; R=""; G=""; Y=""; D=""; N=""
@@ -60,13 +71,19 @@ die()   { printf '\n%sFAILED:%s %s\n' "$R" "$N" "$*" >&2
           exit 1; }
 
 usage() {
-  sed -n '3,24p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '3,33p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
   exit 0
 }
-HAS_ARGS=0
-if [ $# -gt 0 ]; then
-  HAS_ARGS=1
+# No arguments on a terminal: the full two-engine pipeline, not a single run.
+# The pipeline calls this script back *with* arguments and stdin from
+# /dev/null, so it never lands here again.
+if [ $# -eq 0 ] && [ -t 0 ] && [ -t 1 ]; then
+  [ -x "$PY" ] || die "$PY not found. Run:
+    python3 -m venv .venv && .venv/bin/python -m pip install -e \".[dev]\""
+  exec "$PY" "$REPO/pipeline/run_all.py"
 fi
+
+ASK=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -75,12 +92,13 @@ while [ $# -gt 0 ]; do
     --smoke)     PROFILE="smoke"; shift ;;
     --skip-load) SKIP_LOAD=1; shift ;;
     --no-chaos)  RUN_CHAOS=0; shift ;;
+    --ask)       ASK=1; shift ;;
     -h|--help)   usage ;;
     *)           die "unknown argument: $1 (try --help)" ;;
   esac
 done
 
-if [ "$HAS_ARGS" -eq 0 ] && [ -t 0 ]; then
+if [ "$ASK" -eq 1 ] && [ -t 0 ]; then
   printf "\nInteractive Configuration:\n"
   printf "Select test profile:\n"
   printf "  1) smoke (fast self-test)\n"
@@ -193,10 +211,37 @@ step "Checking the workstation"
     python3 -m venv .venv && .venv/bin/python -m pip install -e \".[dev]\""
 ok "harness installed"
 
-[ -f "$REPO/.env" ] || die ".env not found in $REPO (copy .env.example and set DB_URI)"
-
-DB_URI="$(grep -E '^\s*DB_URI=' "$REPO/.env" | tail -1 | cut -d= -f2- | tr -d '"'"'"' ' || true)"
-[ -n "$DB_URI" ] || die "DB_URI is not set in .env"
+# DB_URI follows --engine rather than being hand-edited in .env between
+# redeploys: DB_URI_COCKROACHDB / DB_URI_POSTGRESQL (environment first, then
+# .env) if set, otherwise crdblab.config.default_db_uri(). It is exported, and
+# load_env_file() never overrides the environment, so every crdblab call below
+# sees this URI and not a stale DB_URI left in .env.
+env_value() {  # env_value <name>: environment first, then .env
+  local v="${!1:-}"
+  if [ -z "$v" ] && [ -f "$REPO/.env" ]; then
+    v="$(grep -E "^\s*$1=" "$REPO/.env" | tail -1 | cut -d= -f2- | tr -d '"'"'"' ' || true)"
+  fi
+  printf '%s' "$v"
+}
+DB_URI_VAR="DB_URI_$(printf '%s' "$ENGINE" | tr '[:lower:]' '[:upper:]')"
+DB_URI="$(env_value "$DB_URI_VAR")"
+if [ -n "$DB_URI" ]; then
+  ok "DB_URI from $DB_URI_VAR"
+else
+  DB_URI="$(PG_PASSWORD="$(env_value PG_PASSWORD)" "$PY" - "$ENGINE" <<'PYEOF'
+import os, sys
+from crdblab.config import DEFAULT_PG_PASSWORD, default_db_uri
+from crdblab.topology import DEFAULT_TOPOLOGY
+print(default_db_uri(sys.argv[1], DEFAULT_TOPOLOGY, os.environ.get("PG_PASSWORD") or DEFAULT_PG_PASSWORD))
+PYEOF
+  )" || die "could not derive DB_URI for engine $ENGINE"
+  ok "DB_URI derived for $ENGINE"
+fi
+if [ -f "$REPO/.env" ] && grep -qE '^\s*DB_URI=' "$REPO/.env"; then
+  note "ignoring DB_URI in .env; it is now derived per engine (see .env.example)"
+fi
+export DB_URI
+note "$(printf '%s' "$DB_URI" | sed -E 's|(://[^:@/]*:)[^@]*@|\1***@|')"
 
 # DB_URI is used only for `crdblab capture` and for loading the working set
 # (§3/§4) -- never for the measured phases, which resolve their own connection

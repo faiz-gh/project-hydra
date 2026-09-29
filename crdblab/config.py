@@ -181,6 +181,40 @@ def pg_direct_dsn(topology: Topology, database: str, password: str) -> str:
         f"&keepalives_count={PG_KEEPALIVE_COUNT}"
         f"&tcp_user_timeout={PG_TCP_USER_TIMEOUT_MS}"
     )
+
+
+#: The client node's HAProxy, which follows Patroni's leader. ``DB_URI`` for
+#: PostgreSQL points here rather than at pgbouncer (:6432) because it is used by
+#: psql and ``crdblab capture``, which need no startup-parameter filtering.
+PG_HAPROXY_HOSTPORT = "127.0.0.1:5000"
+
+
+def default_db_uri(engine: str, topology: Topology, password: str) -> str:
+    """``DB_URI`` for the engine currently deployed, derived rather than hand-written.
+
+    ``DB_URI`` feeds only data loading and ``crdblab capture``; the two engines
+    need different ones, and keeping it as a single hand-edited line in ``.env``
+    meant editing it between every redeploy. Both forms are the ones
+    ``.env.example`` documents:
+
+    * **cockroachdb** -- every cluster member, gateway first, each with its own
+      ``:26257`` (a single trailing port only covers hosts that omit one).
+    * **postgresql** -- the client node's HAProxy, the only endpoint that
+      follows a Patroni failover, with the ``root`` role's password.
+    """
+    if engine == "cockroachdb":
+        gateway = topology.gateway
+        ordered = [gateway] + [n for n in topology.nodes if n.host != gateway.host]
+        hosts = ",".join(f"{node.host}:{node.sql_port}" for node in ordered)
+        return f"postgresql://root@{hosts}/ycsb?sslmode=disable"
+    if engine == "postgresql":
+        return (
+            f"postgresql://root:{quote(password, safe='')}@{PG_HAPROXY_HOSTPORT}"
+            "/ycsb?sslmode=disable"
+        )
+    raise ValueError(f"unknown engine: {engine!r} (expected 'cockroachdb' or 'postgresql')")
+
+
 DEFAULT_ENV_FILE = PROJECT_ROOT / ".env"
 
 
