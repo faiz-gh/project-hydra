@@ -1,27 +1,33 @@
 #!/usr/bin/env python3
 """Replay the recorded thesis-extended experiment as a terminal UI, in minutes.
 
-The whole workflow -- provision CockroachDB, run every phase, destroy, redeploy
-as PostgreSQL/Patroni, run every phase again -- took the better part of seven
-hours of wall clock on 2026-09-11. This plays it back in a few minutes for a
-demo, and it plays back what actually happened:
+The whole workflow is one command, ``./run-experiment.sh`` (pipeline/run_all.py):
+provision CockroachDB, run every phase, tear down and free the Tailscale names,
+redeploy as PostgreSQL/Patroni, run every phase again, tear down, and draw the
+insights. For thesis-extended that is the better part of seven hours of wall
+clock. This plays it back in a few minutes for a demo, and it plays back what
+actually happened:
 
 * **The experiment output is the recorded output.** Every line under
-  ``run-experiment.sh`` comes from ``runs/_logs``, and every throughput graph is
-  drawn from the ``metrics.csv`` of the run that line reports. Nothing is
-  simulated except the passage of time.
-* **Three splices, each from the same profile and deployment:** the CockroachDB
-  run's Phase IV comes from ``chaos-dead-resume-*.log`` (the sweep's own Phase IV
-  attempt timed out on a leaseholder query and was re-run by hand); the
-  PostgreSQL run's data load comes from the thesis-profile run on the same
-  deployment, since the thesis-extended run reused that data with
-  ``--skip-load``; and the CockroachDB run's closing summary, which the aborted
-  sweep never printed, is rebuilt from its own recorded numbers. ``--as-recorded``
-  shows the logs unspliced instead.
-* **Terraform output is reconstructed, not recorded** -- no apply was logged. The
-  resource addresses are read from ``terraform/*.tf``, so the plan is this
-  project's real plan; the per-resource timings are typical values. The UI says
-  so in its caption while Terraform is on screen.
+  ``run-experiment.sh`` comes from the 2026-09-11 thesis-extended runs in
+  ``runs/_logs``, and every throughput graph is drawn from the ``metrics.csv``
+  of the run that line reports. Nothing is simulated except the passage of time.
+* **Terraform, the VM wait and the Tailscale cleanup are recorded too**, from the
+  first full pipeline run (``PIPELINE_LOG``, 2026-09-29, smoke profile).
+  Terraform does not depend on the profile, so the same 30 resources are created
+  and destroyed either way, and every step keeps its recorded duration. Cloud
+  account ids and the workstation's tailnet identity are masked.
+* **The closing insights** are the recorded ``generate_insights.sh --profile
+  thesis-extended`` render and ``crdblab analyze engine-comparison`` on the two
+  thesis-extended bench runs.
+* **Three splices within the experiment output, each from the same profile and
+  deployment:** the CockroachDB run's Phase IV comes from
+  ``chaos-dead-resume-*.log`` (the sweep's own Phase IV attempt timed out on a
+  leaseholder query and was re-run by hand); the PostgreSQL run's data load comes
+  from the thesis-profile run on the same deployment, since the thesis-extended
+  run reused that data with ``--skip-load``; and the CockroachDB run's closing
+  summary, which the aborted sweep never printed, is rebuilt from its own
+  recorded numbers. ``--as-recorded`` shows those logs unspliced instead.
 
 Usage (from the repository root)::
 
@@ -55,6 +61,14 @@ CRDB_LOG = "experiment-20260911T164025Z.log"
 CRDB_P4_LOG = "chaos-dead-resume-20260911T182028Z.log"
 PG_LOG = "experiment-20260911T084546Z.log"
 PG_LOAD_LOG = "experiment-20260911T052424Z.log"
+#: The first full pipeline run (smoke profile, 2026-09-29): the source of every
+#: terraform, VM-wait and tailscale line. Terraform does not depend on the
+#: profile, so its output is the same for a thesis-extended run.
+PIPELINE_LOG = "pipeline-20260929T134252Z.log"
+#: `generate_insights.sh --profile thesis-extended` over the runs above.
+INSIGHTS_LOG = "insights-20260928T143346Z.log"
+#: `crdblab analyze engine-comparison` on the two thesis-extended bench runs.
+COMPARISON_LOG = "engine-comparison-20260929T151755Z.log"
 
 ANSI = re.compile(r"\x1b\[([0-9;]*)m")
 
@@ -71,6 +85,7 @@ class Event:
     section: str = ""
     stage: str = ""                 # checklist id to mark active (kind=stage)
     bulk: bool = False              # a table row: may scroll very fast
+    dense: bool = False             # a terraform plan body: scrolls past as a block
     label: str = ""                 # anim / wait caption
     series: list = field(default_factory=list)   # [(x, tps)] for anim
     marks: list = field(default_factory=list)    # [(x, text)] lines emitted mid-anim
@@ -300,7 +315,6 @@ def crdb_lines(as_recorded: bool) -> list[str]:
     body.append("")
     body.append(f"\x1b[1m==> Done in {_fmt_dur(done_s)}\x1b[0m")
     body += [f"\x1b[2m      {l}\x1b[0m" for l in crdb_headlines(main, resume)]
-    body.append("\x1b[2m      next: ./generate_insights.sh   (charts, report, dashboard, summary tables)\x1b[0m")
     return body
 
 
@@ -349,6 +363,9 @@ def pg_lines(as_recorded: bool) -> list[str]:
     main = [l.replace("./generate-insights.sh", "./generate_insights.sh") for l in main]
     if as_recorded:
         return main
+    # run-experiment.sh no longer prints its "next: ./generate_insights.sh"
+    # hint: the pipeline runs the insights itself, right after the teardown.
+    main = [l for l in main if "next: ./generate_insights.sh" not in l]
     # The thesis-extended run reused the working set the thesis run had loaded on
     # the same deployment (--skip-load). After a fresh apply the load has to be
     # shown, so the real load from that run takes the place of the skip notice.
@@ -361,27 +378,8 @@ def pg_lines(as_recorded: bool) -> list[str]:
 
 
 # ----------------------------------------------------------------------------
-# terraform, reconstructed from terraform/*.tf
+# the pipeline: terraform, VM waits and tailscale from the recorded pipeline log
 # ----------------------------------------------------------------------------
-
-#: Typical HCP Terraform durations per resource type, in seconds. Not recorded.
-TF_SECONDS = {
-    "linode_instance": 38, "linode_firewall": 3,
-    "azurerm_resource_group": 12, "azurerm_virtual_network": 6, "azurerm_subnet": 5,
-    "azurerm_public_ip": 4, "azurerm_network_security_group": 4,
-    "azurerm_network_interface": 3, "azurerm_network_interface_security_group_association": 2,
-    "azurerm_linux_virtual_machine": 58,
-    "google_compute_network": 23, "google_compute_subnetwork": 14,
-    "google_compute_firewall": 12, "google_compute_instance": 19,
-}
-TF_ORDER = [  # creation waves: networks before the machines that sit on them
-    "azurerm_resource_group", "linode_firewall", "google_compute_network",
-    "azurerm_virtual_network", "azurerm_public_ip", "azurerm_network_security_group",
-    "google_compute_subnetwork", "google_compute_firewall", "azurerm_subnet",
-    "azurerm_network_interface", "azurerm_network_interface_security_group_association",
-    "linode_instance", "google_compute_instance", "azurerm_linux_virtual_machine",
-]
-
 
 def tf_resources() -> list[tuple[str, str]]:
     """``(address, type)`` for every resource the root module would create."""
@@ -401,73 +399,164 @@ def _provider(rtype: str) -> str:
     return {"linode": "Linode", "azurerm": "Azure", "google": "GCP"}.get(rtype.split("_")[0], "?")
 
 
-def tf_events(action: str, engine: str) -> list[Event]:
-    section = {"apply": f"tf-apply-{engine}", "destroy": "tf-destroy"}[action]
-    resources = tf_resources()
-    n = len(resources)
-    ev: list[Event] = []
-    L = lambda t, real=0.0, **kw: ev.append(Event("line", t, section=section, real_s=real, **kw))  # noqa: E731
-    remote = "apply" if action == "apply" else "destroy"
-    L(f"Running {remote} in HCP Terraform. Output will stream here. Pressing Ctrl-C")
-    L(f"will cancel the remote {remote} if it's still pending. If the {remote} started it")
-    L(f"will stop streaming the logs, but will not stop the {remote} running remotely.")
-    L("")
-    L(f"Preparing the remote {remote}...", 4)
-    L("")
-    L("To view this run in a browser, visit:")
-    L("https://app.terraform.io/app/lightygi/hydra/runs")
-    L("")
-    L("Waiting for the plan to start...", 6)
-    L("")
-    L("Initializing plugins and modules...", 8)
-    if action == "apply":
-        L(f"\x1b[2m# var.database_engine = \"{engine}\"\x1b[0m")
-    L("")
-    verb = "created" if action == "apply" else "destroyed"
-    sym = "\x1b[32m+\x1b[0m" if action == "apply" else "\x1b[31m-\x1b[0m"
-    L("Terraform will perform the following actions:", 5)
-    L("")
-    for address, _ in resources:
-        L(f"  {sym} {address} will be {verb}", bulk=True)
-    L("")
-    plan = f"Plan: {n} to add, 0 to change, 0 to destroy." if action == "apply" else \
-        f"Plan: 0 to add, 0 to change, {n} to destroy."
-    L(f"\x1b[1m{plan}\x1b[0m")
-    L("")
-    if action == "apply":
-        L('\x1b[1mDo you want to perform these actions in workspace "hydra"?\x1b[0m')
-    else:
-        L('\x1b[1mDo you really want to destroy all resources in workspace "hydra"?\x1b[0m')
-        L("  There is no undo. Only 'yes' will be accepted to confirm.")
-    ev.append(Event("cmd", "yes", section=section, label="  Enter a value: "))
-    L("")
+PROFILE = "thesis-extended"
+ENGINE_OF = {"CockroachDB": "cockroachdb", "PostgreSQL/Patroni": "postgresql"}
+PREFIX = {"cockroachdb": "crdb", "postgresql": "pg"}
+STEP_OF = {"preflight": "pre", "terraform plan": "plan", "terraform apply": "apply",
+           "wait for 6 VMs": "wait", "./run-experiment.sh": "run", "tailscale logout": "logout",
+           "terraform destroy": "destroy", "free tailscale names": "purge",
+           "insights & comparison": "insights"}
+HEADER = re.compile(r"^━━ (.+?)(?:  ·  (.+))?$")
+TF_DONE = re.compile(r"\.([a-z0-9]+_[a-z0-9_]+)\.[^.:\s]+: (Creation|Destruction) complete")
+TF_TICK = re.compile(r": (Still (creating|destroying)\.\.\. \[|(Creation|Destruction) complete after)")
+OK_DUR = re.compile(r"^  ok  .+\((\d+m\d\ds|\d+h\d\dm)\)$")
 
-    order = sorted(resources, key=lambda r: TF_ORDER.index(r[1]) if r[1] in TF_ORDER else 99)
-    if action == "destroy":
-        order = order[::-1]
-    word, done = ("Creating...", "Creation complete") if action == "apply" else \
-        ("Destroying...", "Destruction complete")
-    # Waves of independent resources start together; each wave waits for its slowest.
-    waves: dict = {}
-    for address, rtype in order:
-        waves.setdefault(rtype, []).append((address, rtype))
-    for rtype, items in waves.items():
-        for address, _ in items:
-            L(f"\x1b[1m{address}: {word}\x1b[0m")
-        secs = TF_SECONDS.get(rtype, 5) * (0.6 if action == "destroy" else 1)
-        if secs >= 30:
-            for s in range(10, int(secs), 10):
-                L(f"{items[0][0]}: Still {'creating' if action == 'apply' else 'destroying'}... [{s}s elapsed]", 10)
-        for k, (address, _) in enumerate(items):
-            ev.append(Event("line", f"\x1b[1m{address}: {done} after {int(secs)}s\x1b[0m",
-                            section=section, real_s=secs % 10 if k == 0 else 0.5,
-                            tf={"provider": _provider(rtype), "delta": 1 if action == "apply" else -1}))
-    L("")
-    if action == "apply":
-        L(f"\x1b[1;32mApply complete! Resources: {n} added, 0 changed, 0 destroyed.\x1b[0m")
-    else:
-        L(f"\x1b[1;32mDestroy complete! Resources: {n} destroyed.\x1b[0m")
-    L("")
+#: The recording is from a real account. What it would expose on a shared
+#: screen -- cloud account ids, the workstation's tailnet identity, the home
+#: directory -- is masked; nothing else is altered.
+MASKS = [
+    (re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"), "<subscription>"),
+    (re.compile(r"project-[0-9a-f]{8}-[0-9a-f-]+"), "<gcp-project>"),
+    (re.compile(r"/Users/[^/\s]+/Documents/projects/project-hydra/"), ""),
+    (re.compile(r"ssh-(rsa|ed25519) [A-Za-z0-9+/=]{40,}( [^\s\"]+)?"), r"ssh-\1 <public key>"),
+]
+
+
+def _mask(text: str) -> str:
+    for pattern, repl in MASKS:
+        text = pattern.sub(repl, text)
+    return text
+
+
+def _style(text: str) -> str:
+    """Re-colour a line of the (ANSI-stripped) pipeline log the way the TUI drew it."""
+    if text.startswith("━━ "):
+        return f"\x1b[1m{text}\x1b[0m"
+    if text.startswith("  ok  "):
+        return f"\x1b[32m  ok\x1b[0m  {text[6:]}"
+    if text.startswith("  !!  "):
+        return f"\x1b[33m  !!\x1b[0m  {text[6:]}"
+    if text.startswith("      "):
+        return f"\x1b[2m{text}\x1b[0m"
+    if re.match(r"(Plan:|Apply complete!)", text):
+        return f"\x1b[1m{text}\x1b[0m"
+    return text
+
+
+def pipeline_segments() -> list[dict]:
+    """The recorded pipeline log split at its ``━━ <step>  ·  <engine>`` headers."""
+    segs: list[dict] = []
+    for raw in read_log(PIPELINE_LOG):
+        text = _plain(raw)
+        m = HEADER.match(text)
+        if m and m.group(1) in STEP_OF:
+            engine = ENGINE_OF.get(m.group(2) or "", "")
+            segs.append({"step": STEP_OF[m.group(1)], "engine": engine, "header": text, "lines": []})
+        elif segs:
+            segs[-1]["lines"].append(text)
+    for seg in segs:
+        while seg["lines"] and not seg["lines"][-1].strip():
+            seg["lines"].pop()
+        ok = next((OK_DUR.match(line) for line in reversed(seg["lines"]) if OK_DUR.match(line)), None)
+        # The pipeline writes "2m12s" / "1h05m" with no space, which _dur()'s
+        # word boundary does not split, so it is read here directly.
+        seg["real_s"] = sum(int(v) * {"h": 3600, "m": 60, "s": 1}[u]
+                            for v, u in re.findall(r"(\d+)([hms])", ok.group(1))) if ok else 0.0
+    return segs
+
+
+def segment_events(seg: dict, section: str) -> list[Event]:
+    """One recorded pipeline step as events, its recorded duration spread over its ticks."""
+    ev: list[Event] = []
+    lines = [_mask(line) for line in seg["lines"]]
+    engine = seg["engine"]
+    # Terraform: time falls on the lines that mark it passing ("Still creating...
+    # [10s elapsed]", "Creation complete after 11s"). Anything else carries none.
+    ticks = [i for i, line in enumerate(lines) if TF_TICK.search(line)]
+    if not ticks:
+        after_cmd = next((i + 1 for i, line in enumerate(lines) if line.startswith("❯ ")), 0)
+        ticks = [min(after_cmd, len(lines) - 1)] if lines else []
+    per_tick = seg["real_s"] / max(1, len(ticks))
+    tick_set = set(ticks)
+    in_plan = False
+    waited = False
+    for i, line in enumerate(lines):
+        if seg["step"] == "pre" and i > 0 and lines[i - 1].startswith("❯ tailscale status"):
+            line = "100.x.y.z      workstation        you@         macOS  -"
+        if line.startswith("❯ "):
+            ev.append(Event("cmd", line[2:], section=section, engine=engine))
+            continue
+        if seg["step"] == "wait" and not waited and "cloud-init" in line:
+            ev.append(Event("wait", section=section, real_s=seg["real_s"], engine=engine,
+                            label="waiting for SSH and cloud-init on all six VMs"))
+            waited = True
+        # The plan body -- every attribute of every resource -- is shown, but
+        # scrolls past as a block, the way it does on a real screen.
+        if line.startswith("Terraform will perform the following actions"):
+            in_plan = True
+        elif line.startswith("Plan:"):
+            in_plan = False
+        tf = {}
+        m = TF_DONE.search(line)
+        if m:
+            tf = {"provider": _provider(m.group(1)), "delta": 1 if m.group(2) == "Creation" else -1}
+        real = per_tick if i in tick_set and seg["step"] != "wait" else 0.0
+        ev.append(Event("line", _style(line), section=section, real_s=real, tf=tf,
+                        bulk=in_plan or "Refresh" in line, dense=in_plan))
+    return ev
+
+
+def insights_lines() -> list[str]:
+    body = [_mask(line) for line in read_log(INSIGHTS_LOG)]
+    # The log's banner and closing paths: keep the render itself.
+    start = next(i for i, line in enumerate(body) if "==> Drawing" in _plain(line))
+    return body[start:]
+
+
+def storyboard(as_recorded: bool) -> list[Event]:
+    # Lazy, and with the repository on the path: run_all imports this module,
+    # and demo.sh runs this file as a script from wherever it is invoked.
+    if str(REPO) not in sys.path:
+        sys.path.insert(0, str(REPO))
+    from pipeline.run_all import plan_lines
+
+    ev: list[Event] = [Event("card", section="intro", real_s=0)]
+    segs = pipeline_segments()
+    ev.append(Event("cmd", "./run-experiment.sh", section="intro"))
+    setup = argparse.Namespace(profile=PROFILE, chaos=True, on_failure="ask",
+                               engine_list=["cockroachdb", "postgresql"])
+    for line in plan_lines(setup)[1:]:
+        ev.append(Event("line", f"\x1b[2m{line}\x1b[0m", section="intro"))
+    ev.append(Event("line", "", section="intro"))
+
+    for seg in segs:
+        p = PREFIX.get(seg["engine"], "")
+        key = f"{p}:{seg['step']}" if p else seg["step"]
+        ev.append(Event("stage", stage=key, section=key))
+        ev.append(Event("line", "", section=key))
+        ev.append(Event("line", _style(seg["header"]), section=key))
+        if seg["step"] == "run":
+            # The measurement itself: the recorded thesis-extended run of this engine.
+            engine = seg["engine"]
+            ev.append(Event("cmd", f"./run-experiment.sh --engine {engine} --profile {PROFILE}",
+                            section=f"{p}-setup", engine=engine))
+            recorded = crdb_lines(as_recorded) if p == "crdb" else pg_lines(as_recorded)
+            body = parse_run_log([_mask(line) for line in recorded], engine)
+            ev.extend(body)
+            took = sum(e.real_s for e in body)
+            ev.append(Event("line", _style(f"  ok  ./run-experiment.sh ({took // 3600:.0f}h"
+                                           f"{took % 3600 // 60:02.0f}m)"), section=f"{p}-end"))
+        elif seg["step"] == "insights":
+            ev.append(Event("cmd", f"./generate_insights.sh --profile {PROFILE}", section=key))
+            ev.extend(Event("line", line, section=key, real_s=0.5, bulk=True) for line in insights_lines())
+            cmp_ = read_log(COMPARISON_LOG)
+            ev.append(Event("cmd", ".venv/bin/crdblab analyze engine-comparison --crdb "
+                            f"{cmp_[0].split()[-1]} --pg {cmp_[1].split()[-1]}", section=key))
+            ev.extend(Event("line", line, section=key, bulk=True) for line in cmp_)
+            ev.append(Event("line", _style("  ok  insights & comparison"), section=key))
+        else:
+            ev.extend(segment_events(seg, key))
+    ev.append(Event("stage", stage="done", section="insights"))
     return ev
 
 
@@ -475,55 +564,34 @@ def tf_events(action: str, engine: str) -> list[Event]:
 # the storyboard
 # ----------------------------------------------------------------------------
 
-STEPS = [
-    ("tf1", "terraform apply", "database_engine = cockroachdb"),
-    ("crdb", "./run-experiment.sh", "CockroachDB, thesis-extended"),
-    ("tfd", "terraform destroy", "all 30 resources"),
-    ("tf2", "terraform apply", '-var="database_engine=postgresql"'),
-    ("pg", "./run-experiment.sh", "PostgreSQL/Patroni, thesis-extended"),
-]
+#: The pipeline's steps, as pipeline/run_all.py names them.
+PIPE_STEPS = [("plan", "terraform plan"), ("apply", "terraform apply"),
+              ("wait", "wait for 6 VMs"), ("run", "./run-experiment.sh"),
+              ("logout", "tailscale logout"), ("destroy", "terraform destroy"),
+              ("purge", "free tailscale names")]
+GROUPS = [("pre", "preflight", [])] + [
+    (p, name, [f"{p}:{k}" for k, _ in PIPE_STEPS])
+    for p, name in (("crdb", "CockroachDB"), ("pg", "PostgreSQL/Patroni"))
+] + [("insights", "insights & comparison", [])]
+TOP_STEPS = {"pre", "insights"} | {s for _, _, keys in GROUPS for s in keys}
 SUBSTAGES = [
     ("checks", "workstation & topology"), ("testbed", "testbed health"),
     ("load", "working set, 7.5M rows"), ("p1", "Phase I   network"),
     ("p2", "Phase II  benchmark"), ("p3", "Phase III partition"),
     ("p4", "Phase IV  process kill"), ("end", "validate & summary"),
 ]
+SUB_IDS = {s for s, _ in SUBSTAGES}
 
 #: Share of the playback each section gets. Long recorded phases are compressed
 #: harder than short ones; the shares were chosen so every phase is legible.
-BUDGET = {
-    "intro": 0.02,
-    "tf-apply-cockroachdb": 0.07,
-    "crdb-setup": 0.06, "crdb-p1": 0.03, "crdb-p2": 0.10, "crdb-p3": 0.07,
-    "crdb-p4": 0.07, "crdb-end": 0.03,
-    "tf-destroy": 0.05,
-    "tf-apply-postgresql": 0.06,
-    "pg-setup": 0.07, "pg-p1": 0.03, "pg-p2": 0.10, "pg-p3": 0.07,
-    "pg-p4": 0.07, "pg-end": 0.03,
-}
-
-
-def storyboard(as_recorded: bool) -> list[Event]:
-    ev: list[Event] = []
-    ev.append(Event("card", section="intro", real_s=0))
-
-    def step(sid, cmd, section, engine=""):
-        ev.append(Event("stage", stage=sid, section=section))
-        ev.append(Event("cmd", cmd, section=section, engine=engine))
-
-    step("tf1", "cd terraform && terraform apply", "tf-apply-cockroachdb")
-    ev.extend(tf_events("apply", "cockroachdb"))
-    step("crdb", "cd .. && ./run-experiment.sh --profile thesis-extended", "crdb-setup", "cockroachdb")
-    ev.extend(parse_run_log(crdb_lines(as_recorded), "cockroachdb"))
-    step("tfd", "cd terraform && terraform destroy", "tf-destroy")
-    ev.extend(tf_events("destroy", "cockroachdb"))
-    step("tf2", 'terraform apply -var="database_engine=postgresql"', "tf-apply-postgresql")
-    ev.extend(tf_events("apply", "postgresql"))
-    step("pg", "cd .. && ./run-experiment.sh --profile thesis-extended --engine postgresql",
-         "pg-setup", "postgresql")
-    ev.extend(parse_run_log(pg_lines(as_recorded), "postgresql"))
-    ev.append(Event("stage", stage="done", section="pg-end"))
-    return ev
+BUDGET = {"intro": 0.03, "pre": 0.01, "insights": 0.04}
+for _p in ("crdb", "pg"):
+    BUDGET.update({
+        f"{_p}:plan": 0.02, f"{_p}:apply": 0.045, f"{_p}:wait": 0.012, f"{_p}:run": 0.002,
+        f"{_p}-setup": 0.06, f"{_p}-p1": 0.03, f"{_p}-p2": 0.095, f"{_p}-p3": 0.065,
+        f"{_p}-p4": 0.065, f"{_p}-end": 0.025,
+        f"{_p}:logout": 0.006, f"{_p}:destroy": 0.035, f"{_p}:purge": 0.008,
+    })
 
 
 def schedule(events: list[Event], total_s: float) -> None:
@@ -531,11 +599,11 @@ def schedule(events: list[Event], total_s: float) -> None:
     fixed = {"line": 0.035, "cmd": 0.0, "stage": 0.0, "card": 3.5, "tf": 0.0}
     for e in events:
         if e.kind == "cmd":
-            e.playback = 0.4 + 0.03 * len(e.text)
+            e.playback = min(1.6, 0.4 + 0.02 * len(e.text))
         elif e.kind in ("anim", "wait"):
             e.playback = 0.8
         else:
-            e.playback = 0.006 if e.bulk else fixed.get(e.kind, 0.03)
+            e.playback = 0.0015 if e.dense else 0.006 if e.bulk else fixed.get(e.kind, 0.03)
     by_section: dict = {}
     for e in events:
         by_section.setdefault(e.section, []).append(e)
@@ -604,8 +672,11 @@ class Screen:
         self.total_s = total_s
         self.captions = captions
         self.log: list[str] = []
-        self.stage = ""
+        self.stage = ""                  # the pipeline step playing now, e.g. "crdb:apply"
+        self.sub = ""                    # its run-experiment.sh substage, e.g. "crdb:p2"
         self.done_stages: set[str] = set()
+        self.step_start: dict = {}       # step -> recorded_s when it began
+        self.step_took: dict = {}        # step -> recorded seconds it took
         self.recorded_s = 0.0
         self.playback_start = time.monotonic()
         self.paused_for = 0.0
@@ -690,42 +761,76 @@ class Screen:
     def _title(self, w: int) -> None:
         self.put(0, 0, " " * w, self.C["bar"])
         dot = self.G["pending"]
-        self.put(0, 1, f"project-hydra  {dot}  thesis-extended  {dot}  replay of the recorded runs", self.C["bar"] | curses.A_BOLD)
         rec = int(self.recorded_s)
         right = (f"recorded time {rec // 3600}h {rec % 3600 // 60:02d}m {rec % 60:02d}s   "
                  f"playback {self.elapsed():5.0f}s   speed x{self.speed:g} ")
+        left = f"project-hydra  {dot}  thesis-extended  {dot}  replay of the recorded runs"
+        self.put(0, 1, left[: max(0, w - len(right) - 3)], self.C["bar"] | curses.A_BOLD)
         self.put(0, max(0, w - len(right)), right, self.C["bar"])
 
     def elapsed(self) -> float:
         return time.monotonic() - self.playback_start - self.paused_for
 
     def _checklist(self, y0: int, x0: int, width: int, height: int) -> None:
-        y = y0 + 1
-        for n, (sid, name, detail) in enumerate(STEPS, 1):
-            active = self.stage == sid or self.stage.startswith(sid + ":")
-            done = sid in self.done_stages
-            G = self.G
-            mark, attr = (G["done"], self.C["green"]) if done else ((G["active"], self.C["yellow"] | curses.A_BOLD) if active else (G["pending"], self.C["grey"]))
-            self.put(y, x0 + 1, mark, attr)
-            self.put(y, x0 + 3, f"{n}. {name}", curses.A_BOLD if active else (0 if done else self.C["grey"]))
-            y += 1
-            engine_colour = self.C["crdb"] if sid in ("tf1", "crdb") else self.C["pg"] if sid in ("tf2", "pg") else self.C["grey"]
-            self.put(y, x0 + 6, detail[: width - 7], engine_colour)
-            y += 1
-            if sid in ("crdb", "pg"):
-                prefix = "crdb" if sid == "crdb" else "pg"
-                for sub, label in SUBSTAGES:
-                    key = f"{prefix}:{sub}"
-                    s_active, s_done = self.stage == key, key in self.done_stages
-                    mark = G["done"] if s_done else (G["sub"] if s_active else " ")
-                    a = self.C["green"] if s_done else (self.C["yellow"] | curses.A_BOLD if s_active else self.C["grey"])
-                    self.put(y, x0 + 6, f"{mark} {label}"[: width - 7], a)
-                    y += 1
-            y += 1
-            if y >= y0 + height:
+        """The pipeline's steps, grouped by engine, as pipeline/run_all.py draws them.
+
+        An engine's group is collapsed to one line until it starts and once it
+        has finished, so the whole pipeline fits a 28-row terminal.
+        """
+        G, y = self.G, y0 + 1
+        for gid, name, keys in GROUPS:
+            if y >= y0 + height - 1:
                 break
+            if not keys:
+                y = self._step_row(gid, name, y, x0 + 1, width) + 1
+                continue
+            colour = self.C[gid]
+            done = all(k in self.done_stages for k in keys)
+            touched = done or any(k == self.stage or k in self.done_stages for k in keys)
+            if done or not touched:
+                mark, attr = (G["done"], self.C["green"]) if done else (G["pending"], self.C["grey"])
+                self.put(y, x0 + 1, mark, attr)
+                took = sum(self.step_took.get(k, 0.0) for k in keys)
+                self.put(y, x0 + 3, name, colour | (curses.A_BOLD if done else 0))
+                if done:
+                    self._took(y, took, width)
+                y += 2
+                continue
+            self.put(y, x0 + 1, name, colour | curses.A_BOLD)
+            y += 1
+            for key, (_, title) in zip(keys, PIPE_STEPS):
+                y = self._step_row(key, title, y, x0 + 3, width)
+                if key.endswith(":run") and key == self.stage:
+                    prefix = key.split(":")[0]
+                    for sub, label in SUBSTAGES:
+                        sk = f"{prefix}:{sub}"
+                        s_active, s_done = self.sub == sk, sk in self.done_stages
+                        mark = G["done"] if s_done else (G["sub"] if s_active else " ")
+                        a = self.C["green"] if s_done else (self.C["yellow"] | curses.A_BOLD if s_active else self.C["grey"])
+                        self.put(y, x0 + 7, f"{mark} {label}"[: width - 8], a)
+                        y += 1
+            y += 1
         for yy in range(y0, y0 + height):
             self.put(yy, x0 + width - 1, self.G["vline"], self.C["grey"])
+
+    def _step_row(self, key: str, title: str, y: int, x: int, width: int) -> int:
+        G = self.G
+        done, active = key in self.done_stages, key == self.stage
+        mark, attr = (G["done"], self.C["green"]) if done else (
+            (G["active"], self.C["yellow"] | curses.A_BOLD) if active else (G["pending"], self.C["grey"]))
+        self.put(y, x, mark, attr)
+        self.put(y, x + 2, title[: width - x - 11],
+                 curses.A_BOLD if active else (0 if done else self.C["grey"]))
+        if done:
+            self._took(y, self.step_took.get(key, 0.0), width)
+        elif active:
+            self._took(y, self.recorded_s - self.step_start.get(key, self.recorded_s), width)
+        return y + 1
+
+    def _took(self, y: int, seconds: float, width: int) -> None:
+        s = int(seconds)
+        t = f"{s // 3600}h{s % 3600 // 60:02d}m" if s >= 3600 else f"{s // 60}m{s % 60:02d}s"
+        self.put(y, width - len(t) - 2, t, self.C["grey"])
 
     def _terminal(self, y0: int, x0: int, width: int, height: int) -> None:
         width -= 2
@@ -809,12 +914,12 @@ class Screen:
                 fill = int(bar_w * count / total)
                 self.put(y, x0 + 2, f"{name:<7}", curses.A_BOLD)
                 self.bar(y, x0 + 10, bar_w, count / total, "cyan")
-                word = "remaining" if self.stage == "tfd" else "created"
+                word = "remaining" if self.stage.endswith(":destroy") else "created"
                 self.put(y, x0 + 11 + bar_w, f"{count:>2}/{total} {word}", self.C["grey"])
                 y += 1
             if self.captions:
                 self.put(y0 + height - 1, x0 + 2,
-                         "terraform output reconstructed from terraform/*.tf - timings typical, not recorded",
+                         "terraform output recorded 2026-09-29, smoke pipeline run (profile-independent)",
                          self.C["grey"])
         else:
             self.put(y0 + 2, x0 + 2, p.get("label", ""), self.C["grey"])
@@ -878,7 +983,7 @@ class Screen:
 
     def run(self) -> None:
         for e in self.events:
-            if self.skip_to_next_step and not (e.kind == "stage" and "." not in e.stage and ":" not in e.stage and e.stage != "done"):
+            if self.skip_to_next_step and not (e.kind == "stage" and e.stage in TOP_STEPS):
                 self._apply_instant(e)
                 continue
             self.skip_to_next_step = False
@@ -900,24 +1005,39 @@ class Screen:
 
     def _stage(self, stage: str) -> None:
         if stage == "done":
-            self.done_stages.update(s for s, _, _ in STEPS)
-            self.done_stages.update(f"{p}:{s}" for p in ("crdb", "pg") for s, _ in SUBSTAGES)
+            self._finish_step()
             self.stage = ""
             return
-        if self.stage:
-            top_old = self.stage.split(":")[0]
-            top_new = stage.split(":")[0]
-            if ":" in self.stage or top_old != top_new:
-                self.done_stages.add(self.stage)
-            if top_old != top_new:
-                self.done_stages.add(top_old)
+        prefix, _, part = stage.partition(":")
+        if part in SUB_IDS:            # a run-experiment.sh section within "<p>:run"
+            if self.sub and self.sub != stage:
+                self.done_stages.add(self.sub)
+            self.sub = stage
+            return
+        self._finish_step()
         self.stage = stage
-        if stage in ("tf1", "tf2", "tfd"):
-            label = {"tf1": "provisioning 5 nodes + 1 client across Linode, Azure and GCP",
-                     "tf2": "re-provisioning every node with database_engine = postgresql",
-                     "tfd": "tearing the CockroachDB deployment down"}[stage]
-            self.tf_counts = {k: (self.tf_totals[k] if stage == "tfd" else 0) for k in self.tf_totals}
-            self.panel = {"kind": "tf", "label": label}
+        self.step_start[stage] = self.recorded_s
+        name = {"crdb": "CockroachDB", "pg": "PostgreSQL/Patroni"}.get(prefix, "")
+        if part == "apply":
+            self.tf_counts = dict.fromkeys(self.tf_totals, 0)
+            self.panel = {"kind": "tf", "label": f"provisioning {name}: 5 nodes + 1 client "
+                                                 "across Linode, Azure and GCP"}
+        elif part == "destroy":
+            self.tf_counts = dict(self.tf_totals)
+            self.panel = {"kind": "tf", "label": f"tearing the {name} deployment down"}
+        elif part in ("plan", "logout", "purge") or stage in ("pre", "insights"):
+            label = {"plan": f"planning {name}: terraform plan -out plan.out",
+                     "logout": "every VM logs itself out of the tailnet",
+                     "purge": "Tailscale API: delete the six devices, verify none remain"}
+            self.panel = {"kind": "idle", "label": label.get(part, "")}
+
+    def _finish_step(self) -> None:
+        if self.stage:
+            self.done_stages.add(self.stage)
+            self.step_took[self.stage] = self.recorded_s - self.step_start.get(self.stage, self.recorded_s)
+        if self.sub:
+            self.done_stages.add(self.sub)
+            self.sub = ""
 
     def _tf_count(self, e: Event) -> None:
         if e.tf:
@@ -933,9 +1053,9 @@ class Screen:
             ("Project Hydra", curses.A_BOLD),
             ("CockroachDB vs PostgreSQL/Patroni on a five-node, three-cloud testbed", 0),
             ("", 0),
-            ("Replaying the recorded thesis-extended runs of 2026-09-11:", self.C["grey"]),
-            ("provision, measure, tear down, redeploy, measure again.", self.C["grey"]),
-            ("Every experiment line and throughput graph is from the recorded runs.", self.C["grey"]),
+            ("One command: provision, measure, tear down, redeploy, measure again, chart.", self.C["grey"]),
+            ("Experiment output and throughput graphs: the thesis-extended runs of 2026-09-11.", self.C["grey"]),
+            ("Terraform and Tailscale output: the recorded pipeline run of 2026-09-29.", self.C["grey"]),
         ]
         end = time.monotonic() + e.playback / self.speed
         while time.monotonic() < end and not self.skip_to_next_step:
@@ -1024,7 +1144,8 @@ def play_plain(events: list[Event], speed: float) -> None:
     out = sys.stdout
     for e in events:
         if e.kind == "card":
-            out.write("\n\x1b[1mProject Hydra\x1b[0m — replaying the recorded thesis-extended runs\n\n")
+            out.write("\n\x1b[1mProject Hydra\x1b[0m — replaying the recorded pipeline and "
+                      "thesis-extended runs\n\n")
         elif e.kind == "cmd":
             out.write(e.label or "\x1b[32m❯\x1b[0m ")
             for ch in e.text:
@@ -1068,10 +1189,11 @@ def main(argv: list[str] | None = None) -> int:
                         help="draw the UI with plain ASCII only, for fonts missing box and "
                              "block characters")
     parser.add_argument("--no-captions", action="store_true",
-                        help="hide the caption marking Terraform output as reconstructed")
+                        help="hide the caption naming the run Terraform output was recorded in")
     args = parser.parse_args(argv)
 
-    missing = [n for n in (CRDB_LOG, CRDB_P4_LOG, PG_LOG, PG_LOAD_LOG) if not (LOGS / n).exists()]
+    missing = [n for n in (CRDB_LOG, CRDB_P4_LOG, PG_LOG, PG_LOAD_LOG, PIPELINE_LOG,
+                           INSIGHTS_LOG, COMPARISON_LOG) if not (LOGS / n).exists()]
     if missing:
         print(f"missing recorded logs under {LOGS}: {', '.join(missing)}", file=sys.stderr)
         return 1

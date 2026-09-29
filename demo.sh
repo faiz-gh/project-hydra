@@ -2,10 +2,12 @@
 #
 # demo.sh — replay the recorded thesis-extended experiment as a terminal UI.
 #
-# Provision CockroachDB, run all four phases, destroy, redeploy as
-# PostgreSQL/Patroni, run them again: roughly five hours of recorded wall clock
-# played back in about four minutes. Experiment output and throughput graphs are
-# the recorded runs; Terraform output is reconstructed from terraform/*.tf.
+# The full pipeline -- one ./run-experiment.sh: provision CockroachDB, run all
+# four phases, destroy and free the Tailscale names, redeploy as
+# PostgreSQL/Patroni, run them again, destroy, draw the insights -- roughly seven
+# hours of recorded wall clock played back in about four minutes. Experiment
+# output and throughput graphs are the recorded thesis-extended runs; Terraform
+# and Tailscale output is the recorded pipeline run of 2026-09-29.
 #
 #   ./demo.sh                 # ~4 minutes, full-screen (needs >= 90x28; 140x42 looks best)
 #   ./demo.sh --minutes 3

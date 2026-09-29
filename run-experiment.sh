@@ -644,7 +644,12 @@ try_each_host() {  # try_each_host <description> <command-template>
   for uri in "${DB_CANDIDATES[@]}"; do
     cmd="${template//$URI_PLACEHOLDER/$uri}"
     out="$(remote "$CL_USER" "$CL_HOST" "$cmd")" && { printf '%s' "$out"; return 0; }
-    note "$desc against $(printf '%s' "$uri" | sed -E 's|^[a-z]+://[^@]*@||; s|[:/?].*$||') failed, trying next host"
+    # To stderr: callers capture stdout as the command's *result* (count_rows
+    # does), so a note there becomes part of the row count. It did, on
+    # experiment-20260929T132424Z.log -- the first host failed transiently, the
+    # next answered 125000, and the capture read "...trying next host\n125000",
+    # which is not a number, so a healthy load was reported as a failure.
+    note "$desc against $(printf '%s' "$uri" | sed -E 's|^[a-z]+://[^@]*@||; s|[:/?].*$||') failed, trying next host" >&2
   done
   return 1
 }
