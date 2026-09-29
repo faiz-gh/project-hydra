@@ -1,10 +1,4 @@
-"""Tests for the node_exporter poller in crdblab/core/hardware_metrics.py.
-
-node_exporter exposes raw counters, not rates, so every rate this module
-reports depends on differencing two scrapes -- these tests pin the exact
-formulas and the "no prior scrape yet" edge case (D5: an unmeasured quantity
-must never be indistinguishable from one measured as zero).
-"""
+"""Tests for the node_exporter poller in crdblab/core/hardware_metrics.py."""
 
 from __future__ import annotations
 
@@ -19,10 +13,8 @@ from crdblab.topology import Node
 
 _NODE = Node("n", "h", "ubuntu", "gcp", "us-east1", "cloud=gcp,region=us-east1")
 
-#: Two scrapes of the same node, five seconds apart, with known deltas.
-#: `lo`'s counters jump by a huge amount between the two bodies so that a
-#: rate calculation that wrongly includes it is unmistakably wrong rather
-#: than merely off by a rounding error.
+#: Two scrapes of one node, 5 s apart. `lo` jumps hugely, so wrongly including
+#: loopback in the network rate is unmistakable.
 _BODY_1 = """\
 # HELP node_cpu_seconds_total Seconds the CPUs spent in each mode.
 # TYPE node_cpu_seconds_total counter
@@ -68,7 +60,7 @@ class _FakeResponse:
     def read(self) -> bytes:
         return self._body
 
-    def __enter__(self) -> "_FakeResponse":
+    def __enter__(self) -> _FakeResponse:
         return self
 
     def __exit__(self, *exc) -> bool:

@@ -1,42 +1,13 @@
 """Run the RTO probe on the client node and read its observations back.
 
-The probe measures how long the database could not serve a write. Where it runs
-from is therefore part of the measurement, not an implementation detail. It used
-to run in the harness process on the operator's workstation, and that cost the
-figure twice over:
+The probe runs on ``crdb-client-1`` so each canary write pays only the
+client-to-cluster round trip, and so a workstation network hiccup cannot be
+mistaken for a database outage. The same :mod:`crdblab.core.rto_probe` code is
+copied over and run with ``python3 -m``.
 
-* **Resolution.** Every canary write carried a workstation-to-cluster round trip
-  -- 332 ms median over Tailscale on this testbed -- so a pool of eight workers
-  achieved 21.4 writes a second against the 500 the profile dispatched, and the
-  probe could not resolve an interruption shorter than 64 ms. The nominal
-  ``probe_interval_s`` of 2 ms was never the binding constraint; the operator's
-  link was.
-* **Attribution.** A workstation-side network hiccup inside the fault window is
-  indistinguishable from a cluster-side outage. The probe is supposed to be an
-  independent witness to the *database's* availability, and a witness sitting on
-  a domestic uplink is not independent of it.
-
-Running the probe on ``crdb-client-1`` -- the dedicated generator node, already a
-Tailscale peer of every cluster member and already the machine the workload is
-driven from -- leaves the resolution bounded by the cost of a quorum write
-divided by the worker count, which is the bound the design intends.
-
-**It is the same code.** :mod:`crdblab.core.rto_probe` is copied to the client
-node and executed there with ``python3 -m``; nothing is reimplemented for the
-remote case. A second implementation would be a second thing to keep in step
-with the analysis that reads its output, and two copies of one measurement
-drifting apart is the failure this project exists to rule out.
-
-**The two clocks are reconciled by measurement, not assumption.** The agent
-reports offsets on its own monotonic clock from its own epoch. Both epochs are
-also stamped in UTC, and the conversion between them is their difference. What
-makes that legitimate is that both machines run chrony and
-``preflight.check_clock_offset`` asserts the NTP offset of the client node
-before the run proceeds -- 0.01 ms measured against a 250 ms limit. The residual
-offset is recorded alongside the converted attempts as the uncertainty on the
-conversion, so the number in the run directory carries its own error bar. This
-is D5: a clock whose relationship to the others is stated rather than measured
-is how a fault time comes to be drawn against the wrong part of a series.
+The agent reports offsets from its own epoch; they are rebased onto the
+harness clock by the difference between the two epochs' UTC stamps. That is
+valid because pre-flight asserts the client node's NTP offset first.
 """
 
 from __future__ import annotations
@@ -44,7 +15,6 @@ from __future__ import annotations
 import json
 import subprocess
 import threading
-import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -63,16 +33,10 @@ from .rto_probe import (
     summarise,
 )
 
-#: Where the agent's copy of the package lives on the client node. Under /tmp
-#: because it is a copy of code that is versioned here, not state: it is
-#: rewritten from this checkout before every run, so a stale copy from an
-#: earlier revision can never be the thing that runs.
+#: Agent install location on the client node, rewritten from this checkout every run.
 AGENT_ROOT = "/tmp/crdblab-probe-agent"
 
-#: The only files the agent needs. `rto_probe` imports the standard library and
-#: `recorder` (itself standard-library only), plus `psycopg` at connect time.
-#: Keeping this list explicit rather than shipping the whole package is what
-#: keeps the agent's dependency surface small enough to state in one sentence.
+#: The only files the agent needs (stdlib plus ``psycopg``).
 AGENT_FILES = (
     "crdblab/__init__.py",
     "crdblab/core/__init__.py",
@@ -90,12 +54,10 @@ def _parse_utc(stamp: str) -> datetime:
 
 
 def check_agent_prerequisites(node: Node) -> tuple[bool, str]:
-    """Can the client node run the probe at all?
+    """Check the client node can run the probe (python3 with ``psycopg``).
 
-    Checked before the measurement rather than discovered during it: a probe
-    that fails to start mid-run costs the whole chaos run, and an agent that
-    cannot import ``psycopg`` fails at its first write rather than at launch,
-    which would look like a total outage from the first sample onward.
+    Checked up front: an agent that cannot import ``psycopg`` would otherwise
+    look like a total outage from the first sample.
     """
     result = ssh.run(
         node,
@@ -112,12 +74,8 @@ def check_agent_prerequisites(node: Node) -> tuple[bool, str]:
 
 
 def install_agent(node: Node, package_root: Path) -> None:
-    """Copy this revision of the probe onto the client node.
-
-    Copied every run rather than provisioned once by cloud-init: the agent must
-    be the code in this working tree, so that a run's observations are
-    attributable to the same git revision the manifest records.
-    """
+    """Copy this checkout's probe code onto the client node, every run, so the
+    agent matches the git revision the manifest records."""
     files = [package_root / name for name in AGENT_FILES]
     missing = [str(f) for f in files if not f.is_file()]
     if missing:
@@ -143,17 +101,9 @@ def install_agent(node: Node, package_root: Path) -> None:
 
 
 class RemoteRtoProbe:
-    """The probe, running on ``node``, presented as the local one.
+    """The probe running on ``node``, with the same interface as ``RtoProbe``.
 
-    Exposes the same surface :class:`crdblab.core.rto_probe.RtoProbe` does where
-    :mod:`crdblab.phases.p4_chaos` touches it -- ``attempts``, ``summary()``,
-    ``rto()``, ``error``, and the context-manager protocol -- so the phase does
-    not branch on where the probe runs.
-
-    Like the local probe, it never raises out of itself into the run: a probe
-    that could abort the measurement it is observing would be a new failure mode
-    for the phase. Anything fatal lands in :attr:`error` for the caller to
-    record.
+    Never raises into the run it observes; fatal problems land in :attr:`error`.
     """
 
     def __init__(
@@ -181,8 +131,7 @@ class RemoteRtoProbe:
         self.workers = int(workers)
         self.statement_timeout_ms = int(statement_timeout_ms)
         self.connect_timeout_s = float(connect_timeout_s)
-        #: The harness's own clock zero, and the UTC instant it corresponds to.
-        #: Every offset the agent reports is rebased onto this pair.
+        #: Harness clock zero and its UTC instant; agent offsets are rebased onto it.
         self.epoch_monotonic = float(epoch_monotonic)
         self.epoch_utc = epoch_utc
         self.log_path = log_path
@@ -190,12 +139,9 @@ class RemoteRtoProbe:
         self.attempts: list[ProbeAttempt] = []
         self.error: str | None = None
         #: Seconds to add to an agent offset to place it on the harness clock.
-        #: Measured from the two epochs, not assumed to be zero.
         self.epoch_skew_s: float | None = None
         self.agent_epoch_utc: str | None = None
-        #: What the agent computed about itself, kept beside -- never instead of
-        #: -- the summary this side derives from the attempts. Two summaries of
-        #: one series that disagree is information.
+        #: The agent's own summary, kept beside the one derived here for comparison.
         self.agent_summary: dict[str, Any] | None = None
         self.ticks = 0
         self.dispatch_saturation = 0
@@ -208,8 +154,6 @@ class RemoteRtoProbe:
         self._lock = threading.Lock()
         self._log_handle = None
 
-    # --- lifecycle --------------------------------------------------------
-
     def _remote_command(self) -> str:
         dsn = self.dsn.replace("'", "'\\''")
         return (
@@ -221,16 +165,14 @@ class RemoteRtoProbe:
             f"--duration-s {self.duration_s:.3f}"
         )
 
-    def start(self) -> "RemoteRtoProbe":
+    def start(self) -> RemoteRtoProbe:
         install_agent(self.node, self.package_root)
         if self.log_path is not None:
             self._log_handle = open(self.log_path, "w")
         self._proc = subprocess.Popen(
             ssh.build_command(self.node, self._remote_command()),
             stdout=subprocess.PIPE,
-            # Kept separate, unlike `ssh.StreamingRemote`, which merges them.
-            # The agent's stdout is a data stream; a diagnostic interleaved into
-            # it would be an unparseable observation.
+            # stdout is a data stream, so stderr is kept apart from it.
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
@@ -259,9 +201,7 @@ class RemoteRtoProbe:
             try:
                 payload = json.loads(line)
             except ValueError:
-                # Not an observation -- an SSH banner, a warning from the remote
-                # shell. Dropped rather than guessed at; the agent writes
-                # diagnostics to stderr, which is captured separately.
+                # Not an observation (e.g. a shell warning); diagnostics go to stderr.
                 continue
             if not isinstance(payload, dict):
                 continue
@@ -295,9 +235,7 @@ class RemoteRtoProbe:
         summary = payload.get("summary")
         if isinstance(summary, dict):
             self.agent_summary = summary
-            # The dispatcher's own counters are only observable inside the
-            # agent; they describe the instrument, not the database, so they are
-            # carried across rather than recomputed.
+            # Dispatcher counters are only observable inside the agent.
             self.ticks = int(summary.get("ticks") or 0)
             self.dispatch_saturation = int(summary.get("dispatch_saturation") or 0)
             self.ticks_spaced_out = int(summary.get("ticks_spaced_out") or 0)
@@ -306,9 +244,7 @@ class RemoteRtoProbe:
         with self._lock:
             skew = self.epoch_skew_s
         if skew is None:
-            # An attempt before the epoch line cannot be placed on the run's
-            # clock. Dropping it is the honest outcome: a guessed origin is
-            # exactly the error the two-clock reconciliation exists to prevent.
+            # Cannot be placed on the run clock before the agent reports its epoch.
             return
         try:
             attempt = ProbeAttempt(
@@ -328,8 +264,7 @@ class RemoteRtoProbe:
     def stop(self, timeout_s: float = 20.0) -> None:
         proc = self._proc
         if proc is not None and proc.poll() is None:
-            # SIGTERM lets the agent's context manager close its pool and emit
-            # its stop line; the kill is the fallback if it does not.
+            # SIGTERM lets the agent flush its stop line; kill is the fallback.
             proc.terminate()
             try:
                 proc.wait(timeout=timeout_s)
@@ -345,32 +280,25 @@ class RemoteRtoProbe:
             tail = "; ".join(self._stderr[-3:]) or "no output on stderr"
             self.error = f"the probe agent produced no observations ({tail})"
 
-    def __enter__(self) -> "RemoteRtoProbe":
+    def __enter__(self) -> RemoteRtoProbe:
         try:
             return self.start()
-        except BaseException as exc:  # noqa: BLE001
+        except BaseException as exc:
             self.error = f"{type(exc).__name__}: {exc}"
             return self
 
     def __exit__(self, *exc) -> None:
         try:
             self.stop()
-        except BaseException as stop_exc:  # noqa: BLE001
+        except BaseException as stop_exc:
             self.error = self.error or f"{type(stop_exc).__name__}: {stop_exc}"
-
-    # --- derived quantities ----------------------------------------------
 
     def rows(self):
         return (attempt.to_row() for attempt in self.attempts)
 
     def summary(self) -> dict[str, Any]:
-        """Derived here from the attempts, as the local probe's is.
-
-        Deliberately not the agent's own summary: every published figure in this
-        project is re-derived from the observations rather than trusted from
-        whatever computed them first. The agent's version is kept alongside
-        under ``agent_summary`` so the two can be compared.
-        """
+        """Summary re-derived from the attempts; the agent's own is kept under
+        ``agent_summary`` for comparison."""
         summary = summarise(
             self.attempts,
             ticks=self.ticks,

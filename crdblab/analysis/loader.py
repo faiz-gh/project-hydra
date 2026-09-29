@@ -1,30 +1,9 @@
-"""Canonical entry point to a completed run.
+"""The only way analysis code reads a completed run.
 
-Every analysis module in this package reads its data through :func:`load_run`
-and through no other route. Three properties are enforced here rather than left
-to each caller's discipline, because each corresponds to a way the legacy
-pipeline went wrong.
-
-**A run is addressed by identity, not by path to a CSV.** ``metrics.csv`` alone
-does not say which code produced it, against which profile, or on a server
-started with which arguments. The legacy figures were traceable to a filename
-and nothing else, which is why a fifteen-fold difference in block cache between
-the two phases being compared could sit unnoticed in the results chapter (D9).
-A run without a manifest is refused.
-
-**Validation gates analysis.** :func:`load_run` runs the full check suite from
-:mod:`crdblab.analysis.validation` and raises unless it passes. Analysing an
-unvalidated run requires saying so explicitly, in code, at the call site. The
-legacy pipeline's defining failure was not that its numbers were unchecked but
-that two scripts silently disagreed about them: one filtered the symptom of a
-cumulative row leaking into the sample stream, the other consumed it (D3).
-
-**Aggregation policy is applied in one place.** Throughput is summed across
-operation types; latency distributions are never pooled across them. Both rules
-live in :meth:`Run.ticks` and :meth:`Run.latency_by_op` so that no analysis
-module can quietly choose otherwise -- the legacy code averaged the read and
-write rates, halving reported throughput, while separately averaging their
-quantiles into a number that was a quantile of nothing (D1).
+:func:`load_run` refuses a run without a manifest, a run that fails
+validation, and a run whose pre-flight failed. Aggregation policy lives here
+too: throughput is summed across operation types, and latency is never pooled
+across them.
 """
 
 from __future__ import annotations
@@ -53,9 +32,7 @@ class RunLoadError(RuntimeError):
 class Run:
     """One measurement run, loaded and checked.
 
-    ``metrics`` is the long-format table exactly as written: one row per
-    (interval, operation type). It is deliberately *not* pre-aggregated, so that
-    every analysis states its own aggregation in the open.
+    ``metrics`` is the long-format table as written, one row per (interval, op).
     """
 
     path: Path
@@ -80,12 +57,7 @@ class Run:
 
     @property
     def engine(self) -> str:
-        """"cockroachdb" or "postgresql". Defaults for runs predating the field.
-
-        A run written before ``Manifest.engine`` existed has no such key, and
-        every one of those runs was a CockroachDB run -- the flag that lets
-        ``--engine postgresql`` be requested at all didn't exist yet either.
-        """
+        """"cockroachdb" or "postgresql"; older runs without the field were CockroachDB."""
         return str(self.manifest.get("engine") or "cockroachdb")
 
     @property
@@ -98,13 +70,7 @@ class Run:
 
     @property
     def server_command(self) -> str | None:
-        """How the server under test was started, from the manifest notes.
-
-        Recorded by ``preflight.capture_server_config`` because the run manifest
-        previously described the client side in full and the server side not at
-        all, which is the reason a block-cache asymmetry between the baseline and
-        the cluster was attributed to replication cost (D9).
-        """
+        """How the server under test was started, from the manifest notes."""
         for note in self.manifest.get("notes", []) or []:
             if " server: " in note:
                 return note.split(" server: ", 1)[1]
@@ -112,12 +78,7 @@ class Run:
 
     @property
     def records_wall_clock(self) -> bool:
-        """Whether the metrics table carries the harness clock alongside elapsed.
-
-        False for schema 2.0 runs, which recorded only the generator's own
-        ``elapsed_s``. Anything that must place a harness-scheduled event on the
-        same axis as throughput has to consult this before doing so.
-        """
+        """Whether the metrics carry the harness clock (``wall_offset_s``); schema 2.0 runs do not."""
         return (
             "wall_offset_s" in self.metrics.columns
             and self.metrics["wall_offset_s"].notna().any()
@@ -127,17 +88,9 @@ class Run:
     def ticks(self, warmup_s: float = 0.0) -> pd.DataFrame:
         """Fold the long table to one row per measurement interval.
 
-        Throughput is **summed** across operation types: read and write rates are
-        components of one offered load, not repeated measurements of it. The
-        cumulative error counter is taken as the **maximum**, never summed, since
-        each operation type reports the same running total.
-
-        A frequency-weighted median, ``sum(share_o * p50_o)``, is carried
-        alongside. It is the only defensible scalar summary of latency across a
-        mixed workload -- the mean of a read p50 and a write p50 is a quantile of
-        no distribution -- and it is the quantity Little's law compares against.
-        It is named as a weighted blend, not as "the p50", so that no figure can
-        present it as one.
+        Throughput is summed across operation types; the error counter takes the
+        maximum. ``weighted_p50_ms`` is a throughput-weighted blend of per-op
+        medians (not itself a median), used for Little's law.
         """
         work = self.metrics
         if warmup_s:
@@ -165,11 +118,9 @@ class Run:
         quantiles: Iterable[str] = QUANTILES,
         warmup_s: float = 0.0,
     ) -> pd.DataFrame:
-        """Mean of each per-interval quantile, kept separate per operation type.
+        """Mean of each per-interval quantile, per operation type.
 
-        Averaging a quantile over time is a legitimate summary and is what this
-        returns. Averaging a quantile *across operation types* is not, and this
-        function structurally cannot do it: ``op`` remains a grouping key.
+        ``op`` stays a grouping key, so quantiles are never averaged across ops.
         """
         work = self.metrics
         if warmup_s:
@@ -207,11 +158,7 @@ def load_run(
 ) -> Run:
     """Load a run and refuse to return it unless it is fit to analyse.
 
-    ``require_valid=False`` is provided for inspecting a run that has already
-    failed, and for the validation tests themselves. It is not a way to get a
-    figure out of a run that does not validate: the check suite exists because
-    the legacy defects were all individually plausible, and a number that cannot
-    survive its own consistency checks cannot survive a viva either.
+    ``require_valid=False`` is for inspecting a failed run, and for tests.
     """
     path = resolve_run(target, runs_dir)
 
@@ -220,7 +167,7 @@ def load_run(
         raise RunLoadError(
             f"{path} has no manifest.json. A run whose code revision, profile and "
             "server configuration are unrecorded cannot be cited, so it is not "
-            "loadable rather than loadable-with-a-warning (D9)."
+            "loadable rather than loadable-with-a-warning."
         )
 
     metrics_path = path / "metrics.csv"
@@ -248,11 +195,6 @@ def load_run(
             f"{errors}"
         )
 
-    # A Phase III/IV run may also carry a probe log, under its own schema. It is
-    # gated here for the same reason everything else is: `probe_availability`
-    # reads it with a bare `read_csv`, and the whole point of this loader is that
-    # no analysis reaches a CSV that has not been checked first. A run that
-    # predates the probe simply has no such file and is unaffected.
     probe_csv = path / "rto_probe.csv"
     if require_valid and probe_csv.exists():
         probe_report = validate_probe(pd.read_csv(probe_csv))
@@ -265,16 +207,8 @@ def load_run(
                 f"validation, so its recovery-time figures must not be used: {errors}"
             )
 
-    # Pre-flight is a separate gate and must be checked separately. ``validate``
-    # asks whether the recorded numbers are consistent with each other;
-    # pre-flight asks whether the system was in a fit state to be measured. D7
-    # and D8 both produce data that passes every consistency check while the
-    # workload touches no rows or the leaseholder sits on another continent, so a
-    # run whose pre-flight failed is exactly the run whose numbers look fine.
-    #
-    # This gap was real: a Phase II sweep with one failed row-match assertion
-    # would have loaded and rendered into a figure, because nothing outside the
-    # phase script ever read preflight.json.
+    # Pre-flight is a separate gate: a misconfigured system can produce numbers
+    # that pass every consistency check.
     preflight = _read_json(path / "preflight.json")
     if require_valid and preflight is not None and preflight.get("ok") is False:
         failed = [
@@ -299,15 +233,10 @@ def load_run(
 
 @dataclass(frozen=True)
 class NetworkRun:
-    """A Phase I substrate measurement.
+    """A Phase I network measurement.
 
-    Separate from :class:`Run` because network characterisation shares no
-    dimensions with a workload sample -- no concurrency, no operation type, no
-    throughput -- and is written under its own declared schema. The workload
-    validation suite is meaningless against it, so it is not applied; the
-    manifest requirement is, because a round-trip matrix that cannot say which
-    deployment produced it is worthless after a redeploy, and the testbed has
-    been redeployed with different addresses at least once.
+    Has its own schema, so workload validation does not apply; a manifest is
+    still required so the matrix can be tied to a deployment.
     """
 
     path: Path

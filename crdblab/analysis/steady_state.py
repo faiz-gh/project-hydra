@@ -1,27 +1,9 @@
 """Phase II steady-state aggregation.
 
-This module replaces ``analyze_single_node_baseline.py``, whose central
-operation was a mean over the rows of a long table. That is the wrong operation
-on this data and it is the arithmetic behind defect D1: the generator emits one
-row per operation type per interval, so a mean over rows averages the read and
-write *rates* instead of summing them, and simultaneously averages two distinct
-latency distributions' quantiles into a number that is a quantile of nothing.
-
-The aggregation is therefore stated explicitly at every level, and the two rules
-are separated because they are genuinely different:
-
-* **Across operation types, throughput sums and latency does not pool.** Applied
-  in :meth:`crdblab.analysis.loader.Run.ticks`, which is the only place the long
-  table is folded.
-* **Across time within a tier, throughput and each per-operation quantile are
-  averaged.** A mean of per-interval medians is a legitimate summary statistic
-  and is what the tables below report; it is not itself a median of the run, and
-  the column names say so.
-* **Across repetitions, an interval estimate is reported rather than a point.**
-  The original design measured each tier once. Three repetitions in randomised
-  order were adopted precisely so that a difference between tiers can be
-  distinguished from drift across the sweep, and reporting only their mean would
-  discard the reason for running them.
+* Across operation types, throughput sums and latency is never pooled
+  (applied in :meth:`crdblab.analysis.loader.Run.ticks`).
+* Across time within a tier, throughput and each per-op quantile are averaged.
+* Across repetitions, a mean with a 95% interval is reported.
 """
 
 from __future__ import annotations
@@ -33,11 +15,8 @@ import pandas as pd
 
 from .loader import QUANTILES, Run
 
-#: Two-sided 95% critical values of Student's t by degrees of freedom.
-#: Tabulated rather than imported so that the measurement path takes no
-#: dependency on SciPy: every runtime dependency is a version that has to be
-#: pinned and reported for the sweep to be reproducible. Beyond the table the
-#: normal approximation is within 2% and is used.
+#: Two-sided 95% Student's t critical values by degrees of freedom (avoids a
+#: SciPy dependency); beyond the table the normal value is used.
 _T95 = {1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571, 6: 2.447,
         7: 2.365, 8: 2.306, 9: 2.262, 10: 2.228, 11: 2.201, 12: 2.179}
 
@@ -49,11 +28,7 @@ def _t95(df: int) -> float:
 def confidence_interval(values: pd.Series, level: float = 0.95) -> dict[str, Any]:
     """Mean of ``values`` with a Student's t interval, or ``None`` if n < 2.
 
-    A single repetition yields no interval. It is reported as ``None`` rather
-    than as zero, because a half-width of zero asserts perfect agreement between
-    repetitions that were never run -- the same conflation of "not measured" with
-    "measured as zero" that left ``ram_pct`` at a constant 0.0 for an entire
-    dissertation's worth of runs (D5).
+    With one repetition the half-width is ``None``, never zero.
     """
     clean = pd.Series(values).dropna()
     n = int(clean.size)
@@ -75,10 +50,8 @@ def confidence_interval(values: pd.Series, level: float = 0.95) -> dict[str, Any
 def steady_state_window(run: Run) -> dict[str, Any]:
     """What part of each tier the recorded rows already represent.
 
-    Phase II discards the ramp-up window at write time, so applying a
-    warmup filter again here would silently trim twice. This reports the profile's
-    declared warmup against the earliest interval actually present, so the caller
-    can see which is the case instead of assuming.
+    Phase II already drops the warm-up at write time; this shows whether the
+    rows are trimmed, so a caller does not trim twice.
     """
     declared = float(run.workload.get("warmup_s", 0.0) or 0.0)
     first = float(run.metrics["elapsed_s"].min())
@@ -103,11 +76,7 @@ def per_repetition(run: Run, warmup_s: float = 0.0) -> pd.DataFrame:
         errors_cum=("errors_cum", "max"),
     )
 
-    # Little's law, recomputed here as a reported quantity rather than only as a
-    # validation predicate: N / X is the mean residence time implied by the
-    # offered concurrency and the achieved throughput, and printing it beside the
-    # measured latency lets a reader check the run's internal consistency without
-    # taking the harness's word for it.
+    # Little's law: N / X is the mean latency implied by concurrency and throughput.
     out["implied_mean_latency_ms"] = out["concurrency"] / out["mean_total_tps"] * 1000.0
     return out
 
@@ -115,10 +84,8 @@ def per_repetition(run: Run, warmup_s: float = 0.0) -> pd.DataFrame:
 def per_tier(run: Run, warmup_s: float = 0.0) -> pd.DataFrame:
     """One row per concurrency tier, aggregating across repetitions.
 
-    The interval is computed over repetition means, not over the pooled
-    per-second samples. Successive samples within one run are not independent --
-    they share a process, a cache state and a thermal state -- so pooling them
-    would produce an interval far narrower than the experiment supports.
+    The interval is over repetition means: per-second samples within a run
+    are not independent.
     """
     reps = per_repetition(run, warmup_s=warmup_s)
     rows: list[dict[str, Any]] = []
@@ -146,9 +113,7 @@ def per_tier(run: Run, warmup_s: float = 0.0) -> pd.DataFrame:
 def latency_by_op(run: Run, warmup_s: float = 0.0) -> pd.DataFrame:
     """Per-operation latency by tier. Operation type is never collapsed.
 
-    Each cell is the mean over intervals of that interval's quantile. It is not a
-    quantile of the run's pooled latency distribution, which the generator does
-    not expose and which cannot be reconstructed from per-interval quantiles.
+    Each cell is the mean of per-interval quantiles, not a quantile of the run.
     """
     per_op = run.latency_by_op(warmup_s=warmup_s)
     cols = [q for q in QUANTILES if q in per_op.columns]
@@ -163,12 +128,8 @@ def latency_by_op(run: Run, warmup_s: float = 0.0) -> pd.DataFrame:
 def throughput_latency_curve(run: Run, op: str, warmup_s: float = 0.0) -> pd.DataFrame:
     """Offered-load curve for one operation type: throughput against latency.
 
-    This is the form in which a phase's cost must be reported, and the input to
-    any comparison between phases. A tier is a point on it, not a measurement of
-    the system at some canonical load: the concurrency setting fixes the number
-    of workers, not the load they achieve, so two phases at the same concurrency
-    sit at different points on their respective curves and are not comparable.
-    See :mod:`crdblab.analysis.engine_comparison`.
+    Concurrency fixes the number of workers, not the load, so phases are
+    compared along this curve rather than at equal concurrency.
     """
     tiers = per_tier(run, warmup_s=warmup_s).set_index("concurrency")
     lat = latency_by_op(run, warmup_s=warmup_s)
@@ -184,14 +145,8 @@ def throughput_latency_curve(run: Run, op: str, warmup_s: float = 0.0) -> pd.Dat
         + [q for q in QUANTILES if q in joined.columns]
     ]
     out.insert(1, "op", op)
-    # Ordered by concurrency, the control variable, and never by throughput.
-    # Throughput is the *response*, and past saturation it is not monotonic in
-    # concurrency: measured 2026-09-02, the cluster peaked at 1,855 ops/s at
-    # C=100 and fell to 1,732 at C=200. Ordering by throughput would interleave
-    # the tiers, so a line drawn through them doubles back on itself and no
-    # longer traces the path the experiment actually took. A saturating system's
-    # curve genuinely bends backwards -- more load, less throughput, more latency
-    # -- and that shape is a finding, not a plotting artefact to sort away.
+    # Ordered by concurrency (the control variable): past saturation throughput
+    # falls, and the curve bending back is a finding.
     return out.sort_values("concurrency", ignore_index=True)
 
 

@@ -2,8 +2,9 @@ ssh_public_key        = "ssh-rsa AAAAB3N..."
 azure_subscription_id = "00000000-0000-0000-0000-000000000000"
 gcp_project_id        = "my-gcp-chaos-project"
 tailscale_auth_key    = "tskey-auth-xxxxxx-xxxxxx"
+database_engine       = "cockroachdb" # or "postgresql": one deployment per engine
 
-# Used by all nodes to find each other via MagicDNS
+# MagicDNS names the cluster nodes join; the first one bootstraps the cluster.
 cluster_join_nodes = "crdb-linode-1,crdb-linode-2,crdb-azure-1,crdb-azure-2,crdb-gcp-1"
 
 linode_config = {
@@ -11,13 +12,13 @@ linode_config = {
     node1 = {
       enabled  = true
       region   = "us-east"
-      type     = "g6-dedicated-2"
+      type     = "g6-dedicated-4"
       hostname = "crdb-linode-1"
     }
     node2 = {
       enabled  = true
       region   = "us-west"
-      type     = "g6-dedicated-2"
+      type     = "g6-dedicated-4"
       hostname = "crdb-linode-2"
     }
   }
@@ -30,7 +31,7 @@ azure_config = {
       region      = "centralindia"
       vnet_cidr   = "10.3.0.0/16"
       subnet_cidr = "10.3.1.0/24"
-      vm_size     = "Standard_B2ls_v2"
+      vm_size     = "Standard_B4als_v2"
       hostname    = "crdb-azure-1"
     }
     node2 = {
@@ -38,7 +39,7 @@ azure_config = {
       region      = "eastasia"
       vnet_cidr   = "10.4.0.0/16"
       subnet_cidr = "10.4.1.0/24"
-      vm_size     = "Standard_B2ls_v2"
+      vm_size     = "Standard_B4als_v2"
       hostname    = "crdb-azure-2"
     }
   }
@@ -48,11 +49,24 @@ gcp_config = {
   nodes = {
     node1 = {
       enabled      = true
-      region       = "us-central1"
-      zone         = "us-central1-a"
+      region       = "us-east1"
+      zone         = "us-east1-d"
       vpc_cidr     = "10.5.0.0/16"
-      machine_type = "n2-standard-2"
+      machine_type = "c2d-highcpu-4"
       hostname     = "crdb-gcp-1"
+    }
+  }
+}
+
+client_config = {
+  nodes = {
+    node1 = {
+      enabled      = true
+      region       = "us-east1"
+      zone         = "us-east1-d"
+      vpc_cidr     = "10.6.0.0/16"
+      machine_type = "c2d-highcpu-4"
+      hostname     = "crdb-client-1"
     }
   }
 }

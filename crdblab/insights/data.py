@@ -1,34 +1,24 @@
 """Which runs a render considers, and the data the charts read from them.
 
-Every run reaches a chart through :func:`crdblab.analysis.loader.load_run` (or
-:func:`load_network_run` for a Phase I matrix) and through no other route, so the
-gate the rest of the harness relies on still holds here: a run with no manifest,
-with columns outside the declared schema, or that fails validation or pre-flight
-is *refused*, recorded as refused with the loader's own reason, and contributes
-to nothing. Chart E3 draws that record, so a refused run is visible rather than
-silently absent.
-
-Selection is "the most recent passing run of each kind, per engine". Run ids
-begin with a UTC stamp, so name order is time order -- the same idiom
-``run-experiment.sh`` and ``cli._latest_run`` use.
+Every run is loaded through the analysis loader, so a run without a manifest,
+or one failing validation or pre-flight, is recorded as refused with the
+loader's reason (drawn by chart E3). Selection is the newest passing run of
+each kind, per engine; run ids start with a UTC stamp, so name order is time order.
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-
-import json
 
 import pandas as pd
 
 from ..analysis.loader import NetworkRun, Run, RunLoadError, load_network_run, load_run
 from ..topology import CLIENT_NODE
 
-#: Run-directory suffix -> the kind of run it is, in this module's vocabulary.
-#: A standalone ``p4-probe`` run carries no workload and no fault, so no chart
-#: has a use for it and it is not part of the inventory.
+#: Run-directory suffix -> run kind. Standalone ``p4-probe`` runs are not charted.
 KINDS: dict[str, str] = {
     "p1-network": "network",
     "bench_cluster": "bench",
@@ -42,11 +32,8 @@ ENGINES: tuple[str, ...] = ("cockroachdb", "postgresql")
 #: Fault classes in the order every chart draws and lists them.
 MODES: tuple[str, ...] = ("dead", "recover")
 
-#: ``metrics.csv`` columns that are blank on every run ever recorded -- the
-#: gateway-side sampling they were meant to carry was superseded by
-#: ``hardware_metrics.csv`` before any run filled them in. Named so that nothing
-#: plots them by mistake: an all-NaN series draws as an empty axis, which reads
-#: as "zero load" rather than as "never measured".
+#: ``metrics.csv`` columns that are always blank (superseded by hardware_metrics.csv);
+#: named so nothing plots them as zero load.
 DEAD_COLUMNS: tuple[str, ...] = ("gateway_cpu_pct", "gateway_disk_iops", "gateway_rss_bytes")
 
 
@@ -87,7 +74,7 @@ class Inventory:
     entries: list[RunEntry] = field(default_factory=list)
 
     @classmethod
-    def scan(cls, runs_dir: Path, profile: str | None = None) -> "Inventory":
+    def scan(cls, runs_dir: Path, profile: str | None = None) -> Inventory:
         inventory = cls(runs_dir=Path(runs_dir), profile=profile)
         if not inventory.runs_dir.is_dir():
             return inventory
@@ -166,10 +153,7 @@ class Inventory:
 def hardware(run: Run) -> pd.DataFrame | None:
     """A run's per-node hardware samples, ready to plot, or ``None`` if absent.
 
-    Every rate column in ``hardware_metrics.csv`` is ``""`` on a node's *first*
-    poll, because a rate needs a previous scrape to difference against. Each
-    node's first row is dropped here rather than plotted as a hole, which would
-    read as a moment of zero load.
+    Each node's first row has no rates (nothing to difference) and is dropped.
     """
     path = run.path / "hardware_metrics.csv"
     if not path.exists():

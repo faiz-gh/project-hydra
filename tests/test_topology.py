@@ -1,9 +1,4 @@
-"""Tests for the declared testbed topology.
-
-The topology is the one fact every phase reads and no phase re-derives, so an
-error here is silently inherited by every measurement rather than caught by one.
-These tests pin the properties that other code assumes without checking.
-"""
+"""Tests for the declared testbed topology."""
 
 from __future__ import annotations
 
@@ -13,8 +8,7 @@ from crdblab.topology import CLIENT_NODE, DEFAULT_TOPOLOGY, Node, Topology
 
 
 def test_the_gateway_is_the_gcp_node():
-    """The gateway is the gcp node, which was previously the baseline node.
-    """
+    """The gateway is the GCP node; the client node is separate."""
     gateway = DEFAULT_TOPOLOGY.gateway
     assert gateway.name == "gcp-1"
     assert gateway.host == "crdb-gcp-1"
@@ -40,14 +34,7 @@ def test_exactly_one_node_is_the_gateway():
 
 
 def test_the_gateway_is_inside_the_lease_preference_triangle():
-    """Leaseholders are pinned to us-east, us-east1 and us-west.
-
-    A gateway outside that set would put a wide-area hop on every operation while
-    the cluster reported full health -- D7's shape. The bootstrap's list is the
-    other half of this and lives outside the repository, so ``run-experiment.sh``
-    asserts the ordering against the live cluster; this asserts the membership,
-    which is the part declared here.
-    """
+    """Leaseholders are pinned to us-east, us-east1 and us-west."""
     assert DEFAULT_TOPOLOGY.gateway.region in {"us-east", "us-east1", "us-west"}
 
 
@@ -71,14 +58,7 @@ def test_the_chaos_target_default_is_not_the_gateway():
 
 
 def test_cluster_target_generates_a_single_gateway_uri_for_cockroachdb():
-    """Not one URI per cluster member.
-
-    `cockroach workload run`, given more than one URL, dials its
-    --concurrency connections *serially* against the list rather than in
-    parallel -- ~2.65s each, measured on this topology, turning a sub-second
-    connect into minutes at any real concurrency (and once desynchronised a
-    chaos run's fault-injection timer from the generator ever starting).
-    """
+    """Not one URI per cluster member."""
     from crdblab.config import Settings
     from crdblab.phases.bench import cluster_target
 
@@ -129,18 +109,12 @@ def test_a_password_with_url_metacharacters_is_escaped():
 # --- PostgreSQL connection strings ------------------------------------------
 
 def test_the_generator_gets_one_host_and_the_measurement_clients_get_all_five():
-    """Two different jobs. `cockroach workload run` must be given exactly one
-    URL (more than one and it dials its connections serially), so the generator
-    goes through the client node's HAProxy. The RPO audit writer and the RTO
-    probe must survive the fault they are measuring, so they use libpq's own
-    multi-host resolution instead of depending on that one proxy."""
+    """The generator gets one URL (HAProxy); the audit writer and probe get all five hosts."""
     from crdblab.config import pg_direct_dsn, pg_generator_dsn
 
     single = pg_generator_dsn("ycsb", "pw")
-    # pgbouncer, not HAProxy directly: `cockroach workload` sends
-    # allow_unsafe_internals as a startup parameter and PostgreSQL rejects
-    # unknown ones with a FATAL, so the generator cannot reach the cluster
-    # without something that drops it. pgbouncer forwards to HAProxy.
+    # pgbouncer strips the startup parameter PostgreSQL rejects, then forwards
+    # to HAProxy.
     assert single.count("@") == 1 and "127.0.0.1:6432" in single
     assert "," not in single
 
@@ -153,23 +127,7 @@ def test_the_generator_gets_one_host_and_the_measurement_clients_get_all_five():
 
 
 def test_the_measurement_clients_bound_established_connections_not_just_new_ones():
-    """A black-holed socket must fail, not block forever.
-
-    ``connect_timeout`` covers only the opening of a connection, and in
-    ``recover`` mode the connections that matter are the ones the clients
-    already hold: ``tailscale down`` does not close them, it swallows them. On
-    2026-09-09 both the RPO audit writer and the RTO probe blocked in ``recv()``
-    on such a socket and stopped observing 3.6 s after the fault, and the
-    harness reported their silence as a 0.082 s RTO for a ~70 s outage.
-
-    The bound is at the TCP layer on purpose. ``rto_probe``'s design turns on a
-    blocked write being *the measurement* -- its completion times the recovery
-    -- so a tighter statement timeout would abort exactly the write worth
-    keeping. A server that is merely busy still answers keepalives; only an
-    unreachable peer does not. And the bound is deliberately looser than the
-    probe's own 5 s server-side ``statement_timeout``, so it can never fire in
-    preference to the server's own reply.
-    """
+    """A black-holed socket must fail, not block forever."""
     from crdblab.config import PG_TCP_USER_TIMEOUT_MS, pg_direct_dsn, pg_generator_dsn
 
     direct = pg_direct_dsn(DEFAULT_TOPOLOGY, "chaos_audit", "pw")
@@ -179,10 +137,8 @@ def test_the_measurement_clients_bound_established_connections_not_just_new_ones
         "must be looser than the probe's server-side statement_timeout, or it "
         "would pre-empt the server's own answer"
     )
-    # The generator's path is loopback to pgbouncer and is not touched: there is
-    # no partition to survive between two processes on the same host, and the
-    # generator is the one client whose connection behaviour must stay
-    # byte-identical across the two engines' arms.
+    # The generator's loopback path has no partition to survive and must stay
+    # identical across engines.
     assert "tcp_user_timeout" not in pg_generator_dsn("ycsb", "pw")
 
 

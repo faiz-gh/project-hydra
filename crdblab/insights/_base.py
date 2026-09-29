@@ -1,16 +1,9 @@
 """The chart registry and the conventions every chart shares.
 
-A chart is a function ``(ctx) -> Drawn`` registered with :func:`chart`. It either
-draws and returns the numbers it drew, or raises :class:`Skip` with a sentence
-saying why it could not. A skip is a result, not an error: a missing artefact and
-an absent effect must not look alike, so the reason is carried into the report,
-the dashboard and ``chart_status.csv`` beside the charts that did draw.
-
-The stats a chart returns are the quotable numbers behind its picture. They are
-computed from the same analysis functions the rest of the harness uses -- this
-package plots, it does not re-derive -- and they are written to
-``summary.json``/``summary.csv`` so a figure's claim can be checked without
-re-reading the image.
+A chart is a function ``(ctx) -> Drawn`` registered with :func:`chart`. It
+either draws and returns the numbers behind the picture, or raises
+:class:`Skip` with a reason, which is reported beside the charts that drew.
+Stats come from the analysis layer and are written to ``summary.json``/``.csv``.
 """
 
 from __future__ import annotations
@@ -36,9 +29,7 @@ GROUPS: dict[str, str] = {
     "E": "Network and provenance",
 }
 
-#: How an engine is named in a figure. Lower-case engine ids stay in stat keys
-#: and filenames, where they match the manifests; figures say what a reader
-#: would call the system under test.
+#: Display names for engines; lower-case ids stay in stat keys and filenames.
 LABEL: dict[str, str] = {"cockroachdb": "CockroachDB", "postgresql": "PostgreSQL/Patroni"}
 COLOR: dict[str, str] = {"cockroachdb": SERIES[0], "postgresql": SERIES[1]}
 MARKER: dict[str, str] = {"cockroachdb": "o", "postgresql": "s"}

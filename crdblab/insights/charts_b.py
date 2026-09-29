@@ -1,18 +1,9 @@
-"""Group B -- hardware utilisation, from ``hardware_metrics.csv``.
+"""Group B: hardware utilisation, from ``hardware_metrics.csv``.
 
-The first consumer of the per-node node_exporter samples the benchmark has
-recorded since 2026-09-10. Nodes are polled independently, so anything that
-combines nodes bins them onto a common time axis first; each node's first row
-carries no rates and is dropped by :func:`data.hardware`.
-
-Tier-level figures (B2, B5) reproduce the original catalogue's windowing
-exactly, and their captions say what that means: a tier's window runs from the
-first interval of its earliest repetition to the last interval of its latest, on
-the harness clock ``hardware_metrics.csv`` shares. Repetitions run in shuffled
-order, so with three repetitions that envelope spans most of the sweep and the
-hardware side of each ratio is close to a whole-sweep average. With one
-repetition per tier (``smoke``) it is the tier itself. B5's traffic is the mean
-*per node*, as the original computed it.
+Nodes are polled independently, so multi-node views bin onto a common time
+axis first. Tier-level figures (B2, B5) window each tier from the first
+interval of its earliest repetition to the last of its latest, on the harness
+clock; with shuffled repetitions that window can span most of the sweep.
 """
 
 from __future__ import annotations
@@ -21,7 +12,19 @@ import numpy as np
 import pandas as pd
 
 from ..report.style import BLUE_RAMP, INK_MUTED, SEQUENTIAL
-from ._base import COLOR, DASH, LABEL, MARKER, Context, Drawn, Skip, chart, need, new_figure, save
+from ._base import (
+    COLOR,
+    DASH,
+    LABEL,
+    MARKER,
+    Context,
+    Drawn,
+    Skip,
+    chart,
+    need,
+    new_figure,
+    save,
+)
 from .data import cluster_only, hardware
 
 #: Bins across a run for anything that puts every node on one time axis.
@@ -44,7 +47,7 @@ def _bench_hardware(ctx: Context) -> dict[str, tuple]:
     if not out:
         raise Skip(
             "no benchmark run carries hardware_metrics.csv; per-node collection "
-            "was added on 2026-09-10 and needs node_exporter on every node"
+            "needs node_exporter on every node and hardware_metrics.enabled"
         )
     return out
 

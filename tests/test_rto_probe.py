@@ -1,15 +1,4 @@
-"""Tests for the high-frequency RTO probe.
-
-Each test pins a decision the probe makes about what its observations do and do
-not license, rather than a number it produces. A probe that reports a plausible
-recovery time it cannot actually resolve is the same failure as this project's
-recorded instrumentation defects: output that looks right and is not checkable.
-
-No database is touched. ``_FakeProbe`` replaces the connection with a scripted
-one whose latency and failure window are set by the test, which is what makes the
-timing behaviour assertable at all -- against a live cluster the quantities under
-test here are exactly the ones that vary.
-"""
+"""Tests for the high-frequency RTO probe."""
 
 from __future__ import annotations
 
@@ -31,7 +20,6 @@ from crdblab.core.rto_probe import (
     outage_windows,
     summarise,
 )
-
 
 # --- fixtures --------------------------------------------------------------
 
@@ -75,13 +63,7 @@ class _FakeConnection:
 
 
 class _FakeProbe(RtoProbe):
-    """The real probe with the driver replaced.
-
-    Only :meth:`_connect` is overridden, so the dispatcher, the worker pool, the
-    backpressure permit, the classification and the log are all the production
-    ones. Substituting more than the connection would mean testing a different
-    program from the one that runs.
-    """
+    """The real probe with the driver replaced."""
 
     def __init__(self, *args, write_cost_s=0.01, **kwargs):
         super().__init__(*args, **kwargs)
@@ -116,11 +98,7 @@ def _attempts(spec):
 
 
 def test_the_probe_writes_continuously_on_a_background_thread(tmp_path):
-    """The workload's path is a thread that does not exist here.
-
-    The caller starts the probe and does nothing; observations accumulate anyway.
-    That is the whole of "decoupled from the generator" as a testable property.
-    """
+    """The workload's path is a thread that does not exist here."""
     probe = _FakeProbe(
         "postgresql://example/bench",
         interval_s=0.002,
@@ -139,13 +117,7 @@ def test_the_probe_writes_continuously_on_a_background_thread(tmp_path):
 
 
 def test_concurrency_is_what_makes_the_sampling_finer_than_the_write_cost(tmp_path):
-    """A serial client cannot observe a 10 ms write more often than every 10 ms.
-
-    This is the probe's entire reason to exist: the RPO audit writer is serial, so
-    its resolution is pinned at the cost of one quorum write no matter what its
-    configured interval says. Four workers must beat one measurably, or the
-    concurrency is decoration.
-    """
+    """A serial client cannot observe a 10 ms write more often than every 10 ms."""
     def resolution(workers):
         probe = _FakeProbe(
             "postgresql://example/bench",
@@ -168,12 +140,7 @@ def test_concurrency_is_what_makes_the_sampling_finer_than_the_write_cost(tmp_pa
 
 
 def test_the_achieved_cadence_is_reported_and_is_not_the_configured_one(tmp_path):
-    """Quoting the dispatch interval as the resolution would be false precision.
-
-    Asked for a 1 ms cadence against a 20 ms write with two workers, the probe can
-    achieve about 100 attempts a second and not 1000. It must say so: the summary
-    reports what happened, and the discarded ticks are counted rather than hidden.
-    """
+    """Quoting the dispatch interval as the resolution would be false precision."""
     probe = _FakeProbe(
         "postgresql://example/bench",
         interval_s=0.001,
@@ -191,12 +158,7 @@ def test_the_achieved_cadence_is_reported_and_is_not_the_configured_one(tmp_path
 
 
 def test_a_failure_and_the_reconnect_after_it_reach_the_log_file(tmp_path):
-    """The separate log is the crash-proof record of the outage edges.
-
-    The CSV is assembled when the run ends, and a chaos run interrupted while the
-    fault is in place -- the case whose timings matter most -- would leave none.
-    Every failure and every reconnect is therefore flushed as it happens.
-    """
+    """The separate log is the crash-proof record of the outage edges."""
     log_path = tmp_path / "rto_probe.log"
     probe = _FakeProbe(
         "postgresql://example/bench",
@@ -225,11 +187,7 @@ def test_a_failure_and_the_reconnect_after_it_reach_the_log_file(tmp_path):
 
 
 def test_the_probe_never_raises_into_the_run_it_is_observing(tmp_path):
-    """A probe that can fail a chaos run is a new way to lose an hour of testbed.
-
-    Every driver exception becomes a classified observation. The context manager
-    exits normally even though every single write failed.
-    """
+    """A probe that can fail a chaos run is a new way to lose an hour of testbed."""
     probe = _FakeProbe(
         "postgresql://example/bench",
         interval_s=0.002,
@@ -246,12 +204,7 @@ def test_the_probe_never_raises_into_the_run_it_is_observing(tmp_path):
 
 
 def test_offsets_are_taken_from_the_epoch_the_caller_supplies(tmp_path):
-    """Four clocks in one run directory is D5; the caller owns the origin.
-
-    Phases III-IV hand the probe the same monotonic zero they give ``events.json`` and
-    ``wall_offset_s``, so the fault offset and the probe's observations can be
-    placed on one axis without an unmeasured conversion between them.
-    """
+    """Offsets use the epoch the caller supplies, so every file in a run shares one clock."""
     epoch = time.monotonic() - 50.0
     probe = _FakeProbe(
         "postgresql://example/bench",
@@ -270,13 +223,7 @@ def test_offsets_are_taken_from_the_epoch_the_caller_supplies(tmp_path):
 
 
 def test_a_timeout_is_not_the_same_observation_as_a_refusal():
-    """The three failure kinds mean different things for a downtime figure.
-
-    A timeout is what a lease transfer looks like from a client and is the
-    outage's signature. A refusal is a reachable database rejecting the statement
-    -- a bug in the probe -- and counting it as downtime would manufacture an
-    outage out of a duplicate key.
-    """
+    """The three failure kinds mean different things for a downtime figure."""
     assert classify(TimeoutError("canceling statement due to statement timeout"))[0] == "timeout"
     assert classify(_FakeConnectionError("connection reset"))[0] == "conn_error"
     assert classify(ValueError("duplicate key value"))[0] == "refused"
@@ -288,11 +235,7 @@ def test_a_timeout_is_not_the_same_observation_as_a_refusal():
 
 
 def test_rto_runs_from_the_fault_to_the_end_of_the_outage_that_followed_it():
-    """Not to the next write served, which on this cluster usually succeeds.
-
-    A healthy cadence of ~0.1 s here, then a 2.4 s gap spanning the fault. The
-    RTO is the fault to the far edge of that gap; the outage is the gap itself.
-    """
+    """Not to the next write served, which on this cluster usually succeeds."""
     attempts = _attempts(
         [
             (0.80, 0.90, "ok"),
@@ -309,20 +252,12 @@ def test_rto_runs_from_the_fault_to_the_end_of_the_outage_that_followed_it():
     assert result["outage"]["ended_s"] == pytest.approx(3.50)
     assert result["observed_outage_s"] == pytest.approx(2.40)
     assert result["rto_s"] == pytest.approx(2.30)
-    # The RTO is shorter than the observed outage, because the outage began
-    # before the fault could possibly have caused it -- up to one sampling gap
-    # earlier, which is what the resolution means.
+    # The outage can begin up to one sampling gap before the fault, so RTO is shorter.
     assert result["rto_s"] < result["observed_outage_s"]
 
 
 def test_detection_lag_is_reported_separately_from_recovery():
-    """Writes keep committing until the cluster notices a node is gone.
-
-    On this testbed liveness detection alone runs ~6 s. Folding that interval into
-    the RTO would attribute the cluster's detection time to its recovery, which is
-    the same category error as the legacy runner's ten-second guard being reported
-    as a 6.0 s recovery.
-    """
+    """Writes keep committing until the cluster notices a node is gone."""
     # Healthy at ~0.1 s intervals through the fault at t=1.0 and on to t=6.0,
     # which is the cluster not yet noticing. Then a 3 s gap.
     healthy = [(t / 10, t / 10 + 0.1, "ok") for t in range(60)]
@@ -341,12 +276,7 @@ def test_detection_lag_is_reported_separately_from_recovery():
 
 
 def test_an_interval_shorter_than_the_sampling_gap_is_not_quoted_as_a_number():
-    """Below its own resolution the probe has not measured an outage.
-
-    This mirrors ``resilience.availability``: the smaller of two indistinguishable
-    quantities must not be reported as a result. It is the difference between a
-    recovery time and an artefact of how often anyone looked.
-    """
+    """Below its own resolution the probe has not measured an outage."""
     attempts = _attempts([(t / 10, t / 10 + 0.05, "ok") for t in range(20)])
     result = measure_rto(attempts, fault_offset_s=1.02)
     assert result["measurable"] is True
@@ -360,22 +290,7 @@ def test_an_interval_shorter_than_the_sampling_gap_is_not_quoted_as_a_number():
 
 
 def test_a_probe_that_stopped_observing_does_not_claim_nothing_was_detectable():
-    """The 2026-09-09 regression, at the real run's shape.
-
-    ``runs/20260909T012233Z_p4-chaos-recover``: the probe's two workers blocked
-    on connections ``tailscale down`` had black-holed. A server-side
-    ``statement_timeout`` cannot arrive when packets cannot, so the attempts
-    neither completed nor failed -- the recorded artefact is 515 attempts, 515
-    ``ok``, zero timeouts and zero conn_errors, spanning 20.3 s of a 45 s run
-    and ending 3.6 s after the fault. Every gap in that series is healthy,
-    because every gap in it predates the outage, so the probe reported "no
-    interruption in served writes was detectable" for an interruption of roughly
-    70 seconds.
-
-    The existing ``truncated`` branch does not catch this: it looks for a gap
-    still open when the probe stopped, and here there is none -- the probe
-    served its last dispatched write and then simply stopped dispatching.
-    """
+    """A probe that stopped observing reports the outage as unmeasured, not undetectable."""
     attempts = _attempts([(t * 0.04, t * 0.04 + 0.075, "ok") for t in range(515)])
     result = measure_rto(attempts, fault_offset_s=20.7, observation_end_s=45.0)
 
@@ -407,12 +322,7 @@ def test_coverage_is_not_judged_when_the_run_end_is_unknown():
 
 
 def test_a_run_that_ended_during_the_outage_reports_no_rto_rather_than_a_bound():
-    """The probe cannot see a recovery that happened after it stopped.
-
-    Reporting the truncation as a measurement would put a floor into the figure
-    that is an artefact of the run's duration -- which is precisely what the
-    legacy 6.0 s and 5.2 s RTOs were.
-    """
+    """The probe cannot see a recovery that happened after it stopped."""
     healthy = [(t / 10, t / 10 + 0.1, "ok") for t in range(5)]
     attempts = _attempts([*healthy, (0.5, 3.0, "timeout"), (3.0, 5.0, "timeout")])
     result = measure_rto(attempts, fault_offset_s=0.45)
@@ -426,11 +336,7 @@ def test_a_run_that_ended_during_the_outage_reports_no_rto_rather_than_a_bound()
 
 
 def test_an_in_flight_write_dates_the_recovery_more_tightly_than_a_later_one():
-    """A blocked INSERT returns the moment the range is served again.
-
-    The distinction is recorded because it is the difference between an
-    observation of the recovery and a poll that happened to follow it.
-    """
+    """A blocked INSERT returns the moment the range is served again."""
     healthy = [(t / 10, t / 10 + 0.1, "ok") for t in range(5)]
 
     # Dispatched at 0.5 and served at 5.0: it waited out the whole outage, so its
@@ -439,9 +345,7 @@ def test_an_in_flight_write_dates_the_recovery_more_tightly_than_a_later_one():
     assert blocked["closed_by_in_flight_write"] is True
     assert blocked["in_flight_fraction"] > 0.9
 
-    # Dispatched at 4.9, after service had already returned: it dates the
-    # recovery only to the next poll, and is an upper bound rather than an
-    # observation.
+    # Dispatched after service returned: only an upper bound on the recovery.
     polled = measure_rto(_attempts([*healthy, (4.9, 5.0, "ok")]), 0.6)
     assert polled["closed_by_in_flight_write"] is False
     assert polled["in_flight_fraction"] < 0.1
@@ -456,7 +360,7 @@ def test_outage_windows_are_ordered_by_duration_and_carry_both_edges():
 
 def test_summarise_reports_no_resolution_rather_than_zero_when_nothing_was_served():
     """An unmeasured quantity must not be indistinguishable from one measured as
-    zero. That is D5, and a resolution of 0.0 s would read as perfect precision."""
+    zero. A resolution of 0.0 s would read as perfect precision."""
     summary = summarise(_attempts([(0.0, 0.5, "timeout")]))
     assert summary["resolution_s"] is None
     assert summary["outcomes"]["timeout"] == 1
@@ -467,11 +371,7 @@ def test_summarise_reports_no_resolution_rather_than_zero_when_nothing_was_serve
 
 
 def test_the_csv_round_trips_into_the_same_rto(tmp_path):
-    """The analysis layer re-derives from disk; it does not trust the summary.
-
-    A published recovery time whose underlying observations cannot be recomputed
-    cannot be disputed, which is why ``audit.csv`` exists and why this does too.
-    """
+    """The analysis layer re-derives from disk; it does not trust the summary."""
     healthy = [(t / 10, t / 10 + 0.1, "ok") for t in range(8)]
     attempts = _attempts([*healthy, (0.8, 3.0, "timeout"), (0.9, 3.1, "ok")])
     frame = pd.DataFrame([a.to_row() for a in attempts], columns=list(PROBE_COLUMNS))
@@ -546,18 +446,11 @@ def test_validation_rejects_an_outcome_nobody_declared():
 
 
 def test_resilience_rederives_the_probe_rto_from_the_run_directory(tmp_path):
-    """``analyze resilience`` reads the observations, not the phase's summary.
-
-    The same discipline ``audit.csv`` exists for: a recovery time whose
-    underlying observations were discarded cannot be re-derived, disputed, or
-    plotted, so the analysis layer recomputes it and the phase's own figure is
-    only a convenience.
-    """
+    """``analyze resilience`` reads the observations, not the phase's summary."""
     import json
 
     from crdblab.analysis import resilience
     from crdblab.analysis.loader import load_run
-
     from tests.test_analysis import _EVENTS, _rows, _write_run
 
     events = {
@@ -605,7 +498,6 @@ def test_a_run_without_a_probe_log_says_so_rather_than_reporting_nothing(tmp_pat
     absence must be legible rather than an empty section."""
     from crdblab.analysis import resilience
     from crdblab.analysis.loader import load_run
-
     from tests.test_analysis import _EVENTS, _rows, _write_run
 
     path = _write_run(
@@ -625,7 +517,6 @@ def test_a_disabled_probe_is_distinguished_from_a_missing_one(tmp_path):
     only one of them is a reason to re-measure."""
     from crdblab.analysis import resilience
     from crdblab.analysis.loader import load_run
-
     from tests.test_analysis import _EVENTS, _rows, _write_run
 
     path = _write_run(
@@ -644,12 +535,7 @@ def test_a_disabled_probe_is_distinguished_from_a_missing_one(tmp_path):
 
 
 def test_the_chaos_summary_prints_the_probe_beside_the_audit_figure(monkeypatch, capsys):
-    """Two measurements of the same quantity are only useful when compared.
-
-    They are printed adjacently and both labelled, so a disagreement between the
-    audit log's cadence-bound figure and the probe's finer one is visible rather
-    than resolved silently in favour of whichever the code happened to print.
-    """
+    """Two measurements of the same quantity are only useful when compared."""
     from crdblab import cli
     from crdblab.phases import p4_chaos
 
@@ -733,15 +619,8 @@ def test_a_probe_that_failed_is_reported_as_a_failed_probe(monkeypatch, capsys):
 
 
 def test_a_run_whose_probe_log_is_corrupt_will_not_load(tmp_path):
-    """The loader is the only way into a run, and it gates on the probe too.
-
-    ``probe_availability`` reads ``rto_probe.csv`` with a bare ``read_csv``, so
-    without this gate a probe log that fails its own checks would still reach a
-    published recovery time -- which is the exact shape of the defect the loader
-    exists to prevent for ``metrics.csv``.
-    """
+    """The loader is the only way into a run, and it gates on the probe too."""
     from crdblab.analysis.loader import RunLoadError, load_run
-
     from tests.test_analysis import _EVENTS, _rows, _write_run
 
     path = _write_run(
@@ -763,12 +642,7 @@ def test_a_run_whose_probe_log_is_corrupt_will_not_load(tmp_path):
 
 
 def test_the_standalone_probe_command_produces_a_normal_run_directory(tmp_path, monkeypatch, capsys):
-    """`crdblab probe rto` is a measurement, so it leaves a manifest like any other.
-
-    A run directory without one cannot be cited later, and there is no reason for
-    the probe to be the exception -- especially since its whole purpose is to
-    produce a number someone will quote.
-    """
+    """`crdblab probe rto` is a measurement, so it leaves a manifest like any other."""
     from crdblab import cli
     from crdblab.core import ssh
 
@@ -794,10 +668,7 @@ def test_the_standalone_probe_command_produces_a_normal_run_directory(tmp_path, 
     assert manifest["clock_epoch_utc"], "the run's monotonic zero must be datable"
     assert manifest["profile"]["chaos"]["probe_table"] == "rto_canary"
 
-    # The canary table is dropped and recreated, and against the gateway --
-    # via its own `tailscale ip -4`, not the bare hostname (a self-referential
-    # `cockroach sql --host=<hostname>` run ON the gateway can resolve to an
-    # address cockroach never bound; see the matching comment at the call site).
+    # The canary table is recreated on the gateway, addressed via its Tailscale IP.
     assert any("rto_canary" in cmd and "DROP TABLE" in cmd for cmd in issued)
     assert any("tailscale ip -4" in cmd for cmd in issued)
 
@@ -811,19 +682,7 @@ def test_the_standalone_probe_command_produces_a_normal_run_directory(tmp_path, 
 
 
 def test_the_pool_does_not_phase_lock_into_bursts(tmp_path):
-    """Eight workers must give eight spread observations, not eight at once.
-
-    Found against the live cluster: with a 2 ms dispatch interval and a 368 ms
-    write, all eight workers finished together, all eight permits were released
-    together, and the dispatcher refilled them 2 ms apart -- so the pool sampled
-    in a burst once per round trip and left a ~350 ms hole between bursts. The
-    recorded gaps were p50 0.22 ms and p90 342 ms, and the probe reported the
-    0.22 ms as its resolution.
-
-    The assertion is on the *shape* of the gap distribution rather than on any
-    particular value: if the workers are spread, the tail cannot be many multiples
-    of the middle.
-    """
+    """Eight workers must give eight spread observations, not eight at once."""
     probe = _FakeProbe(
         "postgresql://example/bench",
         interval_s=0.002,
@@ -849,13 +708,7 @@ def test_the_pool_does_not_phase_lock_into_bursts(tmp_path):
 
 
 def test_resolution_is_the_tail_of_the_gap_distribution_not_the_median():
-    """A bimodal sampling pattern must not be reported by its flattering mode.
-
-    These are the gaps actually recorded against the live cluster, in shape: two
-    thirds of them sub-millisecond because the pool completed in a burst, the rest
-    a third of a second because nothing was in flight. An outage of 300 ms could
-    begin and end inside one of the holes.
-    """
+    """A bimodal sampling pattern must not be reported by its flattering mode."""
     burst = [(t * 0.0002, t * 0.0002 + 0.36, "ok") for t in range(8)]
     later = [(0.36 + t * 0.0002, 0.36 + t * 0.0002 + 0.36, "ok") for t in range(8)]
     summary = summarise(_attempts([*burst, *later]))
@@ -869,12 +722,7 @@ def test_resolution_is_the_tail_of_the_gap_distribution_not_the_median():
 
 
 def test_the_outage_threshold_is_not_raised_by_the_outage_itself():
-    """Sampling resolution is characterised from the healthy period only.
-
-    Otherwise the whole-run tail includes the outage gap, so the longer the
-    interruption the higher the bar for calling it one -- a detector that gets
-    worse exactly as the event gets bigger.
-    """
+    """Sampling resolution is characterised from the healthy period only."""
     healthy = [(t / 20, t / 20 + 0.05, "ok") for t in range(40)]
     short = measure_rto(_attempts([*healthy, (2.0, 3.0, "ok")]), 1.9)
     long = measure_rto(_attempts([*healthy, (2.0, 30.0, "ok")]), 1.9)
@@ -886,22 +734,7 @@ def test_the_outage_threshold_is_not_raised_by_the_outage_itself():
 
 
 def test_a_longer_post_fault_window_does_not_manufacture_an_outage():
-    """The exact false positive found against live data on 2026-09-05.
-
-    A `dead` run's post-fault window held 1462 gaps against 711 pre-fault; drawing
-    twice as many samples from the same heavy-tailed link produces a larger
-    maximum on its own, with nothing having gone wrong. The naive detector (any
-    gap over the healthy max plus one sampling period) reported an 869 ms
-    "outage" 40 s after the fault. The exceedance-rate test below is what a
-    correct detector must say instead: not distinguishable from the probe's own
-    tail, because the post-fault rate of large gaps was, if anything, lower than
-    the pre-fault one.
-
-    This fixture reproduces the shape (not the exact values) of that run: a
-    healthy tail with a small, constant per-observation chance of a slow gap, no
-    change in that chance after the fault, and a longer post-fault window purely
-    because the fault landed a third of the way through the run.
-    """
+    """A longer post-fault window alone does not produce an attributed outage."""
     import random
 
     rng = random.Random(20260905)
@@ -959,22 +792,9 @@ def test_attribution_declines_to_call_it_with_too_few_pre_fault_observations():
 
 
 def test_in_flight_fraction_is_clamped_to_one_when_the_write_started_early():
-    """A fraction greater than one is not a fraction of anything.
-
-    Reproduces seq_id 1169 from the retained 2026-09-05 dead-fault run: the write
-    that closed the gap was dispatched at 99.762s, before the previous served
-    write even completed at 100.220s (workers are concurrent, so this is
-    ordinary, not an error). Its own flight time was 1.327s against a 0.869s gap,
-    and dividing flight time by gap duration without accounting for the overlap
-    gave 1.526 -- a value the field's own name rules out.
-
-    The correct reading is the *overlap* between the write's flight window and
-    the gap window: since it started before the gap even opened, it was in
-    flight for the gap's entire duration, so the fraction is 1.0, not 1.53.
-    """
-    # A healthy run of served writes, then one slow write dispatched slightly
-    # *before* the previous one completed -- ordinary with concurrent workers --
-    # that takes long enough to be the gap the detector selects.
+    """A fraction greater than one is not a fraction of anything."""
+    # Healthy writes, then a slow write dispatched just before the previous one
+    # completed (normal with concurrent workers).
     healthy = [(t / 10, t / 10 + 0.08, "ok") for t in range(500)]  # up to t=50.0
     last_complete = healthy[-1][1]
     after = (last_complete - 0.05, last_complete + 1.2, "ok")
@@ -1008,12 +828,8 @@ def test_in_flight_fraction_never_exceeds_one(tmp_path):
             assert 0.0 <= result["in_flight_fraction"] <= 1.0
 
 
-# --------------------------------------------------------------------------
-# The probe runs on the client node, so its offsets arrive on a different
-# machine's clock and have to be rebased onto the run's. Getting that wrong
-# displaces every observation relative to the fault time by an interval nobody
-# measured, which is D5 -- so the conversion is pinned here.
-# --------------------------------------------------------------------------
+# --- remote probe clock rebasing ---
+# Agent offsets are on the client node's clock and must be rebased onto the run's.
 
 from crdblab.core.remote_probe import AGENT_FILES, RemoteRtoProbe
 from crdblab.topology import CLIENT_NODE
@@ -1099,12 +915,7 @@ def test_summary_records_where_the_probe_ran_and_the_skew_it_applied():
 
 
 def test_the_agent_ships_only_stdlib_only_modules():
-    """The agent's dependency surface is psycopg plus the standard library.
-
-    Adding a module here that imports pandas (or anything else the cluster nodes
-    do not have) would turn a probe failure into a run failure, discovered
-    mid-measurement.
-    """
+    """The agent's dependency surface is psycopg plus the standard library."""
     assert set(AGENT_FILES) == {
         "crdblab/__init__.py",
         "crdblab/core/__init__.py",
@@ -1114,24 +925,7 @@ def test_the_agent_ships_only_stdlib_only_modules():
 
 
 def test_the_outage_is_the_largest_post_fault_gap_not_the_first_over_the_floor():
-    """A short blip right after the fault must not mask the real interruption.
-
-    This reproduces the shape of runs/20260908T232245Z_p4-chaos-recover, the
-    2026-09-08 PostgreSQL Phase III run, where taking the *first* qualifying gap
-    reported a 72-second outage as 348 milliseconds -- understating it 208-fold,
-    and in the flattering direction.
-
-    Two things conspire. The noise floor is calibrated on pre-fault gaps only,
-    so post-fault jitter -- reconnecting clients, a pool completing in bursts --
-    routinely clears it. And the fault does not take effect when the injection
-    command returns: ``tailscale down`` exits 0 while established flows keep
-    working, so the interval just after the fault is still healthy and its
-    jitter is what a first-match latches onto.
-
-    Healthy cadence 0.10 s, so the floor is 0.20 s (longest healthy gap plus one
-    sampling period). Fault at 1.00 s. A 0.30 s blip clears that floor at 1.35 s
-    while writes are still flowing, then the real 20 s outage opens at 1.45 s.
-    """
+    """A short blip right after the fault must not mask the real interruption."""
     healthy = [(round(0.10 * i, 2), round(0.10 * i + 0.05, 2), "ok") for i in range(1, 10)]
     attempts = _attempts(
         [

@@ -1,0 +1,1457 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>crdblab Handbook</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<style>
+/* Layout: fixed reference sidebar (search + nav) beside a single reading column;
+   generated reference pages widen for tables. Signal blue for links and state,
+   amber reserved for faults and warnings. */
+:root {
+  --bg: #f4f6f8;
+  --surface: #ffffff;
+  --sunken: #eef1f4;
+  --ink: #141a22;
+  --ink-2: #4a5462;
+  --ink-3: #7a8494;
+  --line: #d9dee5;
+  --accent: #0b6e8f;
+  --accent-soft: #e0f0f5;
+  --fault: #b8520a;
+  --fault-soft: #fbeee2;
+  --ok: #2d7a4c;
+  --ok-soft: #e3f2e8;
+  --code-bg: #eef1f4;
+  --shadow: 0 1px 2px rgba(20, 26, 34, .06), 0 4px 16px rgba(20, 26, 34, .06);
+
+  --font-display: "IBM Plex Sans Condensed", "Arial Narrow", system-ui, sans-serif;
+  --font-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+
+  --step--1: .8125rem;
+  --step-0: .9375rem;
+  --step-1: 1.125rem;
+  --step-2: 1.375rem;
+  --step-3: 1.875rem;
+  --sidebar: 17.5rem;
+  --measure: 46rem;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e1217; --surface: #151b22; --sunken: #1b222b; --ink: #e3e8ee; --ink-2: #a3adbb;
+    --ink-3: #758092; --line: #29313c; --accent: #52c1dd; --accent-soft: #14303a;
+    --fault: #f0a061; --fault-soft: #3a2616; --ok: #6cc592; --ok-soft: #173024; --code-bg: #1b222b;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 4px 16px rgba(0, 0, 0, .25);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0e1217; --surface: #151b22; --sunken: #1b222b; --ink: #e3e8ee; --ink-2: #a3adbb;
+  --ink-3: #758092; --line: #29313c; --accent: #52c1dd; --accent-soft: #14303a;
+  --fault: #f0a061; --fault-soft: #3a2616; --ok: #6cc592; --ok-soft: #173024; --code-bg: #1b222b;
+  --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 4px 16px rgba(0, 0, 0, .25);
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; }
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font: 400 var(--step-0)/1.6 var(--font-body);
+  -webkit-font-smoothing: antialiased;
+}
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+code, pre, kbd { font-family: var(--font-mono); font-size: .86em; }
+code { background: var(--code-bg); padding: .08em .35em; border-radius: 4px; overflow-wrap: anywhere; }
+pre {
+  background: var(--code-bg); border: 1px solid var(--line); border-radius: 8px;
+  padding: .85rem 1rem; overflow-x: auto; line-height: 1.5; margin: 0;
+}
+pre code { background: none; padding: 0; font-size: .82rem; overflow-wrap: normal; }
+kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 .3em; background: var(--surface); }
+h1, h2, h3, h4 { font-family: var(--font-display); line-height: 1.2; text-wrap: balance; margin: 0; }
+h1 { font-size: var(--step-3); font-weight: 700; letter-spacing: -.01em; }
+h2 { font-size: var(--step-2); font-weight: 600; padding-top: .5rem; }
+h3 { font-size: var(--step-1); font-weight: 600; }
+h4 { font-size: var(--step-0); font-weight: 600; }
+p { margin: 0; }
+ul, ol { margin: 0; padding-left: 1.3rem; display: grid; gap: .3rem; }
+.eyebrow {
+  font: 600 var(--step--1)/1 var(--font-display); text-transform: uppercase;
+  letter-spacing: .09em; color: var(--accent);
+}
+.muted { color: var(--ink-2); }
+.small { font-size: var(--step--1); }
+
+/* shell */
+.shell { display: grid; grid-template-columns: var(--sidebar) minmax(0, 1fr); min-height: 100vh; }
+.sidebar {
+  position: sticky; top: env(safe-area-inset-top, 0px); height: 100vh; overflow-y: auto;
+  background: var(--surface); border-right: 1px solid var(--line);
+  display: flex; flex-direction: column; gap: 1rem; padding: 1.25rem 1rem 2rem;
+}
+.brand { display: flex; align-items: center; gap: .65rem; }
+.brand svg { flex: none; }
+.brand-name { font: 700 1.15rem/1 var(--font-display); letter-spacing: -.01em; }
+.brand-sub { font-size: var(--step--1); color: var(--ink-3); }
+.search { position: relative; }
+.search input {
+  width: 100%; font: inherit; font-size: var(--step--1); color: var(--ink);
+  background: var(--sunken); border: 1px solid var(--line); border-radius: 8px;
+  padding: .55rem .7rem .55rem 2rem;
+}
+.search svg { position: absolute; left: .65rem; top: 50%; transform: translateY(-50%); color: var(--ink-3); }
+.search .hint { position: absolute; right: .55rem; top: 50%; transform: translateY(-50%); font-size: .7rem; color: var(--ink-3); }
+.results {
+  position: absolute; left: 0; right: 0; top: calc(100% + .35rem); z-index: 30;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: var(--shadow); max-height: 60vh; overflow-y: auto; padding: .3rem;
+}
+.result { display: grid; gap: .1rem; padding: .45rem .55rem; border-radius: 6px; cursor: pointer; }
+.result[aria-selected="true"], .result:hover { background: var(--accent-soft); }
+.result .r-title { font-size: var(--step--1); font-weight: 600; overflow-wrap: anywhere; }
+.result .r-sub { font-size: .75rem; color: var(--ink-3); overflow-wrap: anywhere; }
+.result .r-kind { font: 500 .66rem/1 var(--font-mono); text-transform: uppercase; color: var(--accent); letter-spacing: .05em; }
+.nav { display: grid; gap: 1.1rem; }
+.nav-group { display: grid; gap: .15rem; }
+.nav-group > span { font: 600 .7rem/1 var(--font-display); text-transform: uppercase; letter-spacing: .1em; color: var(--ink-3); padding: 0 .55rem .35rem; }
+.nav a {
+  display: block; color: var(--ink-2); padding: .32rem .55rem; border-radius: 6px; font-size: var(--step--1);
+}
+.nav a:hover { background: var(--sunken); text-decoration: none; color: var(--ink); }
+.nav a[aria-current="page"] { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.sidebar-foot { margin-top: auto; display: flex; gap: .5rem; align-items: center; font-size: .75rem; color: var(--ink-3); }
+.icon-btn {
+  display: inline-flex; align-items: center; gap: .4rem; font: 500 var(--step--1)/1 var(--font-body);
+  color: var(--ink-2); background: var(--sunken); border: 1px solid var(--line);
+  border-radius: 7px; padding: .45rem .6rem; cursor: pointer;
+}
+.icon-btn:hover { color: var(--ink); }
+
+.topbar { display: none; }
+main { min-width: 0; padding-inline: clamp(16px, 4vw, 3.5rem); padding-block: 2.25rem 5rem; }
+.page { display: grid; gap: 1.4rem; max-width: var(--measure); }
+.page > *, .section > *, .pkg > *, .step-panel > *, .item > *, .card > * { min-width: 0; }
+.page.wide { max-width: 72rem; }
+.page > header { display: grid; gap: .6rem; padding-bottom: .4rem; }
+.lede { font-size: var(--step-1); color: var(--ink-2); line-height: 1.55; max-width: 44rem; }
+.section { display: grid; gap: .85rem; }
+.pager { display: flex; justify-content: space-between; gap: 1rem; flex-wrap: wrap; border-top: 1px solid var(--line); padding-top: 1.2rem; margin-top: 1rem; }
+.pager a { display: grid; gap: .1rem; font-weight: 600; }
+.pager a span { font-size: .72rem; color: var(--ink-3); font-weight: 400; text-transform: uppercase; letter-spacing: .06em; }
+.pager a.next { text-align: right; margin-left: auto; }
+
+/* components */
+.callout {
+  display: grid; gap: .35rem; background: var(--accent-soft); border-radius: 10px; padding: .85rem 1rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+}
+.callout.warn { background: var(--fault-soft); border-color: color-mix(in srgb, var(--fault) 30%, transparent); }
+.callout strong { font-family: var(--font-display); font-weight: 600; }
+.table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-size: var(--step--1); font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: .5rem .75rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font: 600 .72rem/1.3 var(--font-display); text-transform: uppercase; letter-spacing: .06em; color: var(--ink-3); background: var(--sunken); white-space: nowrap; }
+tr:last-child td { border-bottom: 0; }
+td code { white-space: nowrap; }
+td.wrap code { white-space: normal; }
+.grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); gap: .8rem; }
+.card {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
+  padding: .9rem 1rem; display: grid; gap: .35rem; min-width: 0; align-content: start;
+}
+a.card { color: inherit; }
+a.card:hover { text-decoration: none; border-color: var(--accent); }
+.card h4 { display: flex; gap: .5rem; align-items: baseline; flex-wrap: wrap; }
+.pill {
+  display: inline-flex; align-items: center; font: 500 .68rem/1 var(--font-mono);
+  padding: .22rem .45rem; border-radius: 999px; background: var(--sunken); color: var(--ink-2); white-space: nowrap;
+}
+.pill.accent { background: var(--accent-soft); color: var(--accent); }
+.pill.fault { background: var(--fault-soft); color: var(--fault); }
+.pill.ok { background: var(--ok-soft); color: var(--ok); }
+
+/* flow diagrams */
+.flow { display: flex; flex-wrap: wrap; align-items: stretch; gap: .5rem; }
+.flow .node {
+  flex: 1 1 8.5rem; min-width: 0; background: var(--surface); border: 1px solid var(--line);
+  border-radius: 8px; padding: .6rem .7rem; display: grid; gap: .15rem; align-content: start;
+}
+.flow .node b { font: 600 var(--step--1)/1.25 var(--font-display); }
+.flow .node span { font-size: .75rem; color: var(--ink-2); line-height: 1.4; }
+.flow .node.hot { border-color: var(--fault); background: var(--fault-soft); }
+.flow .node.key { border-color: var(--accent); }
+.flow .arrow { align-self: center; color: var(--ink-3); font-family: var(--font-mono); }
+.layers { display: grid; gap: .45rem; }
+.layer { display: grid; grid-template-columns: 8.5rem minmax(0, 1fr); gap: .75rem; align-items: start; }
+.layer > span { font: 600 .72rem/1.3 var(--font-display); text-transform: uppercase; letter-spacing: .07em; color: var(--ink-3); padding-top: .55rem; }
+.layer .chips { display: flex; flex-wrap: wrap; gap: .4rem; }
+.chip {
+  font: 500 var(--step--1)/1 var(--font-mono); background: var(--surface); border: 1px solid var(--line);
+  border-radius: 7px; padding: .5rem .6rem; color: var(--ink); cursor: pointer;
+}
+.chip:hover { border-color: var(--accent); color: var(--accent); }
+.chip.static { cursor: default; }
+.chip.static:hover { border-color: var(--line); color: var(--ink); }
+
+/* stepper */
+.stepper { display: grid; grid-template-columns: minmax(12rem, 16rem) minmax(0, 1fr); gap: 1rem; align-items: start; }
+.steps { display: grid; gap: .3rem; list-style: none; padding: 0; counter-reset: s; }
+.steps button {
+  width: 100%; text-align: left; font: inherit; font-size: var(--step--1); color: var(--ink-2);
+  background: transparent; border: 1px solid transparent; border-radius: 8px; padding: .5rem .6rem; cursor: pointer;
+  display: grid; grid-template-columns: 1.6rem 1fr; gap: .4rem; align-items: baseline;
+}
+.steps button .n { font: 500 .72rem/1 var(--font-mono); color: var(--ink-3); }
+.steps button:hover { background: var(--sunken); color: var(--ink); }
+.steps button[aria-pressed="true"] { background: var(--surface); border-color: var(--accent); color: var(--ink); font-weight: 600; }
+.steps button[aria-pressed="true"] .n { color: var(--accent); }
+.step-panel { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 1rem 1.1rem; display: grid; gap: .7rem; min-width: 0; }
+
+/* calculator */
+.calc { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 1rem 1.1rem; display: grid; gap: .9rem; }
+.calc-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); gap: .6rem; }
+.calc label { display: grid; gap: .25rem; font-size: .75rem; color: var(--ink-2); }
+.calc input[type="number"] {
+  font: 500 var(--step-0) var(--font-mono); color: var(--ink); background: var(--sunken);
+  border: 1px solid var(--line); border-radius: 7px; padding: .4rem .5rem; width: 100%;
+}
+.calc .check { display: flex; align-items: center; gap: .35rem; font-size: .75rem; color: var(--ink-2); }
+.bars { display: grid; gap: .35rem; }
+.bar-row { display: grid; grid-template-columns: 5.5rem minmax(0, 1fr) 4.5rem; gap: .6rem; align-items: center; font-size: .78rem; }
+.bar-track { height: .7rem; background: var(--sunken); border-radius: 4px; position: relative; overflow: hidden; }
+.bar-fill { position: absolute; inset: 0 auto 0 0; background: var(--ink-3); border-radius: 4px; }
+.bar-row.ack .bar-fill { background: var(--accent); }
+.bar-row.bind .bar-fill { background: var(--fault); }
+.bar-row.off { opacity: .45; }
+.bar-row .v { font-family: var(--font-mono); text-align: right; font-variant-numeric: tabular-nums; }
+.readout { display: flex; flex-wrap: wrap; gap: .5rem 1.4rem; align-items: baseline; }
+.readout .big { font: 600 1.8rem/1 var(--font-mono); color: var(--fault); font-variant-numeric: tabular-nums; }
+
+/* run dir explorer */
+.explorer { display: grid; grid-template-columns: minmax(13rem, 17rem) minmax(0, 1fr); gap: 1rem; align-items: start; }
+.tree { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: .6rem; font: 400 var(--step--1)/1.4 var(--font-mono); display: grid; gap: .1rem; }
+.tree button {
+  font: inherit; text-align: left; background: none; border: 0; border-radius: 6px; padding: .3rem .45rem;
+  color: var(--ink); cursor: pointer; display: flex; justify-content: space-between; gap: .5rem;
+}
+.tree button span { font-size: .68rem; color: var(--ink-3); }
+.tree button:hover { background: var(--sunken); }
+.tree button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
+.tree .dir { color: var(--ink-3); padding: .3rem .45rem; }
+
+/* api */
+.api-toolbar { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; }
+.api-toolbar input[type="search"] {
+  flex: 1 1 14rem; font: inherit; font-size: var(--step--1); color: var(--ink); background: var(--surface);
+  border: 1px solid var(--line); border-radius: 8px; padding: .5rem .7rem;
+}
+.toggle { display: inline-flex; align-items: center; gap: .4rem; font-size: var(--step--1); color: var(--ink-2); }
+.pkg { display: grid; gap: .6rem; }
+.item { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: .9rem 1rem; display: grid; gap: .5rem; min-width: 0; scroll-margin-top: 1rem; }
+.item.flash { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.item header { display: flex; flex-wrap: wrap; gap: .4rem .6rem; align-items: baseline; }
+.sig { font: 400 var(--step--1)/1.5 var(--font-mono); color: var(--ink); overflow-wrap: anywhere; }
+.sig b { font-weight: 600; color: var(--accent); }
+.doc { display: grid; gap: .55rem; color: var(--ink-2); font-size: var(--step-0); }
+.doc p, .doc li { max-width: 44rem; }
+.doc dl { margin: 0; display: grid; gap: .3rem; }
+.doc dt { font-family: var(--font-mono); font-size: .82rem; color: var(--ink); }
+.doc dd { margin: 0 0 .2rem 1rem; }
+.methods { display: grid; gap: .5rem; border-left: 2px solid var(--line); padding-left: .9rem; margin-top: .2rem; }
+.methods .item { background: var(--sunken); }
+details.fold > summary { cursor: pointer; font-size: var(--step--1); color: var(--ink-2); }
+.linenum { font: 400 .7rem/1 var(--font-mono); color: var(--ink-3); }
+
+.empty { padding: 1rem; color: var(--ink-3); font-size: var(--step--1); }
+
+@media (max-width: 860px) {
+  .shell { grid-template-columns: minmax(0, 1fr); }
+  .sidebar {
+    position: fixed; inset: 0 auto 0 0; width: min(20rem, 88vw); z-index: 40; transform: translateX(-102%);
+    transition: transform .2s ease; box-shadow: var(--shadow);
+    padding-top: calc(1.25rem + env(safe-area-inset-top, 0px));
+  }
+  body.nav-open .sidebar { transform: none; }
+  .scrim { position: fixed; inset: 0; background: rgba(0, 0, 0, .35); z-index: 35; }
+  .topbar {
+    display: flex; align-items: center; justify-content: space-between; gap: .75rem;
+    position: sticky; top: env(safe-area-inset-top, 0px); z-index: 20; background: var(--surface);
+    border-bottom: 1px solid var(--line); padding: .6rem 16px;
+  }
+  main { padding-block: 1.5rem 4rem; }
+  .stepper, .explorer { grid-template-columns: minmax(0, 1fr); }
+  .layer { grid-template-columns: minmax(0, 1fr); gap: .3rem; }
+  .layer > span { padding-top: 0; }
+}
+@media (prefers-reduced-motion: reduce) { .sidebar { transition: none; } }
+</style>
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar" id="sidebar" aria-label="Documentation navigation">
+    <div class="brand">
+      <svg width="34" height="34" viewBox="0 0 34 34" aria-hidden="true">
+        <g fill="none" stroke="currentColor" stroke-width="1.2" opacity=".45">
+          <path d="M17 5 L29 13 L25 28 L9 28 L5 13 Z"></path>
+          <path d="M17 5 L25 28 M17 5 L9 28 M5 13 L29 13 M5 13 L25 28 M29 13 L9 28"></path>
+        </g>
+        <circle cx="17" cy="5" r="3.2" fill="var(--accent)"></circle>
+        <circle cx="29" cy="13" r="2.6" fill="var(--ink-2)"></circle>
+        <circle cx="25" cy="28" r="2.6" fill="var(--ink-2)"></circle>
+        <circle cx="9" cy="28" r="2.6" fill="var(--ink-2)"></circle>
+        <circle cx="5" cy="13" r="2.6" fill="var(--fault)"></circle>
+      </svg>
+      <div>
+        <div class="brand-name">crdblab</div>
+        <div class="brand-sub">Project Hydra handbook</div>
+      </div>
+    </div>
+    <div class="search" role="search">
+      <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="5" fill="none" stroke="currentColor" stroke-width="1.6"></circle><path d="M11 11 L15 15" stroke="currentColor" stroke-width="1.6"></path></svg>
+      <input id="search" type="search" placeholder="Search docs, commands, code" autocomplete="off" aria-label="Search the documentation" aria-controls="results">
+      <span class="hint"><kbd>/</kbd></span>
+      <div class="results" id="results" role="listbox" hidden></div>
+    </div>
+    <nav class="nav" id="nav"></nav>
+    <div class="sidebar-foot">
+      <button class="icon-btn" id="theme-btn" type="button" aria-label="Change colour theme">
+        <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.5"></circle><path d="M8 2 A6 6 0 0 1 8 14 Z" fill="currentColor"></path></svg>
+        <span id="theme-label">System</span>
+      </button>
+      <span id="build-stamp"></span>
+    </div>
+  </aside>
+
+  <div style="min-width:0">
+    <div class="topbar">
+      <button class="icon-btn" id="menu-btn" type="button" aria-controls="sidebar" aria-expanded="false">
+        <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4h12M2 8h12M2 12h12" stroke="currentColor" stroke-width="1.6"></path></svg>
+        Menu
+      </button>
+      <span class="brand-name">crdblab</span>
+    </div>
+    <main id="main">
+
+<!-- ============================ OVERVIEW ============================ -->
+<article class="page" data-page="overview" data-title="Overview" data-group="Guide">
+  <header>
+    <span class="eyebrow">Project Hydra</span>
+    <h1>A measurement harness for multi-cloud database failover</h1>
+    <p class="lede">crdblab compares CockroachDB with PostgreSQL under Patroni on the same five-node, three-cloud testbed. It measures steady-state throughput and latency, then injects faults and measures how long the database stops serving writes (RTO) and whether any acknowledged write is lost (RPO).</p>
+  </header>
+
+  <section class="section">
+    <h2 id="overview-what">What it does</h2>
+    <p>One command provisions the testbed with Terraform, runs every measurement phase against CockroachDB, tears the testbed down, redeploys it as PostgreSQL/Patroni, runs the same phases again, and draws a 31-chart comparison. Every result is a self-describing run directory under <code>runs/</code>, so all analysis and figures can be regenerated later without a testbed.</p>
+    <div class="flow" aria-label="Measurement phases in order">
+      <div class="node key"><b>Phase I</b><span>Network substrate: all-pairs RTT and the quorum floor</span></div>
+      <div class="arrow">→</div>
+      <div class="node key"><b>Phase II</b><span>Benchmark: throughput and latency across concurrency tiers</span></div>
+      <div class="arrow">→</div>
+      <div class="node hot"><b>Phase III</b><span><code>recover</code> fault: a 45 s network partition of the primary</span></div>
+      <div class="arrow">→</div>
+      <div class="node hot"><b>Phase IV</b><span><code>dead</code> fault: the database process is killed</span></div>
+    </div>
+  </section>
+
+  <section class="section">
+    <h2 id="overview-architecture">How the code fits together</h2>
+    <p class="muted">Each layer only calls the ones below it. Select a module to open its code reference.</p>
+    <div class="layers" id="arch-layers"></div>
+  </section>
+
+  <section class="section">
+    <h2 id="overview-principles">Design rules the code enforces</h2>
+    <p>Most failures in this kind of study produce plausible, even flattering, numbers. The harness is built so that those failures stop a run instead.</p>
+    <div class="grid-2">
+      <div class="card"><h4>Header-bound parsing</h4><p class="muted small">Generator output is bound to column names from its own header line. A data line before a header is an error, never a guess.</p></div>
+      <div class="card"><h4>Operation type is a dimension</h4><p class="muted small">Throughput sums across reads and updates. Latency is always reported per operation, never pooled.</p></div>
+      <div class="card"><h4>Runs are immutable and self-describing</h4><p class="muted small">Every run keeps a manifest (git revision, profile, topology, server flags, hardware) and the generator's raw output.</p></div>
+      <div class="card"><h4>Two gates before analysis</h4><p class="muted small">Validation asks whether the numbers agree with each other. Pre-flight asks whether the system was fit to measure. <code>load_run</code> refuses a run that fails either.</p></div>
+      <div class="card"><h4>A comparison is checked too</h4><p class="muted small">Two valid runs are only compared if their workload, server flags, cache budget, hardware and version match.</p></div>
+      <div class="card"><h4>Concurrency is not load</h4><p class="muted small">Engines are compared along their throughput-latency curves, at matched throughput or utilisation, never at equal worker counts.</p></div>
+      <div class="card"><h4>Silent instruments are not healthy ones</h4><p class="muted small">RTO clients record how much of the run they actually watched. An outage they did not see is reported as unmeasured, not absent.</p></div>
+      <div class="card"><h4>Physical floors are asserted</h4><p class="muted small">A committed write cannot beat the round trip to the follower that completes quorum. Faster writes mean the workload touched no rows.</p></div>
+    </div>
+  </section>
+
+  <section class="section">
+    <h2 id="overview-layout">Repository layout</h2>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Path</th><th>What lives there</th></tr></thead>
+      <tbody>
+        <tr><td><code>crdblab/</code></td><td>The harness package and the <code>crdblab</code> command.</td></tr>
+        <tr><td><code>crdblab/core/</code></td><td>SSH, the output parser, the run recorder, pre-flight checks, the RTO probe and hardware polling.</td></tr>
+        <tr><td><code>crdblab/phases/</code></td><td>Phase I (<code>p1_network</code>), Phase II (<code>bench</code>) and Phases III-IV (<code>p4_chaos</code>).</td></tr>
+        <tr><td><code>crdblab/analysis/</code></td><td>The gated loader, validation, steady state, engine comparison and resilience.</td></tr>
+        <tr><td><code>crdblab/report/</code>, <code>crdblab/insights/</code></td><td>Dissertation figures, and the 31-chart insights catalogue with its report and dashboard.</td></tr>
+        <tr><td><code>pipeline/</code></td><td>The full two-engine run as a terminal UI (Terraform, measurement, teardown, Tailscale cleanup).</td></tr>
+        <tr><td><code>demo/</code>, <code>demo.sh</code></td><td>Replays a recorded experiment in a few minutes.</td></tr>
+        <tr><td><code>profiles/</code></td><td>Experiment parameters: <code>smoke</code>, <code>thesis</code>, <code>thesis-extended</code>.</td></tr>
+        <tr><td><code>terraform/</code></td><td>Six VMs across GCP, Linode and Azure, and their cloud-init bootstrap scripts.</td></tr>
+        <tr><td><code>run-experiment.sh</code></td><td>Measures every phase against the deployed engine; with no arguments, launches the full pipeline.</td></tr>
+        <tr><td><code>generate_insights.sh</code></td><td>Draws the insights catalogue from the runs on disk.</td></tr>
+        <tr><td><code>tests/</code></td><td>The pytest suite; it needs no testbed.</td></tr>
+        <tr><td><code>docs-app/</code></td><td>This handbook. <code>build.py</code> regenerates its reference data from the code.</td></tr>
+        <tr><td><code>runs/</code>, <code>insights/</code>, <code>figures/</code></td><td>Outputs (git-ignored).</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+</article>
+
+<!-- ============================ QUICK START ============================ -->
+<article class="page" data-page="quickstart" data-title="Getting started" data-group="Guide" hidden>
+  <header>
+    <span class="eyebrow">Guide</span>
+    <h1>Getting started</h1>
+    <p class="lede">Install the harness, check it against its own tests, then run the experiment with one command.</p>
+  </header>
+
+  <section class="section">
+    <h2 id="qs-needs">What you need</h2>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Requirement</th><th>Used for</th></tr></thead>
+      <tbody>
+        <tr><td>Python 3.10+</td><td>The harness.</td></tr>
+        <tr><td>Terraform CLI, logged in to HCP Terraform (<code>terraform login</code>)</td><td>Provisioning. Credentials and variables live in the HCP workspace (see <a href="#infra">Infrastructure</a>).</td></tr>
+        <tr><td>Tailscale on this machine, in the testbed's tailnet</td><td>Every node is reached by MagicDNS name (<code>crdb-gcp-1</code>, ...), never public IP.</td></tr>
+        <tr><td>An SSH key matching <code>ssh_public_key</code></td><td>The harness drives every node over SSH.</td></tr>
+        <tr><td>A Tailscale API access token in <code>.env</code></td><td>The full pipeline deletes the VMs' tailnet devices after each teardown.</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <section class="section">
+    <h2 id="qs-install">Install and check</h2>
+<pre><code>git clone https://github.com/faiz-gh/project-hydra.git
+cd project-hydra
+python3 -m venv .venv
+.venv/bin/python -m pip install -e ".[dev]"
+
+.venv/bin/python -m pytest -q     # the suite needs no testbed
+.venv/bin/crdblab --help
+cp .env.example .env              # then set TS_API_KEY</code></pre>
+    <p class="muted small">Commands in this handbook call <code>.venv/bin/crdblab</code> explicitly rather than assuming an activated virtualenv.</p>
+  </section>
+
+  <section class="section">
+    <h2 id="qs-run">Run the whole experiment</h2>
+<pre><code>tmux new -s hydra        # a thesis-extended run takes hours
+./run-experiment.sh      # on a terminal: the full two-engine pipeline UI</code></pre>
+    <p>The pipeline asks for a profile, then for each engine it applies Terraform, waits for cloud-init, measures all four phases, and tears everything down. Finally it draws the insights and prints the engine comparison. See <a href="#workflow">The workflow</a> for each step.</p>
+  </section>
+
+  <section class="section">
+    <h2 id="qs-one-engine">Measure only the engine that is deployed</h2>
+    <p>With any arguments, <code>run-experiment.sh</code> measures the single engine currently on the testbed and stops at the first failed check.</p>
+<pre><code>./run-experiment.sh --profile thesis-extended     # full sweep, ~75 min
+./run-experiment.sh --smoke                       # harness self-test, ~14 min
+./run-experiment.sh --engine postgresql           # the deployed engine is PostgreSQL
+./run-experiment.sh --skip-load                   # working set already loaded
+./run-experiment.sh --no-chaos                    # phases I-II only
+./run-experiment.sh --ask                         # choose options interactively</code></pre>
+    <div class="callout"><strong><code>--engine</code> does not deploy anything.</strong><p>It names the engine that <code>terraform apply -var="database_engine=..."</code> last stood up. Pointing it at an engine that is not running fails the testbed checks.</p></div>
+  </section>
+
+  <section class="section">
+    <h2 id="qs-offline">Work with existing runs</h2>
+    <p>Everything after measurement works from <code>runs/</code> alone.</p>
+<pre><code>.venv/bin/crdblab validate runs/&lt;run-id&gt;
+.venv/bin/crdblab analyze steady-state &lt;bench-run-id&gt;
+.venv/bin/crdblab analyze engine-comparison --crdb &lt;run&gt; --pg &lt;run&gt;
+.venv/bin/crdblab analyze resilience &lt;chaos-run-id&gt;
+./generate_insights.sh --profile thesis-extended
+./demo.sh                                         # replay a recorded experiment</code></pre>
+  </section>
+</article>
+
+<!-- ============================ TESTBED ============================ -->
+<article class="page" data-page="testbed" data-title="The testbed" data-group="Guide" hidden>
+  <header>
+    <span class="eyebrow">Guide</span>
+    <h1>The testbed</h1>
+    <p class="lede">Six virtual machines on three clouds, joined by a Tailscale mesh. Five form the database cluster; the sixth runs the load generator and is never part of the system under test. Only one engine is deployed at a time.</p>
+  </header>
+
+  <section class="section">
+    <h2 id="tb-machines">Machines</h2>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Node</th><th>Host</th><th>Cloud / region</th><th>SSH user</th><th>Role</th></tr></thead>
+      <tbody>
+        <tr><td><code>gcp-1</code></td><td><code>crdb-gcp-1</code></td><td>GCP us-east1</td><td>ubuntu</td><td><span class="pill accent">gateway</span> CockroachDB leaseholder and Patroni primary are pinned here. Chaos target.</td></tr>
+        <tr><td><code>linode-1</code></td><td><code>crdb-linode-1</code></td><td>Linode us-east</td><td>root</td><td>Voter; bootstraps the cluster (first in <code>cluster_join_nodes</code>). ~20 ms from gcp-1.</td></tr>
+        <tr><td><code>linode-2</code></td><td><code>crdb-linode-2</code></td><td>Linode us-west</td><td>root</td><td>Voter. Its RTT from gcp-1 (~70 ms) is the quorum floor.</td></tr>
+        <tr><td><code>azure-1</code></td><td><code>crdb-azure-1</code></td><td>Azure centralindia</td><td>ubuntu</td><td>Voter, ~200-230 ms away. Burstable B-series.</td></tr>
+        <tr><td><code>azure-2</code></td><td><code>crdb-azure-2</code></td><td>Azure eastasia</td><td>ubuntu</td><td>Voter, ~150-210 ms away. Burstable B-series.</td></tr>
+        <tr><td><code>client-1</code></td><td><code>crdb-client-1</code></td><td>GCP us-east1</td><td>ubuntu</td><td><span class="pill">client</span> Generator, HAProxy, pgbouncer and the RTO probe agent. Not a cluster member.</td></tr>
+      </tbody>
+    </table></div>
+    <p class="muted small">All six are 4 vCPU / ~8 GiB (<code>c2d-highcpu-4</code>, <code>g6-dedicated-4</code>, <code>Standard_B4als_v2</code>), as the latest run manifests record. GCP and Azure disks are 50 GB SSD. The topology is declared once in <a href="#mod-crdblab.topology"><code>crdblab/topology.py</code></a>; the shell scripts read it from there.</p>
+    <div class="callout"><strong>The fast triangle.</strong><p>gcp-1, linode-1 and linode-2 are within ~70 ms of each other. A 3-of-5 quorum from gcp-1 needs two follower acknowledgements, so the second-fastest follower (linode-2) sets the write floor. Losing a triangle member pushes that floor to an Azure node, roughly 3x higher.</p></div>
+  </section>
+
+  <section class="section">
+    <h2 id="tb-ports">Network and ports</h2>
+    <p>All traffic rides the tailnet. Commands that a node runs against itself use <code>tailscale ip -4</code>, because a node's own OS can resolve its hostname to an internal address the database does not listen on.</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Port</th><th>Service</th><th>Where</th><th>Used by</th></tr></thead>
+      <tbody>
+        <tr><td><code>26257</code></td><td>CockroachDB SQL</td><td>cluster nodes</td><td>generator, audit writer, RTO probe, admin commands</td></tr>
+        <tr><td><code>8080</code></td><td>CockroachDB HTTP</td><td>cluster nodes</td><td>admin UI</td></tr>
+        <tr><td><code>5432</code></td><td>PostgreSQL</td><td>cluster nodes</td><td>HAProxy, audit writer, RTO probe (multi-host DSN)</td></tr>
+        <tr><td><code>8008</code></td><td>Patroni REST API</td><td>cluster nodes</td><td>pre-flight, HAProxy health checks, primary resolution</td></tr>
+        <tr><td><code>9100</code></td><td>node_exporter</td><td>all six</td><td>hardware metrics, polled from the harness</td></tr>
+        <tr><td><code>5000</code></td><td>HAProxy → Patroni primary</td><td>client-1</td><td>pgbouncer, psql, <code>DB_URI</code></td></tr>
+        <tr><td><code>6432</code></td><td>pgbouncer (loopback)</td><td>client-1</td><td>the generator on PostgreSQL</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <section class="section">
+    <h2 id="tb-paths">How a query travels</h2>
+    <h3>CockroachDB</h3>
+    <div class="flow">
+      <div class="node"><b>harness</b><span>SSH to client-1</span></div><div class="arrow">→</div>
+      <div class="node"><b>cockroach workload run</b><span>on client-1, one URL</span></div><div class="arrow">→</div>
+      <div class="node key"><b>crdb-gcp-1:26257</b><span>bench; chaos runs dial a non-target member</span></div><div class="arrow">→</div>
+      <div class="node"><b>leaseholder</b><span>gcp-1, via <code>lease_preferences</code></span></div>
+    </div>
+    <h3>PostgreSQL / Patroni</h3>
+    <div class="flow">
+      <div class="node"><b>cockroach workload run</b><span>on client-1</span></div><div class="arrow">→</div>
+      <div class="node"><b>pgbouncer :6432</b><span>drops the <code>allow_unsafe_internals</code> startup parameter</span></div><div class="arrow">→</div>
+      <div class="node"><b>HAProxy :5000</b><span>routes to whichever node answers <code>/primary</code></span></div><div class="arrow">→</div>
+      <div class="node key"><b>primary</b><span>gcp-1 by design; switched back after failovers</span></div>
+    </div>
+    <p>The generator gets exactly one URL because <code>cockroach workload</code> dials multiple URLs serially, which takes minutes at high concurrency. The two measurement clients, the RPO audit writer and the RTO probe, bypass the proxies and use a multi-host DSN over all five nodes (<a href="#mod-crdblab.config"><code>pg_direct_dsn</code></a>), so a proxy hiccup cannot look like a database outage.</p>
+    <h3>Fault injection and collection</h3>
+    <div class="flow">
+      <div class="node hot"><b>fault</b><span>SSH straight to the target; <code>recover</code>: <code>tailscale down</code>, 45 s, <code>up</code>. <code>dead</code>: kill the process</span></div>
+      <div class="node"><b>generator stdout</b><span>streamed back over SSH, parsed live into <code>metrics.csv</code></span></div>
+      <div class="node"><b>audit writer</b><span>a thread in the harness process</span></div>
+      <div class="node"><b>RTO probe</b><span>copied to and run on client-1</span></div>
+      <div class="node"><b>node_exporter</b><span>polled over HTTP every 5 s</span></div>
+    </div>
+  </section>
+</article>
+
+<!-- ============================ WORKFLOW ============================ -->
+<article class="page" data-page="workflow" data-title="The workflow" data-group="Guide" hidden>
+  <header>
+    <span class="eyebrow">Guide</span>
+    <h1>The workflow</h1>
+    <p class="lede">Two layers run an experiment. <code>pipeline/run_all.py</code> handles infrastructure for both engines; <code>run-experiment.sh</code> measures one deployed engine. Select a step to see what it does and what makes it stop.</p>
+  </header>
+
+  <section class="section">
+    <h2 id="wf-pipeline">The full pipeline</h2>
+    <p class="muted">Launched by <code>./run-experiment.sh</code> with no arguments on a terminal. It runs these steps for CockroachDB, then again for PostgreSQL/Patroni.</p>
+    <div class="stepper" data-stepper="pipeline"></div>
+  </section>
+
+  <section class="section">
+    <h2 id="wf-experiment">Measuring one engine: run-experiment.sh</h2>
+    <div class="stepper" data-stepper="experiment"></div>
+  </section>
+
+  <section class="section">
+    <h2 id="wf-switch">Switching engines by hand</h2>
+<pre><code>cd terraform
+terraform apply -var="database_engine=postgresql"   # replaces every cluster node
+cd .. &amp;&amp; ./run-experiment.sh --engine postgresql --profile thesis-extended
+.venv/bin/crdblab analyze engine-comparison --crdb &lt;crdb-bench-run&gt; --pg &lt;pg-bench-run&gt;</code></pre>
+    <p>The comparison needs a bench run from each engine under the same profile; it refuses runs that differ in anything other than the engine.</p>
+  </section>
+
+  <section class="section">
+    <h2 id="wf-help">Script usage</h2>
+    <div id="script-help"></div>
+  </section>
+</article>
+
+<!-- ============================ PHASES ============================ -->
+<article class="page" data-page="phases" data-title="Measurement phases" data-group="Guide" hidden>
+  <header>
+    <span class="eyebrow">Guide</span>
+    <h1>Measurement phases</h1>
+    <p class="lede">Run in order: each phase uses what the previous one produced. Every phase writes one run directory named <code>&lt;UTC stamp&gt;_&lt;suffix&gt;</code>.</p>
+  </header>
+
+  <section class="section">
+    <h2 id="ph-1">Phase I: network substrate</h2>
+<pre><code>.venv/bin/crdblab net probe --profile thesis-extended
+.venv/bin/crdblab --engine postgresql net probe --profile thesis-extended</code></pre>
+    <p>From every node in parallel, pings every other node 100 times at 0.1 s intervals and records the RTT matrix, loss and Tailscale MTU into <code>network.csv</code>. It derives the <a href="#concepts">quorum floor</a> from the gateway's row, and asserts NTP clock offset on every node and (on CockroachDB) leaseholder placement. Run it once per deployment: switching engines replaces every cluster node.</p>
+    <p class="muted small">Suffix <code>_p1-network</code>. Code: <a href="#mod-crdblab.phases.p1_network"><code>phases/p1_network.py</code></a>.</p>
+  </section>
+
+  <section class="section">
+    <h2 id="ph-2">Phase II: benchmark</h2>
+<pre><code>.venv/bin/crdblab bench --profile thesis-extended
+.venv/bin/crdblab --engine postgresql bench --profile thesis-extended</code></pre>
+    <p>Sweeps the profile's concurrency tiers (thesis-extended: C = 1, 2, 5, 10, 50, 100, 200, three repetitions each) in an order shuffled from the profile seed and recorded in the manifest. Each tier runs <code>cockroach workload run ycsb</code> from client-1 with an 80/20 read/update mix and uniform keys, drops the warm-up, and writes one row per interval and operation to <code>metrics.csv</code>.</p>
+    <ul>
+      <li>Refuses to start without a Phase I run to supply the quorum floor.</li>
+      <li>Before starting: clock offset, and leaseholder placement (CockroachDB) or primary placement (PostgreSQL).</li>
+      <li>Around every tier: a row-match probe and the write-latency floor check, so a workload touching no rows fails.</li>
+      <li>Records the server's start command, version and hardware, and polls node_exporter on all six machines.</li>
+    </ul>
+    <p class="muted small">Suffix <code>_bench_cluster</code>. Code: <a href="#mod-crdblab.phases.bench"><code>phases/bench.py</code></a>.</p>
+  </section>
+
+  <section class="section">
+    <h2 id="ph-3">Phases III and IV: fault injection</h2>
+<pre><code>.venv/bin/crdblab chaos run --mode recover --profile thesis-extended   # Phase III
+.venv/bin/crdblab chaos run --mode dead    --profile thesis-extended   # Phase IV</code></pre>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Mode</th><th>CockroachDB</th><th>PostgreSQL / Patroni</th></tr></thead>
+      <tbody>
+        <tr><td><span class="pill fault">recover</span></td><td colspan="2" class="wrap"><code>tailscale down</code>, 45 s, <code>tailscale up</code>, detached so it survives the cut SSH session. The node heals itself.</td></tr>
+        <tr><td><span class="pill fault">dead</span></td><td class="wrap"><code>killall -9 cockroach</code></td><td class="wrap">Installs a systemd drop-in with <code>Restart=no</code>, then kills the whole <code>patroni.service</code> cgroup.</td></tr>
+      </tbody>
+    </table></div>
+    <p>A steady workload runs at the profile's chaos concurrency. A timer thread injects the fault <code>inject_at_s</code> seconds after the generator's first sample. The run is extended so at least <code>min_post_fault_s</code> of observation follows the fault (counted from the heal in <code>recover</code> mode). Three clients watch it:</p>
+    <div class="grid-2">
+      <div class="card"><h4>Generator</h4><p class="muted small">Throughput per second. Gives <b>performance RTO</b>: the start of the first window where throughput holds above 80% of baseline for 10 s.</p></div>
+      <div class="card"><h4>Audit writer</h4><p class="muted small">Serial writes, each <code>ack</code>, <code>ambiguous</code> or <code>refused</code>. Gives <b>RPO</b> and an availability RTO at ~70 ms resolution.</p></div>
+      <div class="card"><h4>RTO probe</h4><p class="muted small">Eight concurrent canary writers on client-1. Gives availability RTO at ~20-30 ms resolution.</p></div>
+    </div>
+    <p>Before the fault: the fault must be permitted (a harmless command with the same privileges), the probe agent must be able to run, and placement must be correct. On PostgreSQL the primary is switched back to gcp-1 first, then resolved live; the fault hits whichever node actually answers <code>/primary</code>. After every artefact is written, a <code>dead</code> target is restarted and the restore is recorded separately in <code>events.json</code>.</p>
+    <p class="muted small">Suffixes <code>_p4-chaos-recover</code>, <code>_p4-chaos-dead</code>. Code: <a href="#mod-crdblab.phases.p4_chaos"><code>phases/p4_chaos.py</code></a>. The probe alone: <code>crdblab probe rto --duration 60</code> (suffix <code>_p4-probe</code>).</p>
+  </section>
+
+  <section class="section">
+    <h2 id="ph-after">After measuring</h2>
+<pre><code>for m in runs/*/metrics.csv; do .venv/bin/crdblab validate "$(dirname "$m")"; done
+.venv/bin/crdblab analyze steady-state &lt;bench-run&gt;
+.venv/bin/crdblab analyze engine-comparison --crdb &lt;run&gt; --pg &lt;run&gt;
+.venv/bin/crdblab analyze resilience &lt;chaos-run&gt;
+.venv/bin/crdblab report figures              # newest run of each phase, PNG + SVG
+./generate_insights.sh --profile thesis-extended</code></pre>
+    <p>Add <code>--json</code> to <code>analyze</code> and <code>validate</code> for machine-readable output. Every figure and chart loads its runs through the gated loader, so an unvalidated run cannot reach one.</p>
+  </section>
+</article>
+
+<!-- ============================ CONCEPTS ============================ -->
+<article class="page" data-page="concepts" data-title="Measurement concepts" data-group="Guide" hidden>
+  <header>
+    <span class="eyebrow">Guide</span>
+    <h1>Measurement concepts</h1>
+    <p class="lede">The quantities the harness reports, what limits each one, and the checks that stand between a run and a figure.</p>
+  </header>
+
+  <section class="section">
+    <h2 id="c-floor">The quorum floor</h2>
+    <p>A write commits when a majority of voters has it: the leader plus <code>voters // 2</code> followers. So no write can be faster than the round trip to the slowest of the fastest <code>voters // 2</code> followers. Patroni's <code>ANY 2</code> synchronous standbys give the same geometry, so one floor bounds both engines. Try it with the testbed's RTTs from gcp-1:</p>
+    <div class="calc" id="floor-calc">
+      <div class="calc-grid" id="floor-inputs"></div>
+      <div class="bars" id="floor-bars"></div>
+      <div class="readout"><span class="big" id="floor-value">–</span><span class="muted small" id="floor-note"></span></div>
+    </div>
+    <p class="muted small">Code: <a href="#mod-crdblab.core.preflight"><code>preflight.quorum_floor_ms</code></a>. Each Phase II tier fails if its update p50 is below 90% of the floor.</p>
+  </section>
+
+  <section class="section">
+    <h2 id="c-rowmatch">Row match: is the workload touching data?</h2>
+    <p>The generator derives keys from a seed. If the seed or row count differs from the values the table was loaded with, every lookup matches nothing and returns in ~3 ms, so the run reports roughly twenty times the throughput. It does not error. Two independent checks catch it in every tier:</p>
+    <ul>
+      <li><b>Row-match rate</b> must be at least 0.99. CockroachDB: <code>crdb_internal.statement_statistics</code> differenced across the tier. PostgreSQL: <code>idx_tup_fetch / idx_scan</code> from <code>pg_stat_user_tables</code>; any sequential scan fails the tier.</li>
+      <li><b>Write-latency floor</b>: an update median below the quorum floor is impossible.</li>
+    </ul>
+    <p>CockroachDB flushes its statistics every 10 minutes. A flush mid-tier falls back to the absolute counters; a flush after the tier ends is accepted only if the floor check independently passed.</p>
+  </section>
+
+  <section class="section">
+    <h2 id="c-clocks">Two clocks</h2>
+    <p>The generator's <code>elapsed_s</code> starts when it begins issuing operations. The harness's monotonic clock starts earlier, by the SSH and process startup cost (about 5 s). Faults and all <code>events.json</code> offsets use the harness clock, so every metrics row records both (<code>wall_offset_s</code>, schema 2.1). For older schema 2.0 runs the offset is only bounded, and <code>analyze resilience</code> reports timings as intervals; figures draw the fault as a band instead of a line.</p>
+  </section>
+
+  <section class="section">
+    <h2 id="c-rto">Three RTO readings and RPO</h2>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Figure</th><th>Source</th><th>Meaning and limit</th></tr></thead>
+      <tbody>
+        <tr><td>Availability RTO</td><td><code>audit.csv</code></td><td class="wrap">Fault to writes resuming: the largest post-fault gap between acknowledged writes above the healthy noise floor. Resolution is one quorum write (~70 ms).</td></tr>
+        <tr><td>Probe RTO</td><td><code>rto_probe.csv</code></td><td class="wrap">The same quantity at ~20-30 ms resolution. Prefer <code>observed_outage_s</code> (probe-to-probe, link delay cancels). A gap is only attributed to the fault if gaps above the healthy p95 became more frequent afterwards.</td></tr>
+        <tr><td>Performance RTO</td><td><code>metrics.csv</code></td><td class="wrap">Throughput back above 80% of baseline and held for 10 s. Reported as <em>undefined</em> if the cluster settles into a lower stable state, which happens when a fast-triangle member is lost.</td></tr>
+        <tr><td>RPO</td><td><code>audit.csv</code> + table</td><td class="wrap">Acknowledged writes missing from the table afterwards. Ambiguous writes are counted separately; refused writes were never promised.</td></tr>
+      </tbody>
+    </table></div>
+    <div class="callout warn"><strong>Check coverage first.</strong><p>A client blocked on a black-holed connection stops observing and produces no gap, which reads as "no outage". Both RTO clients record how much of the run they watched; when <code>coverage_truncated</code> is true, the outage is reported as unmeasured and <code>analyze resilience</code> prints <code>*** AN INSTRUMENT STOPPED OBSERVING ***</code>. Connections use TCP keepalives and <code>tcp_user_timeout</code> so a partition breaks them instead of hanging them.</p></div>
+  </section>
+
+  <section class="section">
+    <h2 id="c-comparison">Comparing the engines</h2>
+    <p>Concurrency fixes the number of workers, not the load. Two engines at the same tier sit at different points on their curves, so <code>analyze engine-comparison</code> reports:</p>
+    <ul>
+      <li><b>Throughput-latency curves</b> for both engines, per operation.</li>
+      <li><b>Matched throughput</b>: latency ratio at measured throughputs both engines reached, with each side's utilisation. Quote the least confounded point.</li>
+      <li><b>Matched utilisation</b>: both engines at the same fraction of their own peak (different throughputs).</li>
+      <li><b>Lightest-load write median</b>: at C = 1 one operation is in flight, so neither median contains queueing.</li>
+      <li><b>Same-concurrency delta</b>: computed, but printed under <code>NOT A RESULT</code>.</li>
+    </ul>
+    <p>It refuses to compare runs whose workload parameters, cache budget (<code>--cache</code> vs <code>shared_buffers</code>), CPU model, CPU count or memory differ. <code>--accept-hardware-difference</code> downgrades a hardware mismatch to a recorded warning.</p>
+  </section>
+
+  <section class="section">
+    <h2 id="c-gates">Pre-flight and validation checks</h2>
+    <div class="grid-2">
+      <div class="card"><h4>Pre-flight <span class="pill accent">before measuring</span></h4>
+        <ul class="small">
+          <li><code>clock_offset</code>: NTP offset below 250 ms</li>
+          <li><code>leaseholder_placement</code>: all ycsb leases in the gateway region</li>
+          <li><code>patroni_primary_placement</code>: primary on gcp-1, repaired by switchover</li>
+          <li><code>quorum_floor_available</code>: a Phase I run exists</li>
+          <li><code>row_match</code>, <code>write_latency_floor</code>: per tier</li>
+          <li><code>fault_authorisation</code>, <code>probe_agent_ready</code>: chaos only</li>
+        </ul>
+      </div>
+      <div class="card"><h4>Validation <span class="pill ok">after measuring</span></h4>
+        <ul class="small">
+          <li><code>plausibility</code>: no sample above <code>tps_ceiling</code></li>
+          <li><code>quantile_ordering</code>: p50 ≤ p95 ≤ p99 ≤ pMax</li>
+          <li><code>littles_law</code>: N / X not below the weighted median</li>
+          <li><code>sample_cadence</code> (warning), <code>op_coverage</code>, <code>error_monotonicity</code></li>
+          <li>Probe log: ordering, known outcomes, no repeated sequence numbers</li>
+          <li>Cross-run: <code>run_comparability</code></li>
+        </ul>
+      </div>
+    </div>
+  </section>
+</article>
+
+<!-- ============================ GENERATED: CLI ============================ -->
+<article class="page wide" data-page="cli" data-title="CLI reference" data-group="Reference" hidden>
+  <header>
+    <span class="eyebrow">Reference</span>
+    <h1>CLI reference</h1>
+    <p class="lede">Every <code>crdblab</code> command and flag, read from the argument parser. <code>--engine</code> is a top-level flag and must come before the subcommand: <code>crdblab --engine postgresql bench</code>.</p>
+  </header>
+  <div id="cli-ref" class="section"></div>
+</article>
+
+<!-- ============================ GENERATED: PROFILES ============================ -->
+<article class="page wide" data-page="profiles" data-title="Profiles" data-group="Reference" hidden>
+  <header>
+    <span class="eyebrow">Reference</span>
+    <h1>Profiles</h1>
+    <p class="lede">A profile (<code>profiles/*.yaml</code>) holds every experimental parameter and is copied into each run manifest. Fields a profile omits take the defaults from <code>crdblab/config.py</code>. Highlighted cells are set in the file.</p>
+  </header>
+  <div class="callout warn"><strong><code>seed</code> and <code>insert_count</code> must match the loaded table.</strong><p><code>run-experiment.sh</code> reads both from the profile when loading, so the load and the sweep cannot disagree. <code>thesis</code> and <code>thesis-extended</code> share their data; <code>smoke</code> loads its own 125k rows.</p></div>
+  <div id="profile-ref" class="section"></div>
+</article>
+
+<!-- ============================ CONFIG ============================ -->
+<article class="page" data-page="config" data-title="Configuration" data-group="Reference" hidden>
+  <header>
+    <span class="eyebrow">Reference</span>
+    <h1>Configuration</h1>
+    <p class="lede">Settings come from <code>.env</code> in the repository root (resolved relative to the package, not the working directory). Variables already in the environment win.</p>
+  </header>
+  <section class="section">
+    <h2 id="cfg-env">Environment variables</h2>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Variable</th><th>Read by</th><th>Purpose</th></tr></thead>
+      <tbody>
+        <tr><td><code>TS_API_KEY</code></td><td>pipeline</td><td class="wrap">Tailscale API token; used to delete the VMs' devices after <code>terraform destroy</code>.</td></tr>
+        <tr><td><code>TS_TAILNET</code></td><td>pipeline</td><td class="wrap">Tailnet name; <code>-</code> (default) means the key's own.</td></tr>
+        <tr><td><code>PG_PASSWORD</code></td><td>crdblab</td><td class="wrap">PostgreSQL <code>root</code> password (default <code>rootpassword</code>, created by <code>bootstrap-patroni.tftpl</code>).</td></tr>
+        <tr><td><code>CRDBLAB_RUNS_DIR</code></td><td>crdblab</td><td class="wrap">Where run directories are written (default <code>runs/</code>).</td></tr>
+        <tr><td><code>DB_URI</code></td><td>crdblab capture</td><td class="wrap">Derived per engine by <code>run-experiment.sh</code>; only used for data loading and <code>capture</code>, never a measured phase.</td></tr>
+        <tr><td><code>DB_URI_COCKROACHDB</code>, <code>DB_URI_POSTGRESQL</code></td><td>run-experiment.sh</td><td class="wrap">Override the derived <code>DB_URI</code> for one engine.</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+  <section class="section">
+    <h2 id="cfg-dsn">Connection strings</h2>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Client</th><th>CockroachDB</th><th>PostgreSQL</th></tr></thead>
+      <tbody>
+        <tr><td>Generator</td><td class="wrap"><code>root@crdb-gcp-1:26257/ycsb</code> (chaos: a non-target member)</td><td class="wrap"><code>pg_generator_dsn</code>: pgbouncer <code>127.0.0.1:6432</code></td></tr>
+        <tr><td>Audit writer, RTO probe</td><td class="wrap">all five hosts, <code>:26257</code> each</td><td class="wrap"><code>pg_direct_dsn</code>: all five hosts (gateway first), <code>target_session_attrs=read-write</code>, keepalives, <code>tcp_user_timeout=10000</code></td></tr>
+        <tr><td><code>DB_URI</code></td><td class="wrap">all five hosts, gateway first</td><td class="wrap">HAProxy <code>127.0.0.1:5000</code></td></tr>
+      </tbody>
+    </table></div>
+    <p class="muted small">Code: <a href="#mod-crdblab.config"><code>crdblab/config.py</code></a>.</p>
+  </section>
+</article>
+
+<!-- ============================ GENERATED: DATA ============================ -->
+<article class="page wide" data-page="data" data-title="Run data" data-group="Reference" hidden>
+  <header>
+    <span class="eyebrow">Reference</span>
+    <h1>Run data</h1>
+    <p class="lede">Every measured phase writes one immutable directory under <code>runs/</code>. Every CSV has a declared schema and the writer rejects rows that do not match it. Select a file to see its layout.</p>
+  </header>
+  <div class="explorer" id="run-explorer"></div>
+  <section class="section">
+    <h2 id="data-which">Which files each phase writes</h2>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Command</th><th>Suffix</th><th>Files beyond manifest.json and preflight.json</th></tr></thead>
+      <tbody>
+        <tr><td><code>net probe</code></td><td><code>_p1-network</code></td><td class="wrap"><code>network.csv</code>, <code>raw/&lt;host&gt;.ping.txt</code></td></tr>
+        <tr><td><code>bench</code></td><td><code>_bench_cluster</code></td><td class="wrap"><code>metrics.csv</code>, <code>hardware_metrics.csv</code>, <code>raw/c&lt;C&gt;_rep&lt;R&gt;.txt</code></td></tr>
+        <tr><td><code>chaos run</code></td><td><code>_p4-chaos-recover</code>, <code>_p4-chaos-dead</code></td><td class="wrap"><code>metrics.csv</code>, <code>audit.csv</code>, <code>rto_probe.csv</code>, <code>rto_probe.log</code>, <code>events.json</code>, <code>hardware_metrics.csv</code>, <code>raw/chaos_&lt;mode&gt;.txt</code></td></tr>
+        <tr><td><code>probe rto</code></td><td><code>_p4-probe</code></td><td class="wrap"><code>rto_probe.csv</code>, <code>rto_probe.log</code>, <code>events.json</code></td></tr>
+      </tbody>
+    </table></div>
+    <p class="muted small">The pipeline and <code>run-experiment.sh</code> also write console transcripts to <code>runs/_logs/</code>.</p>
+  </section>
+</article>
+
+<!-- ============================ GENERATED: INSIGHTS ============================ -->
+<article class="page wide" data-page="insights" data-title="Insights catalogue" data-group="Reference" hidden>
+  <header>
+    <span class="eyebrow">Reference</span>
+    <h1>Insights catalogue</h1>
+    <p class="lede"><code>./generate_insights.sh</code> (or <code>crdblab insights</code>) loads every run through the gated loader, takes the newest passing run of each kind per engine, and draws these charts into a fresh <code>insights/&lt;stamp&gt;_&lt;profile|all&gt;/</code>. A chart whose inputs are missing is skipped with its reason, never dropped.</p>
+  </header>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Output</th><th>Contents</th></tr></thead>
+    <tbody>
+      <tr><td><code>&lt;id&gt;_&lt;name&gt;_&lt;engine&gt;_&lt;profile&gt;_&lt;runs&gt;.png/.svg</code></td><td>One chart, named with its provenance.</td></tr>
+      <tr><td><code>insights.md</code></td><td>Every chart with its caption and numbers, the runs behind them, and each skipped chart with its reason.</td></tr>
+      <tr><td><code>dashboard.html</code></td><td>The same content as one self-contained page.</td></tr>
+      <tr><td><code>summary.json</code>, <code>summary.csv</code></td><td>Each chart's stats; the CSV has one row per (chart, metric).</td></tr>
+      <tr><td><code>chart_status.csv</code></td><td>Drawn or skipped, with the reason, per chart.</td></tr>
+    </tbody>
+  </table></div>
+  <div class="api-toolbar"><input type="search" id="chart-filter" placeholder="Filter charts" aria-label="Filter charts"></div>
+  <div id="chart-ref" class="section"></div>
+</article>
+
+<!-- ============================ GENERATED: API ============================ -->
+<article class="page wide" data-page="api" data-title="Code reference" data-group="Reference" hidden>
+  <header>
+    <span class="eyebrow">Reference</span>
+    <h1>Code reference</h1>
+    <p class="lede">Every module, class, function and documented constant, read from the source by <code>docs-app/build.py</code>.</p>
+  </header>
+  <div class="api-toolbar">
+    <input type="search" id="api-filter" placeholder="Filter modules" aria-label="Filter modules">
+  </div>
+  <div id="api-index" class="section"></div>
+</article>
+
+<article class="page wide" data-page="module" data-title="Module" data-group="" hidden>
+  <div id="module-view" class="section"></div>
+</article>
+
+<!-- ============================ INFRA ============================ -->
+<article class="page" data-page="infra" data-title="Infrastructure" data-group="Operations" hidden>
+  <header>
+    <span class="eyebrow">Operations</span>
+    <h1>Infrastructure</h1>
+    <p class="lede">Terraform in <code>terraform/</code> creates the six VMs and hands each one a cloud-init script that installs Tailscale, chrony, node_exporter and either database engine. State lives in HCP Terraform (organisation <code>lightygi</code>, workspace <code>hydra</code>).</p>
+  </header>
+  <section class="section">
+    <h2 id="inf-layout">Layout</h2>
+    <div class="table-wrap"><table>
+      <thead><tr><th>File</th><th>Purpose</th></tr></thead>
+      <tbody>
+        <tr><td><code>main.tf</code></td><td>One module instance per node, each gated by its <code>enabled</code> flag.</td></tr>
+        <tr><td><code>variables.tf</code></td><td><code>database_engine</code> (<code>cockroachdb</code> or <code>postgresql</code>) and per-provider node maps.</td></tr>
+        <tr><td><code>modules/{gcp,linode,azure,client}_node</code></td><td>One VM each. Linode gzips its user data to fit the 16 kB limit.</td></tr>
+        <tr><td><code>scripts/bootstrap-cockroachdb.tftpl</code></td><td>Starts CockroachDB (<code>--cache=0.25 --max-sql-memory=0.25</code>), initialises 5 replicas and <code>lease_preferences</code> headed by us-east1, and verifies them.</td></tr>
+        <tr><td><code>scripts/bootstrap-patroni.tftpl</code></td><td>PostgreSQL 16 + Patroni + etcd. <code>synchronous_mode: quorum</code>, 2 synchronous standbys, strict. <code>shared_buffers</code> = RAM / 4. Primary pinned to gcp-1.</td></tr>
+        <tr><td><code>scripts/bootstrap-client.tftpl</code></td><td>Client tools (<code>cockroach</code>, <code>psql</code>, psycopg), HAProxy on :5000 and pgbouncer on :6432.</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+  <section class="section">
+    <h2 id="inf-hcp">HCP workspace settings</h2>
+    <p>Mark all environment variables sensitive. The repository holds no credentials.</p>
+<pre><code>LINODE_TOKEN  ARM_CLIENT_ID  ARM_CLIENT_SECRET  ARM_TENANT_ID
+ARM_SUBSCRIPTION_ID  GOOGLE_CREDENTIALS   # service-account JSON as one string</code></pre>
+    <p>Terraform variables follow <code>terraform/terraform.tfvars.example</code>: SSH key, Azure subscription, GCP project, Tailscale auth key, <code>database_engine</code>, <code>cluster_join_nodes</code>, and one config map per provider plus <code>client_config</code>. Keep every node the same size and every node enabled: the quorum arithmetic assumes five voters, and cache flags are fractions of RAM.</p>
+  </section>
+  <section class="section">
+    <h2 id="inf-lifecycle">Provision and tear down by hand</h2>
+<pre><code>cd terraform
+terraform init
+terraform plan -out plan.out -var=database_engine=cockroachdb
+terraform apply plan.out
+ssh root@crdb-linode-1 'tail -f /var/log/cloud-init-output.log'   # wait for it to finish
+terraform destroy -auto-approve                                    # no confirmation</code></pre>
+    <p>After a manual destroy, remove the old devices from the tailnet (the pipeline does this for you), or the next deploy's hostnames get a <code>-1</code> suffix:</p>
+<pre><code>.venv/bin/python pipeline/run_all.py --tailscale-list
+.venv/bin/python pipeline/run_all.py --cleanup --engine cockroachdb</code></pre>
+  </section>
+</article>
+
+<!-- ============================ TROUBLESHOOTING ============================ -->
+<article class="page" data-page="troubleshooting" data-title="Troubleshooting" data-group="Operations" hidden>
+  <header>
+    <span class="eyebrow">Operations</span>
+    <h1>Troubleshooting</h1>
+    <p class="lede">Problems that recur across redeployments, and how to fix them.</p>
+  </header>
+  <section class="section">
+    <h3 id="ts-rowmatch">A tier fails <code>row_match</code></h3>
+    <p>The loaded table's seed or row count does not match the profile. Reload without <code>--skip-load</code>. When moving from <code>smoke</code> (125k rows) to a thesis profile, the table must be reloaded; <code>run-experiment.sh</code> refuses to start if it has fewer rows than the profile needs.</p>
+  </section>
+  <section class="section">
+    <h3 id="ts-lease">Lease preferences are not headed by the gateway region</h3>
+    <p><code>run-experiment.sh</code> stops here. Re-order on the live cluster; leases move within seconds.</p>
+<pre><code>ssh ubuntu@crdb-gcp-1 "cockroach sql --insecure --host=\$(tailscale ip -4):26257 -e \
+  \"ALTER RANGE default CONFIGURE ZONE USING lease_preferences =
+    '[[+region=us-east1], [+region=us-east], [+region=us-west]]';\""</code></pre>
+  </section>
+  <section class="section">
+    <h3 id="ts-dead-crdb">A CockroachDB node is still down after a <code>dead</code> run</h3>
+    <p>The chaos phase and <code>run-experiment.sh</code> both try to restart it. CockroachDB has no systemd unit, so restart it by hand with the same memory flags as its peers and a different live node to join:</p>
+<pre><code>ssh ubuntu@crdb-gcp-1 'TS_IP=$(tailscale ip -4); sudo -n cockroach start --insecure \
+  --store=/var/lib/cockroach --listen-addr=$TS_IP:26257 --advertise-addr=$TS_IP:26257 \
+  --locality=cloud=gcp,region=us-east1 --cache=0.25 --max-sql-memory=0.25 \
+  --join=crdb-linode-1:26257 --background &lt;/dev/null &gt;/dev/null 2&gt;&amp;1'</code></pre>
+  </section>
+  <section class="section">
+    <h3 id="ts-patroni">A Patroni member will not rejoin</h3>
+    <p>After a partition the old primary must be rewound or re-cloned; the template keeps 4 GB of WAL and falls back to a fresh basebackup. Only <code>Quorum Standby / streaming</code> on the leader's timeline can take leadership back; read the Role and TL columns of <code>patronictl list</code>. To force a re-clone and switch back:</p>
+<pre><code>ssh ubuntu@crdb-gcp-1 'sudo -n systemctl stop patroni &amp;&amp; sudo -n rm -rf /var/lib/postgresql/16/data &amp;&amp; sudo -n systemctl start patroni'
+sudo -n patronictl -c /etc/patroni/config.yml list
+sudo -n patronictl -c /etc/patroni/config.yml switchover --leader &lt;leader-hostname&gt; --candidate crdb-gcp-1 --force</code></pre>
+    <p class="muted small"><code>patronictl</code> names members by hostname (<code>crdb-gcp-1</code>), not the short node name. Settings under <code>bootstrap.dcs</code> apply only at first bootstrap; change a live cluster with <code>patronictl edit-config</code>.</p>
+  </section>
+  <section class="section">
+    <h3 id="ts-flush">"The statement-statistics view was flushed after this tier ended"</h3>
+    <p>CockroachDB flushes statement statistics every 10 minutes. The tier still passes if the write-latency floor check covers it. Do not raise <code>sql.stats.flush.interval</code>: suppressing the flush would change the throughput being measured.</p>
+  </section>
+  <section class="section">
+    <h3 id="ts-internal">"Access to crdb_internal and system is restricted"</h3>
+    <p>Prefix manual queries with <code>SET allow_unsafe_internals = true;</code>, as the harness does for its statistics query only.</p>
+  </section>
+  <section class="section">
+    <h3 id="ts-cloudinit">A fresh deployment is not ready</h3>
+    <p><code>run-experiment.sh</code> waits up to 600 s for all five nodes (CockroachDB) or all five <code>/health</code> 200s (PostgreSQL; 503 means still taking a basebackup). If a node never comes up, read <code>/var/log/cloud-init-output.log</code> on it. A Patroni node with no process usually means the config is not at <code>/etc/patroni/config.yml</code>.</p>
+  </section>
+  <section class="section">
+    <h3 id="ts-compare">engine-comparison refuses</h3>
+    <p>Read the refusal: it names what differs (workload keys, cache budget, CPU, memory, version). Run both engines with the same profile on the same machine types. Absolute throughput varies between deployments; compare ratios and recovery behaviour.</p>
+  </section>
+</article>
+
+<!-- ============================ GENERATED: TESTS ============================ -->
+<article class="page wide" data-page="tests" data-title="Tests" data-group="Operations" hidden>
+  <header>
+    <span class="eyebrow">Operations</span>
+    <h1>Tests</h1>
+    <p class="lede">The suite exercises parsing, analysis, pre-flight, chaos logic and the probe with fixtures and fakes, so it runs anywhere.</p>
+  </header>
+<pre><code>.venv/bin/python -m pytest -q
+.venv/bin/python -m pytest tests/test_rto_probe.py -q    # one file</code></pre>
+  <p class="muted small"><code>tests/test_insights.py</code> renders the catalogue from specific committed smoke runs and expects them to be the newest in <code>runs/</code>; newer smoke runs make three of its tests fail.</p>
+  <div id="test-ref" class="section"></div>
+</article>
+
+<!-- ============================ GENERATED: MAINTAINING ============================ -->
+<article class="page" data-page="maintaining" data-title="Updating these docs" data-group="Operations" hidden>
+  <header>
+    <span class="eyebrow">Operations</span>
+    <h1>Updating these docs</h1>
+    <p class="lede">The guide pages are written in <code>docs-app/index.html</code>. The reference pages (CLI, profiles, data files, charts, code, tests and script usage) come from <code>docs-app/data.js</code>, which <code>build.py</code> generates from the code.</p>
+  </header>
+<pre><code>.venv/bin/python docs-app/build.py     # after changing code, flags, profiles or schemas
+open docs-app/index.html               # works straight from disk</code></pre>
+  <p>Docstrings render with light reStructuredText: <code>``code``</code>, <code>:func:`name`</code> (linked when the name exists), <code>*emphasis*</code>, <code>**bold**</code>, bullet lists, and indented blocks after <code>::</code>. Column descriptions for the CSV files live in <code>COLUMN_NOTES</code> in <code>build.py</code>.</p>
+</article>
+
+      <nav class="pager" id="pager" aria-label="Previous and next page"></nav>
+    </main>
+  </div>
+</div>
+<div class="scrim" id="scrim" hidden></div>
+
+<script src="data.js"></script>
+<script>
+(() => {
+  "use strict";
+  const D = window.HYDRA_DOCS || null;
+  const $ = (s, r = document) => r.querySelector(s);
+  const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
+  const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const h = (html) => { const t = document.createElement("template"); t.innerHTML = html.trim(); return t.content.firstElementChild; };
+  const store = {
+    get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+    set(k, v) { try { localStorage.setItem(k, v); } catch { /* storage unavailable */ } },
+  };
+
+  /* ---------- theme ---------- */
+  const themes = ["system", "light", "dark"];
+  function applyTheme(t) {
+    if (t === "system") document.documentElement.removeAttribute("data-theme");
+    else document.documentElement.setAttribute("data-theme", t);
+    $("#theme-label").textContent = t[0].toUpperCase() + t.slice(1);
+  }
+  let theme = store.get("hydra-theme") || "system";
+  applyTheme(theme);
+  $("#theme-btn").addEventListener("click", () => {
+    theme = themes[(themes.indexOf(theme) + 1) % themes.length];
+    store.set("hydra-theme", theme);
+    applyTheme(theme);
+  });
+
+  /* ---------- api index ---------- */
+  const modules = D ? D.modules : [];
+  const byModule = new Map(modules.map((m) => [m.module, m]));
+  const symbols = new Map();   // short or qualified name -> {module, id}
+  function addSym(name, mod, id) { if (!symbols.has(name)) symbols.set(name, { module: mod, id }); }
+  for (const m of modules) {
+    addSym(m.module, m.module, null);
+    for (const f of m.functions) { const id = `sym-${m.module}.${f.name}`; addSym(f.name, m.module, id); addSym(`${m.module}.${f.name}`, m.module, id); }
+    for (const c of m.classes) {
+      const id = `sym-${m.module}.${c.name}`;
+      addSym(c.name, m.module, id); addSym(`${m.module}.${c.name}`, m.module, id);
+      for (const meth of c.methods) addSym(`${c.name}.${meth.name}`, m.module, `sym-${m.module}.${c.name}.${meth.name}`);
+    }
+    for (const k of m.constants) addSym(k.name, m.module, `sym-${m.module}.${k.name}`);
+  }
+  function symLink(name) {
+    const clean = name.replace(/^[~.]+/, "").replace(/\(\)$/, "");
+    const tries = [clean, clean.replace(/^crdblab\./, "crdblab."), clean.split(".").slice(-2).join("."), clean.split(".").pop()];
+    for (const t of tries) {
+      const s = symbols.get(t);
+      if (s) return `<a href="#mod-${esc(s.module)}" data-sym="${esc(s.id || "")}"><code>${esc(clean)}</code></a>`;
+    }
+    return `<code>${esc(clean)}</code>`;
+  }
+
+  /* ---------- light reST renderer ---------- */
+  function inline(text) {
+    let out = esc(text);
+    out = out.replace(/:(?:func|class|meth|mod|data|attr|obj):`([^`]+)`/g, (_, n) => symLink(n.replace(/&lt;.*&gt;/, "").trim()));
+    out = out.replace(/``([^`]+)``/g, (_, c) => `<code>${c}</code>`);
+    out = out.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
+    out = out.replace(/(^|[\s(])\*([^*\s][^*]*)\*/g, "$1<em>$2</em>");
+    return out;
+  }
+  function renderDoc(doc) {
+    if (!doc) return "";
+    const lines = doc.replace(/\r/g, "").split("\n");
+    const blocks = [];
+    let buf = [];
+    const flush = () => { if (buf.length) { blocks.push(buf); buf = []; } };
+    for (const line of lines) { if (!line.trim()) flush(); else buf.push(line); }
+    flush();
+    let html = "";
+    let codeNext = false;
+    for (const b of blocks) {
+      const indented = b.every((l) => /^\s{2,}/.test(l)) && !/^\s*[*-] /.test(b[0]);
+      if (codeNext || indented) {
+        const pad = Math.min(...b.map((l) => l.match(/^\s*/)[0].length));
+        html += `<pre><code>${esc(b.map((l) => l.slice(pad)).join("\n"))}</code></pre>`;
+        codeNext = false;
+        continue;
+      }
+      if (/^\s*[*-] /.test(b[0])) {
+        const items = [];
+        for (const l of b) {
+          if (/^\s*[*-] /.test(l)) items.push(l.replace(/^\s*[*-] /, ""));
+          else if (items.length) items[items.length - 1] += " " + l.trim();
+        }
+        html += `<ul>${items.map((i) => `<li>${inline(i)}</li>`).join("")}</ul>`;
+      } else if (/^\s*\d+\. /.test(b[0])) {
+        const items = [];
+        for (const l of b) {
+          if (/^\s*\d+\. /.test(l)) items.push(l.replace(/^\s*\d+\. /, ""));
+          else if (items.length) items[items.length - 1] += " " + l.trim();
+        }
+        html += `<ol>${items.map((i) => `<li>${inline(i)}</li>`).join("")}</ol>`;
+      } else if (b.length >= 2 && /^``[^`]+``$/.test(b[0].trim()) && /^\s{4,}/.test(b[1])) {
+        const entries = [];
+        for (const l of b) {
+          if (/^``[^`]+``$/.test(l.trim()) && !/^\s{4,}/.test(l)) entries.push([l.trim().replace(/``/g, ""), []]);
+          else if (entries.length) entries[entries.length - 1][1].push(l.trim());
+        }
+        html += `<dl>${entries.map(([t, d]) => `<dt>${esc(t)}</dt><dd>${inline(d.join(" "))}</dd>`).join("")}</dl>`;
+      } else {
+        let text = b.map((l) => l.trim()).join(" ");
+        if (text.endsWith("::")) { codeNext = true; text = text.slice(0, -1); }
+        html += `<p>${inline(text)}</p>`;
+      }
+    }
+    return `<div class="doc">${html}</div>`;
+  }
+  const firstLine = (doc) => (doc || "").split("\n\n")[0].replace(/\s+/g, " ").trim();
+
+  /* ---------- architecture chips ---------- */
+  const arch = [
+    ["Orchestration", ["pipeline.run_all", "pipeline.tailscale", "pipeline.nodes", "demo.replay"]],
+    ["Command line", ["crdblab.cli", "crdblab.config", "crdblab.topology"]],
+    ["Phases", ["crdblab.phases.p1_network", "crdblab.phases.bench", "crdblab.phases.p4_chaos"]],
+    ["Core", ["crdblab.core.ssh", "crdblab.core.workload", "crdblab.core.recorder", "crdblab.core.preflight", "crdblab.core.rto_probe", "crdblab.core.remote_probe", "crdblab.core.hardware_metrics"]],
+    ["Data on disk", ["runs/<run-id>/"]],
+    ["Analysis", ["crdblab.analysis.loader", "crdblab.analysis.validation", "crdblab.analysis.steady_state", "crdblab.analysis.engine_comparison", "crdblab.analysis.resilience"]],
+    ["Output", ["crdblab.report.figures", "crdblab.report.style", "crdblab.insights"]],
+  ];
+  $("#arch-layers").append(...arch.map(([label, mods]) => h(`<div class="layer"><span>${esc(label)}</span><div class="chips">${mods.map((m) =>
+    byModule.has(m) ? `<a class="chip" href="#mod-${esc(m)}">${esc(m.replace(/^crdblab\./, ""))}</a>` : `<span class="chip static">${esc(m)}</span>`).join("")}</div></div>`)));
+
+  /* ---------- steppers ---------- */
+  const STEPS = {
+    pipeline: [
+      ["Setup", "Asks for the profile and engines (or takes <code>--profile</code>, <code>--engines</code>, <code>--yes</code>). Checks <code>TS_API_KEY</code> and the tools before any cloud call. Everything is logged to <code>runs/_logs/pipeline-&lt;stamp&gt;.log</code>."],
+      ["terraform plan / apply", "<code>terraform plan -out plan.out -var=database_engine=&lt;engine&gt;</code>, then <code>terraform apply plan.out</code>. Any error aborts."],
+      ["Wait for the VMs", "Waits for SSH and for cloud-init to finish on all six machines."],
+      ["Measure", "Runs <code>./run-experiment.sh --engine &lt;engine&gt; --profile &lt;profile&gt;</code> and renders its output in the UI. <code>DB_URI</code> is derived per engine, so nothing needs editing between engines."],
+      ["Tear down", "Logs Tailscale out on every VM, runs <code>terraform destroy -auto-approve</code>, then deletes the VMs' devices through the Tailscale API and verifies none remain, so the next deploy gets its hostnames back."],
+      ["Next engine", "Repeats from <b>terraform plan / apply</b> for PostgreSQL/Patroni."],
+      ["Insights and comparison", "Runs <code>./generate_insights.sh --profile &lt;profile&gt;</code> and <code>crdblab analyze engine-comparison</code> on the two newest bench runs. A refused comparison is reported, not fatal."],
+      ["On failure", "If a step fails or you press Ctrl-C while VMs may be up, it asks whether to destroy them or leave them for debugging (<code>--on-failure ask|destroy|leave</code>). Resume with <code>--engines postgresql</code>."],
+    ],
+    experiment: [
+      ["Check the workstation", "The venv exists; <code>DB_URI</code> is taken from <code>DB_URI_&lt;ENGINE&gt;</code> or derived by <code>crdblab.config.default_db_uri</code>, and must name the <code>ycsb</code> database; Tailscale is up. Output is teed to <code>runs/_logs/experiment-&lt;stamp&gt;.log</code>."],
+      ["Resolve the topology", "Reads the gateway, client node and every cluster node from <code>crdblab/topology.py</code>, and the seed, row count and chaos target from the profile."],
+      ["Check the testbed", "SSH to gateway and client. CockroachDB: waits up to 600 s for 5 live nodes, then requires <code>lease_preferences</code> headed by the gateway's region. PostgreSQL: waits up to 600 s for five <code>/health</code> 200s, then requires exactly one primary."],
+      ["Load the working set", "CockroachDB: <code>cockroach workload init ycsb --drop</code>, trying each node in turn. PostgreSQL: creates <code>usertable</code> with psql, then loads rows with the generator itself, insert-only, so the keys match the sweep's. Then checks the row count. Skipped with <code>--skip-load</code>."],
+      ["Run the phases", "Phase I <code>net probe</code>, Phase II <code>bench</code>, then (unless <code>--no-chaos</code>) Phase III <code>chaos run --mode recover</code> and Phase IV <code>--mode dead</code>. Any failure stops the script."],
+      ["Restore the testbed", "Confirms the <code>dead</code> target rejoined (restarting it if needed). On PostgreSQL, restarts any unhealthy member and switches the primary back to the gateway."],
+      ["Validate", "Runs <code>crdblab validate</code> on every run with a <code>metrics.csv</code>. Any failure stops the script."],
+      ["Analyse and draw", "<code>analyze steady-state</code> on the newest bench run, <code>analyze resilience</code> on the newest chaos runs, and <code>report figures</code> into <code>figures/</code>."],
+    ],
+  };
+  for (const el of $$("[data-stepper]")) {
+    const steps = STEPS[el.dataset.stepper];
+    const list = h(`<ol class="steps"></ol>`);
+    const panel = h(`<div class="step-panel" aria-live="polite"></div>`);
+    const show = (i) => {
+      $$("button", list).forEach((b, j) => b.setAttribute("aria-pressed", String(i === j)));
+      panel.innerHTML = `<span class="eyebrow">Step ${i + 1} of ${steps.length}</span><h3>${steps[i][0]}</h3><p>${steps[i][1]}</p>`;
+    };
+    steps.forEach(([title], i) => {
+      const li = h(`<li><button type="button"><span class="n">${String(i + 1).padStart(2, "0")}</span><span>${title}</span></button></li>`);
+      li.firstElementChild.addEventListener("click", () => show(i));
+      list.append(li);
+    });
+    el.append(list, panel);
+    show(0);
+  }
+
+  /* ---------- quorum floor calculator ---------- */
+  const followers = [["linode-1", 20.1], ["linode-2", 70.3], ["azure-2", 204.0], ["azure-1", 229.6]];
+  const floorInputs = $("#floor-inputs");
+  followers.forEach(([name, rtt], i) => floorInputs.append(h(`<label>${name} RTT (ms)
+      <input type="number" id="rtt-${i}" min="0" step="0.1" value="${rtt}">
+      <span class="check"><input type="checkbox" id="up-${i}" checked> reachable</span></label>`)));
+  function updateFloor() {
+    const rows = followers.map(([name], i) => ({ name, rtt: parseFloat($(`#rtt-${i}`).value) || 0, up: $(`#up-${i}`).checked }));
+    const live = rows.filter((r) => r.up).sort((a, b) => a.rtt - b.rtt);
+    const need = 2;
+    const max = Math.max(...rows.map((r) => r.rtt), 1);
+    const binding = live.length >= need ? live[need - 1] : null;
+    $("#floor-bars").replaceChildren(...rows.map((r) => {
+      const rank = live.indexOf(r);
+      const cls = !r.up ? "off" : r === binding ? "bind" : rank > -1 && rank < need ? "ack" : "";
+      return h(`<div class="bar-row ${cls}"><span>${esc(r.name)}</span><div class="bar-track"><div class="bar-fill" style="width:${(r.rtt / max) * 100}%"></div></div><span class="v">${r.rtt.toFixed(1)} ms</span></div>`);
+    }));
+    if (binding) {
+      $("#floor-value").textContent = `${binding.rtt.toFixed(1)} ms`;
+      $("#floor-note").textContent = `5 voters: leader + 2 follower acks. ${binding.name} completes the quorum; a committed write faster than this is impossible.`;
+    } else {
+      $("#floor-value").textContent = "no quorum";
+      $("#floor-note").textContent = "Fewer than two followers are reachable, so writes cannot commit.";
+    }
+  }
+  floorInputs.addEventListener("input", updateFloor);
+  floorInputs.addEventListener("change", updateFloor);
+  updateFloor();
+
+
+  /* ---------- scripts ---------- */
+  function renderScripts() {
+    $("#script-help").append(...Object.entries(D.scripts).map(([name, text]) =>
+      h(`<details class="fold"><summary><code>${esc(name)} --help</code></summary><pre><code>${esc(text)}</code></pre></details>`)));
+  }
+
+  /* ---------- CLI ---------- */
+  function renderCli() {
+    const root = $("#cli-ref");
+    for (const cmd of D.cli.commands) {
+      const name = ["crdblab", ...cmd.path].join(" ");
+      if (!cmd.leaf && cmd.path.length && !cmd.args.length) continue;
+      const id = `cli-${cmd.path.join("-") || "global"}`;
+      const usage = cmd.args.length
+        ? `<div class="table-wrap"><table><thead><tr><th>Argument</th><th>Default</th><th>Description</th></tr></thead><tbody>${cmd.args.map((a) => `<tr>
+            <td><code>${esc(a.flags.join(", "))}</code>${a.required ? ' <span class="pill fault">required</span>' : ""}${a.positional ? ' <span class="pill">positional</span>' : ""}</td>
+            <td>${a.switch ? '<span class="muted">flag</span>' : a.default !== null && a.default !== undefined ? `<code>${esc(a.default)}</code>` : '<span class="muted">–</span>'}</td>
+            <td class="wrap">${inline(a.help)}${a.choices ? `<div class="small muted">one of ${a.choices.map((c) => `<code>${esc(c)}</code>`).join(" ")}</div>` : ""}</td></tr>`).join("")}</tbody></table></div>`
+        : "";
+      root.append(h(`<div class="item" id="${esc(id)}"><header><h3><code>${esc(name)}</code></h3></header>${cmd.help ? `<p>${inline(cmd.help)}</p>` : cmd.description ? `<p>${esc(cmd.description)}</p>` : ""}${usage}</div>`));
+    }
+  }
+
+  /* ---------- profiles ---------- */
+  function renderProfiles() {
+    const root = $("#profile-ref");
+    const names = Object.keys(D.profiles.profiles).sort((a, b) => ["smoke", "thesis", "thesis-extended"].indexOf(a) - ["smoke", "thesis", "thesis-extended"].indexOf(b));
+    const fmt = (v) => Array.isArray(v) ? `[${v.join(", ")}]` : typeof v === "boolean" ? String(v) : String(v);
+    for (const [section, fieldsList] of Object.entries(D.profiles.sections)) {
+      const rows = fieldsList.map((f) => `<tr id="prof-${esc(section)}-${esc(f.name)}"><td><code>${esc(f.name)}</code></td>${names.map((n) => {
+        const p = D.profiles.profiles[n];
+        const set = p.overrides[section].includes(f.name);
+        const v = p.resolved[section][f.name];
+        return `<td>${set ? `<span class="pill accent">${esc(fmt(v))}</span>` : `<span class="muted">${esc(fmt(v))}</span>`}</td>`;
+      }).join("")}<td class="wrap small">${inline(f.doc)}</td></tr>`).join("");
+      root.append(h(`<div class="section"><h2 id="prof-${esc(section)}"><code>${esc(section)}</code></h2><div class="table-wrap"><table><thead><tr><th>Field</th>${names.map((n) => `<th>${esc(n)}</th>`).join("")}<th>Notes</th></tr></thead><tbody>${rows}</tbody></table></div></div>`));
+    }
+    root.append(h(`<p class="muted small">Top-level: <code>tps_ceiling</code> = ${names.map((n) => `${esc(n)} ${esc(D.profiles.profiles[n].resolved.tps_ceiling)}`).join(", ")}. Inspect a resolved profile with <code>crdblab profile &lt;name&gt;</code>.</p>`));
+  }
+
+  /* ---------- run data explorer ---------- */
+  const FILE_NOTES = {
+    "manifest.json": { kind: "json", text: "Everything needed to reproduce the run: git revision, resolved profile, topology, generator command, SSH options, clock epoch, and timestamped notes (server start command, host hardware, PostgreSQL memory, repairs, warnings). Read the notes before trusting a run." },
+    "preflight.json": { kind: "json", text: "<code>{\"ok\": bool, \"checks\": [{\"name\", \"passed\", \"detail\", ...observed values}]}</code>. Bench runs add <code>tiers</code> (one summary per tier); Phase I adds <code>derived</code> (the quorum floor)." },
+    "events.json": { kind: "json", text: "Chaos runs: <code>mode</code>, <code>target</code>, <code>t_start_utc</code>, <code>fault_landed</code>, <code>clock</code> (generator offset and spread), <code>injected</code> (fault timing and exit status), <code>availability</code>, <code>probe</code>, <code>baseline_tps</code>, <code>recovery_floor_tps</code>, <code>performance_rto_s</code>, <code>rpo</code>, <code>restore</code>, <code>t_end_utc</code>. <code>fault_landed: false</code> means every figure describes an undisturbed cluster." },
+    "rto_probe.log": { kind: "jsonl", text: "One JSON object per line, flushed as it happens: probe start and stop, every failed attempt, connects, reconnects and disconnects. Survives a run killed mid-fault." },
+    "raw/": { kind: "dir", text: "The generator's (or ping's) verbatim output, one file per tier, probe or fault, so any parsing question can be settled against the original bytes." },
+  };
+  function renderData() {
+    const root = $("#run-explorer");
+    const csvs = D.schemas.csv;
+    const files = [["manifest.json"], ["preflight.json"], ...csvs.map((c) => [c.file, c]), ["events.json"], ["rto_probe.log"], ["raw/"]];
+    const tree = h(`<div class="tree" role="group" aria-label="Run directory files"><div class="dir">runs/&lt;run-id&gt;/</div></div>`);
+    const panel = h(`<div class="step-panel" aria-live="polite"></div>`);
+    const show = (i) => {
+      $$("button", tree).forEach((b, j) => b.setAttribute("aria-pressed", String(i === j)));
+      const [name, csv] = files[i];
+      if (csv) {
+        panel.innerHTML = `<span class="eyebrow">${esc(csv.constant)} · schema ${esc(D.schemas.version)}</span><h3><code>${esc(name)}</code></h3>
+          <div class="table-wrap"><table><thead><tr><th>Column</th><th>Meaning</th></tr></thead><tbody>${csv.columns.map((c) =>
+            `<tr><td><code>${esc(c.name)}</code></td><td class="wrap">${esc(c.doc)}</td></tr>`).join("")}</tbody></table></div>`;
+      } else {
+        const note = FILE_NOTES[name];
+        let extra = "";
+        if (name === "manifest.json") extra = `<div class="table-wrap"><table><thead><tr><th>Field</th><th>Type</th></tr></thead><tbody>${D.schemas.manifest.map((f) => `<tr><td><code>${esc(f.name)}</code></td><td><code>${esc(f.type)}</code></td></tr>`).join("")}</tbody></table></div>`;
+        panel.innerHTML = `<span class="eyebrow">${esc(note.kind)}</span><h3><code>${esc(name)}</code></h3><p>${note.text}</p>${extra}`;
+      }
+    };
+    files.forEach(([name, csv], i) => {
+      const b = h(`<button type="button">${esc(name)}<span>${csv ? csv.columns.length + " cols" : ""}</span></button>`);
+      b.addEventListener("click", () => show(i));
+      tree.append(b);
+    });
+    root.append(tree, panel);
+    show(2);
+  }
+
+  /* ---------- charts ---------- */
+  function renderCharts() {
+    const root = $("#chart-ref");
+    const draw = (q) => {
+      root.replaceChildren();
+      for (const [g, label] of Object.entries(D.charts.groups)) {
+        const charts = D.charts.charts.filter((c) => c.id[0] === g && (!q || (c.id + c.title + c.caption).toLowerCase().includes(q)));
+        if (!charts.length) continue;
+        root.append(h(`<div class="section"><h2 id="charts-${g}">${esc(g)}: ${esc(label)}</h2><div class="grid-2">${charts.map((c) =>
+          `<div class="card" id="chart-${esc(c.id)}"><h4><span class="pill accent">${esc(c.id)}</span>${esc(c.title)}</h4><p class="muted small">${esc(c.caption)}</p><span class="linenum">${esc(c.stem)}</span></div>`).join("")}</div></div>`));
+      }
+      if (!root.children.length) root.append(h(`<p class="empty">No chart matches that filter.</p>`));
+    };
+    $("#chart-filter").addEventListener("input", (e) => draw(e.target.value.trim().toLowerCase()));
+    draw("");
+  }
+
+  /* ---------- API ---------- */
+  const pkgOf = (m) => { const parts = m.module.split("."); return parts.length > 2 ? parts.slice(0, 2).join(".") : parts[0]; };
+  function renderApiIndex() {
+    const root = $("#api-index");
+    const draw = (q) => {
+      root.replaceChildren();
+      const groups = new Map();
+      for (const m of modules) {
+        const hay = (m.module + " " + m.doc).toLowerCase();
+        if (q && !hay.includes(q)) continue;
+        const g = pkgOf(m);
+        if (!groups.has(g)) groups.set(g, []);
+        groups.get(g).push(m);
+      }
+      for (const [g, mods] of groups) {
+        root.append(h(`<div class="pkg"><h2>${esc(g)}</h2><div class="grid-2">${mods.map((m) => {
+          const fn = m.functions.length, cl = m.classes.length;
+          return `<a class="card" href="#mod-${esc(m.module)}"><h4><code>${esc(m.module)}</code></h4><p class="muted small">${esc(firstLine(m.doc) || "No module docstring.")}</p><span class="linenum">${m.lines} lines · ${cl} class${cl === 1 ? "" : "es"} · ${fn} function${fn === 1 ? "" : "s"}</span></a>`;
+        }).join("")}</div></div>`));
+      }
+      if (!groups.size) root.append(h(`<p class="empty">No module matches that filter.</p>`));
+    };
+    $("#api-filter").addEventListener("input", (e) => draw(e.target.value.trim().toLowerCase()));
+    draw("");
+  }
+  function fnHtml(f, owner, module, cls) {
+    const id = `sym-${module}.${cls ? cls + "." : ""}${f.name}`;
+    const priv = f.name.startsWith("_") && !f.name.startsWith("__") ? ' <span class="pill">private</span>' : "";
+    const deco = f.decorators.filter((d) => d !== "staticmethod").map((d) => `<span class="pill">@${esc(d)}</span>`).join(" ");
+    return `<div class="item" id="${esc(id)}"><header><span class="sig"><b>${esc(f.name)}</b>${esc(f.signature)}</span>${deco}${priv}<span class="linenum">line ${f.line}</span></header>${renderDoc(f.doc) || '<p class="muted small">No docstring.</p>'}</div>`;
+  }
+  function renderModule(name) {
+    const m = byModule.get(name);
+    const root = $("#module-view");
+    if (!m) { root.innerHTML = `<p class="empty">Unknown module <code>${esc(name)}</code>. <a href="#api">Back to the code reference</a>.</p>`; return; }
+    const consts = m.constants.length ? `<div class="section"><h2>Constants</h2><div class="table-wrap"><table><thead><tr><th>Name</th><th>Value</th><th>Meaning</th></tr></thead><tbody>${m.constants.map((c) =>
+      `<tr id="sym-${esc(m.module)}.${esc(c.name)}"><td><code>${esc(c.name)}</code></td><td class="wrap"><code>${esc(c.value)}</code></td><td class="wrap small">${inline(c.doc)}</td></tr>`).join("")}</tbody></table></div></div>` : "";
+    const classes = m.classes.length ? `<div class="section"><h2>Classes</h2>${m.classes.map((c) => {
+      const deco = c.decorators.map((d) => `<span class="pill">@${esc(d)}</span>`).join(" ");
+      const fieldsTable = c.fields.length ? `<div class="table-wrap"><table><thead><tr><th>Field</th><th>Type</th><th>Default</th><th>Meaning</th></tr></thead><tbody>${c.fields.map((f) =>
+        `<tr><td><code>${esc(f.name)}</code></td><td class="wrap"><code>${esc(f.type)}</code></td><td class="wrap">${f.default ? `<code>${esc(f.default)}</code>` : ""}</td><td class="wrap small">${inline(f.doc)}</td></tr>`).join("")}</tbody></table></div>` : "";
+      const methods = c.methods.length ? `<div class="methods">${c.methods.map((f) => fnHtml(f, c, m.module, c.name)).join("")}</div>` : "";
+      return `<div class="item" id="sym-${esc(m.module)}.${esc(c.name)}"><header><h3><code>class ${esc(c.name)}</code></h3>${c.bases.length ? `<span class="sig">(${esc(c.bases.join(", "))})</span>` : ""}${deco}<span class="linenum">line ${c.line}</span></header>${renderDoc(c.doc)}${fieldsTable}${methods}</div>`;
+    }).join("")}</div>` : "";
+    const funcs = m.functions.length ? `<div class="section"><h2>Functions</h2>${m.functions.map((f) => fnHtml(f, null, m.module, null)).join("")}</div>` : "";
+    root.innerHTML = `<header class="section"><span class="eyebrow"><a href="#api">Code reference</a> · ${esc(pkgOf(m))}</span><h1><code>${esc(m.module)}</code></h1><p class="muted small"><code>${esc(m.path)}</code> · ${m.lines} lines</p>${renderDoc(m.doc)}</header>${consts}${classes}${funcs}`;
+  }
+
+  /* ---------- tests ---------- */
+  function renderTests() {
+    const root = $("#test-ref");
+    const total = D.tests.reduce((n, f) => n + f.tests.length, 0);
+    root.append(h(`<p class="muted small">${total} tests in ${D.tests.length} files.</p>`));
+    for (const f of D.tests) {
+      root.append(h(`<details class="fold item"><summary><code>${esc(f.path)}</code> · ${f.tests.length} tests${f.doc ? ` · <span class="muted">${esc(firstLine(f.doc))}</span>` : ""}</summary>
+        <div class="table-wrap" style="margin-top:.6rem"><table><thead><tr><th>Test</th><th>What it checks</th></tr></thead><tbody>${f.tests.map((t) =>
+          `<tr><td class="wrap"><code>${esc(t.name)}</code></td><td class="wrap small">${inline(firstLine(t.doc) || t.name.replace(/^test_/, "").replace(/_/g, " "))}</td></tr>`).join("")}</tbody></table></div></details>`));
+    }
+  }
+
+  /* ---------- navigation ---------- */
+  const pages = $$("article.page").filter((p) => p.dataset.group);
+  const nav = $("#nav");
+  const groups = [...new Set(pages.map((p) => p.dataset.group))];
+  for (const g of groups) {
+    nav.append(h(`<div class="nav-group"><span>${esc(g)}</span>${pages.filter((p) => p.dataset.group === g).map((p) =>
+      `<a href="#${p.dataset.page}" data-nav="${p.dataset.page}">${esc(p.dataset.title)}</a>`).join("")}</div>`));
+  }
+  const order = pages.map((p) => p.dataset.page);
+
+  function route() {
+    let hash = decodeURIComponent(location.hash.slice(1)) || "overview";
+    let page = hash, target = null;
+    if (hash.startsWith("mod-")) { page = "module"; renderModule(hash.slice(4)); }
+    else if (!document.querySelector(`article[data-page="${CSS.escape(hash)}"]`)) {
+      const el = document.getElementById(hash);
+      const art = el && el.closest("article.page");
+      if (art) { page = art.dataset.page; target = el; } else page = "overview";
+    }
+    $$("article.page").forEach((a) => { a.hidden = a.dataset.page !== page; });
+    const navKey = page === "module" ? "api" : page;
+    $$("#nav a").forEach((a) => a.removeAttribute("aria-current"));
+    const cur = $(`#nav a[data-nav="${navKey}"]`); if (cur) cur.setAttribute("aria-current", "page");
+    const art = $(`article[data-page="${page}"]`);
+    document.title = page === "overview" ? "crdblab Handbook" : `${page === "module" ? hash.slice(4) : art.dataset.title} · crdblab Handbook`;
+    const i = order.indexOf(navKey);
+    const pager = $("#pager");
+    pager.replaceChildren();
+    if (page !== "module" && i > -1) {
+      if (i > 0) pager.append(h(`<a href="#${order[i - 1]}"><span>Previous</span>${esc(pages[i - 1].dataset.title)}</a>`));
+      if (i < order.length - 1) pager.append(h(`<a class="next" href="#${order[i + 1]}"><span>Next</span>${esc(pages[i + 1].dataset.title)}</a>`));
+    }
+    closeNav();
+    if (target) { target.scrollIntoView({ block: "start" }); flash(target); }
+    else if (pendingFocus) { const el = document.getElementById(pendingFocus); pendingFocus = null; if (el) { el.scrollIntoView({ block: "start" }); flash(el); } else window.scrollTo(0, 0); }
+    else window.scrollTo(0, 0);
+  }
+  let pendingFocus = null;
+  function flash(el) {
+    el.classList.add("flash");
+    setTimeout(() => el.classList.remove("flash"), 1600);
+  }
+  document.addEventListener("click", (e) => {
+    const a = e.target.closest("a[data-sym]");
+    if (a && a.dataset.sym) pendingFocus = a.dataset.sym;
+  });
+  window.addEventListener("hashchange", route);
+
+  /* ---------- mobile nav ---------- */
+  const menuBtn = $("#menu-btn"), scrim = $("#scrim");
+  function closeNav() { document.body.classList.remove("nav-open"); scrim.hidden = true; menuBtn.setAttribute("aria-expanded", "false"); }
+  menuBtn.addEventListener("click", () => { document.body.classList.add("nav-open"); scrim.hidden = false; menuBtn.setAttribute("aria-expanded", "true"); });
+  scrim.addEventListener("click", closeNav);
+
+  /* ---------- search ---------- */
+  const index = [];
+  for (const p of $$("article.page[data-group]")) {
+    const title = p.dataset.title;
+    index.push({ kind: "page", title, sub: firstLine($(".lede", p)?.textContent || ""), go: `#${p.dataset.page}`, text: p.textContent.toLowerCase() });
+    for (const hd of $$("h2[id], h3[id]", p)) index.push({ kind: "section", title: hd.textContent, sub: title, go: `#${hd.id}`, text: (hd.textContent + " " + (hd.nextElementSibling?.textContent || "")).toLowerCase() });
+  }
+  if (D) {
+    for (const c of D.cli.commands) if (c.path.length) index.push({ kind: "command", title: ["crdblab", ...c.path].join(" "), sub: c.help, go: `#cli-${c.path.join("-")}`, text: (c.path.join(" ") + " " + c.help + " " + c.args.map((a) => a.flags.join(" ") + " " + a.help).join(" ")).toLowerCase() });
+    for (const m of modules) {
+      index.push({ kind: "module", title: m.module, sub: firstLine(m.doc), go: `#mod-${m.module}`, text: (m.module + " " + m.doc).toLowerCase() });
+      for (const f of m.functions) index.push({ kind: "function", title: `${f.name}()`, sub: m.module, go: `#mod-${m.module}`, sym: `sym-${m.module}.${f.name}`, text: (f.name + " " + f.doc).toLowerCase() });
+      for (const c of m.classes) {
+        index.push({ kind: "class", title: c.name, sub: m.module, go: `#mod-${m.module}`, sym: `sym-${m.module}.${c.name}`, text: (c.name + " " + c.doc).toLowerCase() });
+        for (const f of c.methods) index.push({ kind: "method", title: `${c.name}.${f.name}()`, sub: m.module, go: `#mod-${m.module}`, sym: `sym-${m.module}.${c.name}.${f.name}`, text: (c.name + "." + f.name + " " + f.doc).toLowerCase() });
+      }
+      for (const k of m.constants) index.push({ kind: "constant", title: k.name, sub: m.module, go: `#mod-${m.module}`, sym: `sym-${m.module}.${k.name}`, text: (k.name + " " + k.doc).toLowerCase() });
+    }
+    for (const s of D.schemas.csv) for (const c of s.columns) index.push({ kind: "column", title: `${s.file} · ${c.name}`, sub: c.doc, go: "#data", text: (c.name + " " + s.file + " " + c.doc).toLowerCase() });
+    for (const [sec, fl] of Object.entries(D.profiles.sections)) for (const f of fl) index.push({ kind: "profile", title: `${sec}.${f.name}`, sub: f.doc || `default ${f.default}`, go: `#prof-${sec}-${f.name}`, text: (sec + " " + f.name + " " + f.doc).toLowerCase() });
+    for (const c of D.charts.charts) index.push({ kind: "chart", title: `${c.id} ${c.title}`, sub: c.caption, go: `#chart-${c.id}`, text: (c.id + " " + c.title + " " + c.caption).toLowerCase() });
+  }
+  const input = $("#search"), results = $("#results");
+  let hits = [], sel = 0;
+  function score(item, q) {
+    const t = item.title.toLowerCase();
+    if (t === q) return 100;
+    if (t.startsWith(q)) return 80;
+    if (t.includes(q)) return 60;
+    const words = q.split(/\s+/).filter(Boolean);
+    if (words.every((w) => item.text.includes(w))) return 30 - Math.min(item.text.indexOf(words[0]) / 1000, 10);
+    return 0;
+  }
+  function search() {
+    const q = input.value.trim().toLowerCase();
+    if (!q) { results.hidden = true; return; }
+    hits = index.map((it) => [score(it, q), it]).filter(([s]) => s > 0).sort((a, b) => b[0] - a[0]).slice(0, 14).map(([, it]) => it);
+    sel = 0;
+    results.replaceChildren(...(hits.length ? hits.map((it, i) => {
+      const r = h(`<div class="result" role="option" aria-selected="${i === 0}"><span class="r-kind">${esc(it.kind)}</span><span class="r-title">${esc(it.title)}</span>${it.sub ? `<span class="r-sub">${esc(it.sub.slice(0, 110))}</span>` : ""}</div>`);
+      r.addEventListener("mousedown", (e) => { e.preventDefault(); open(it); });
+      return r;
+    }) : [h(`<div class="empty">Nothing matches “${esc(q)}”.</div>`)]));
+    results.hidden = false;
+  }
+  function open(it) {
+    results.hidden = true; input.value = ""; input.blur();
+    pendingFocus = it.sym || null;
+    if (location.hash === it.go) route(); else location.hash = it.go;
+  }
+  input.addEventListener("input", search);
+  input.addEventListener("keydown", (e) => {
+    if (results.hidden) return;
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      sel = (sel + (e.key === "ArrowDown" ? 1 : hits.length - 1)) % Math.max(hits.length, 1);
+      $$(".result", results).forEach((r, i) => r.setAttribute("aria-selected", String(i === sel)));
+      $$(".result", results)[sel]?.scrollIntoView({ block: "nearest" });
+    } else if (e.key === "Enter" && hits[sel]) { e.preventDefault(); open(hits[sel]); }
+    else if (e.key === "Escape") { results.hidden = true; input.blur(); }
+  });
+  input.addEventListener("blur", () => setTimeout(() => { results.hidden = true; }, 120));
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "/" && document.activeElement !== input && !/INPUT|TEXTAREA/.test(document.activeElement.tagName)) { e.preventDefault(); input.focus(); }
+  });
+
+  if (!D) {
+    for (const id of ["cli-ref", "profile-ref", "run-explorer", "chart-ref", "api-index", "test-ref", "script-help"]) {
+      const el = document.getElementById(id);
+      if (el) el.innerHTML = `<div class="callout warn"><strong>Reference data is missing.</strong><p>Run <code>.venv/bin/python docs-app/build.py</code> to generate <code>docs-app/data.js</code>, then reload.</p></div>`;
+    }
+  } else {
+    renderScripts(); renderCli(); renderProfiles(); renderData(); renderCharts(); renderApiIndex(); renderTests();
+  }
+
+  if (D) $("#build-stamp").textContent = `${modules.length} modules`;
+  route();
+})();
+</script>
+</body>
+</html>

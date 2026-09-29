@@ -1,9 +1,7 @@
-"""Group C -- resilience: the newest chaos run of each fault class, per engine.
+"""Group C: resilience, from the newest chaos run of each fault class, per engine.
 
-Every recovery figure is taken from :mod:`crdblab.analysis.resilience`, which
-re-derives it from the run's own attempt logs; nothing here recomputes an RTO.
-Chart order is engine, then fault class (``dead`` before ``recover``), and every
-time axis is the harness clock, on which the fault itself is recorded.
+Recovery figures come from :mod:`crdblab.analysis.resilience`. Time axes use
+the harness clock, on which the fault is recorded.
 """
 
 from __future__ import annotations
@@ -284,9 +282,7 @@ def c6_paths_after_failover(ctx: Context) -> Drawn:
         for op in ("read", "update"):
             rows = metrics[metrics["op"] == op]
             before = rows.loc[rows["wall_offset_s"] < fault, "p50_ms"]
-            # From the fault itself, as the original catalogue took it: the
-            # outage's own intervals (p50 = 0, nothing completed) are included,
-            # which the caption states.
+            # Includes the outage's own intervals (p50 = 0), as the caption says.
             after = rows.loc[rows["wall_offset_s"] >= fault, "p50_ms"]
             if len(before) and len(after):
                 entry[f"{op}_p50_before_ms"] = float(before.median())

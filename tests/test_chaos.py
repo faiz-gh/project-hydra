@@ -1,11 +1,4 @@
-"""Tests for Phases III-IV recovery detection.
-
-``find_recovery`` decides the single number Phases III-IV exist to produce, and the
-legacy implementation of it did not measure recovery at all: its guard clause
-prevented a recovery being declared sooner than ten of its own (double-speed)
-seconds, so the reported RTOs of 6.0 s and 5.2 s are the guard. These tests pin
-the corrected semantics.
-"""
+"""Tests for Phases III-IV recovery detection."""
 
 from __future__ import annotations
 
@@ -23,14 +16,7 @@ def _series(values, start=0.0, step=1.0):
 
 
 def test_rto_is_the_start_of_the_sustained_window_not_its_end():
-    """The hold qualifies the recovery; it must not postpone the timestamp.
-
-    Throughput collapses at the fault (t=10) and first reaches the 800 tps floor
-    at t=14, holding from there. The correct answer is 14, an RTO of 4 s.
-    Returning the end of the five-second hold would report 19 and an RTO of 9 s
-    -- more than double, and an artefact of the measurement rather than a
-    property of the system.
-    """
+    """The hold qualifies the recovery; it must not postpone the timestamp."""
     series = _series([1000] * 10 + [0, 100, 300, 700, 950, 980, 1000, 1000, 1000, 1000, 1000])
     assert find_recovery(series, 10.0, BASELINE, THRESHOLD, HOLD) == pytest.approx(14.0)
 
@@ -47,12 +33,7 @@ def test_no_recovery_is_reported_when_throughput_never_returns():
 
 
 def test_recovery_is_not_declared_without_enough_samples_to_establish_the_hold():
-    """A run that ends mid-window must report no recovery rather than guess.
-
-    Throughput is above the floor for the final two samples, but the hold is five
-    seconds and the run stops before that can be established. Reporting a
-    recovery here would be an assertion the data does not support.
-    """
+    """A run that ends mid-window must report no recovery rather than guess."""
     series = _series([1000] * 10 + [0, 0, 0, 1000, 1000])
     assert find_recovery(series, 10.0, BASELINE, THRESHOLD, HOLD) is None
 
@@ -114,18 +95,7 @@ def test_availability_rto_is_none_when_writes_never_resume():
 
 
 def test_an_audit_writer_that_stopped_observing_reports_no_rto_at_all():
-    """The 2026-09-09 regression, at the real run's numbers.
-
-    ``runs/20260909T012233Z_p4-chaos-recover``: fault at 24.792 s, the last
-    acknowledgement 3.7 s later at 28.49 s over a connection the partition had
-    already black-holed, then nothing for the remaining ~25 s of the run because
-    the writer blocked inside one INSERT. No gap between acknowledgements
-    cleared the detection floor -- there were no further acknowledgements to
-    make one -- so the old code fell through to "the interval to the next
-    acknowledged write" and reported **0.082 s** for an outage the generator
-    recorded as two consecutive ticks of zero throughput. A 0.08 s RTO is not a
-    conservative reading of that evidence; it is the flattering one.
-    """
+    """An audit writer that stopped observing reports no RTO, not a tiny one."""
     acks = [(24.792 + 0.39 * i, "ack") for i in range(-40, 10)]
     a = _attempts(acks)
     r = availability_rto(a, fault_monotonic=24.792, observation_end=53.8)
@@ -137,14 +107,7 @@ def test_an_audit_writer_that_stopped_observing_reports_no_rto_at_all():
 
 
 def test_a_writer_still_blocked_at_the_end_of_the_run_is_not_counted_as_covering_it():
-    """Coverage is judged on acknowledgements, not on attempts.
-
-    The real writer is single-threaded and never abandons an attempt: the one it
-    was blocked on eventually resolved as ``ambiguous`` 48 s later, *after* the
-    run had ended. Judged on "did it attempt anything recently" it looks like it
-    covered the whole run and more; judged on what it actually observed, it made
-    one observation in fifty seconds while nominally sampling at 2.5/s.
-    """
+    """Coverage is judged on acknowledgements, not on attempts."""
     acks = [(24.792 + 0.39 * i, "ack") for i in range(-40, 10)]
     a = _attempts(acks + [(76.778, "ambiguous")])
     r = availability_rto(a, fault_monotonic=24.792, observation_end=53.8)
@@ -178,12 +141,8 @@ def test_resolution_is_reported_so_the_figure_can_be_qualified():
     assert r["resolution_s"] == pytest.approx(0.5)
 
 
-# --- Patroni primary resolution ---------------------------------------------
-#
-# Unlike CockroachDB's lease_preferences, nothing pins which node wins
-# Patroni's leader election, so a profile's static chaos.target cannot be
-# trusted for PostgreSQL: resolve_patroni_primary queries the cluster live
-# instead, immediately before the fault is scheduled.
+# --- Patroni primary resolution ---
+# Nothing pins Patroni's leader, so the primary is resolved live before the fault.
 
 import json
 from unittest.mock import patch
@@ -213,11 +172,7 @@ class _FakeResponse:
         return False
 
 
-#: A healthy replica's ``/patroni`` document, in the two fields
-#: ``patroni_candidate_ready`` reads. It is streaming, and it is on the same
-#: timeline as the leader below -- which is exactly what the live failure of
-#: 2026-09-09 was not: that node answered ``/replica`` 200 while sitting on
-#: timeline 1 with no replication connection at all.
+#: A healthy replica's ``/patroni`` fields: streaming, on the leader's timeline.
 _STREAMING = {"role": "replica", "replication_state": "streaming", "timeline": 2}
 _LEADING = {"role": "primary", "timeline": 2}
 
@@ -225,27 +180,7 @@ _LEADING = {"role": "primary", "timeline": 2}
 def _urlopen_returning(
     statuses_by_host, replica_statuses=None, patroni_states=None, quorum_statuses=None
 ):
-    """Build a fake ``urlopen`` keyed on the host embedded in the URL.
-
-    ``statuses_by_host`` answers ``/primary``. ``/replica`` is answered from
-    ``replica_statuses`` when given, and otherwise by inverting ``/primary`` --
-    which is what a healthy cluster does: exactly one member is the leader and
-    every other running member is a candidate. The two endpoints have to be
-    distinguishable here because ``check_patroni_primary_placement`` reads both,
-    and a fixture that returned the leader's 503 for ``/replica`` as well would
-    make every replica look ineligible.
-
-    ``/patroni`` is the third endpoint and it is answered by default as a
-    healthy cluster would: the leader leading on timeline 2, everyone else
-    streaming on timeline 2. ``patroni_states`` overrides that per host, which
-    is how the regression test below reproduces a member that is up and
-    unlagged and still cannot be handed leadership.
-
-    ``/quorum`` answers 200 by default for every non-leader -- a healthy,
-    already-converged cluster's steady state -- and ``quorum_statuses``
-    overrides that per host, for a candidate that is streaming and on the right
-    timeline but not yet admitted to ``synchronous_standby_names``.
-    """
+    """Build a fake ``urlopen`` keyed on the host embedded in the URL."""
 
     def _status_for(url, host):
         if url.endswith("/replica"):
@@ -306,19 +241,8 @@ def test_two_primaries_is_a_split_brain_and_refuses_rather_than_picking_one():
             resolve_patroni_primary(_TOPO)
 
 
-# --------------------------------------------------------------------------
-# Fault injection has to actually land.
-#
-# The 2026-09-08 chaos runs are the reason these exist. `crdb-gcp-1` is reached
-# over SSH as `ubuntu` while `cockroach` runs as root, so `killall -9 cockroach`
-# returned `Operation not permitted` (rc=1) and the target served uninterrupted
-# for the whole run -- its pid was unchanged afterwards. The harness recorded
-# `"detail": "rc=1"` and produced a complete run directory that passed
-# `validate` and reported "no write interruption detectable", which reads as an
-# excellent resilience result and is in fact a measurement of nothing.
-# `recover` was worse: its payload is backgrounded, so a denied
-# `tailscale down` cannot even be seen in the exit status.
-# --------------------------------------------------------------------------
+# --- fault authorisation ---
+# A denied fault yields a complete run of an undisturbed cluster; it must be caught.
 
 from types import SimpleNamespace
 
@@ -347,33 +271,25 @@ def test_dead_payload_kills_the_right_process_per_engine():
 
 
 def test_the_postgresql_dead_fault_disables_restart_with_a_drop_in_not_set_property():
-    """`systemctl set-property patroni.service Restart=no` -- the obvious
-    one-liner -- fails with "Cannot set property Restart, or unknown property":
-    set-property only accepts properties settable on a running unit, which
-    Restart= is not. Measured against crdb-azure-1: rc=1, the `&&`
-    short-circuited, and the primary served on untouched. A drop-in file plus
-    daemon-reload is the supported mechanism."""
+    """The PostgreSQL dead fault disables restarts with a drop-in (set-property cannot set
+    Restart=).
+    """
     payload = get_payload("dead", "postgresql")
     assert "set-property" not in payload
     assert "patroni.service.d" in payload and "daemon-reload" in payload
 
 
 def test_the_postgresql_dead_fault_cannot_be_undone_by_systemd():
-    """patroni.service ships Restart=on-failure, so a SIGKILL is a failure by
-    systemd's definition and the unit returns within RestartSec (~100 ms). A
-    dead run would then measure systemd's restart rather than the cluster's
-    failover -- and report a better RTO than CockroachDB's on a fault that was
-    never the same fault. Restart must be disabled before the kill lands."""
+    """Patroni's Restart=on-failure would undo the kill in ~100 ms, so restarts are
+    disabled first.
+    """
     payload = get_payload("dead", "postgresql")
     assert "Restart=no" in payload
     assert payload.index("Restart=no") < payload.index("kill")
 
 
 def test_the_postgresql_dead_fault_signals_the_unit_not_a_process_name():
-    """Patroni runs as `/usr/bin/python3 /usr/bin/patroni`, so its comm is
-    `python3` and `killall -9 patroni` matches nothing; a `pkill -f patroni`
-    written to fix that matches the SSH command carrying it. Signalling the
-    unit's cgroup avoids both, and takes the postmaster with it."""
+    """The kill signals the unit's cgroup; Patroni's process name is python3, not patroni."""
     payload = get_payload("dead", "postgresql")
     assert "systemctl kill" in payload
     assert "--kill-who=all" in payload
@@ -388,9 +304,7 @@ def test_restoring_postgresql_removes_the_restart_override():
     from crdblab.phases import p4_chaos
 
     source = inspect.getsource(p4_chaos.restore_target)
-    # The path is interpolated from the constant, so the source names the
-    # constant rather than the expanded path -- which is the point: the fault
-    # and the restore cannot drift apart onto two different files.
+    # Both use the constant, so the fault and restore cannot drift onto different files.
     assert "rm -f {PG_RESTART_OVERRIDE}" in source
     assert "daemon-reload" in source
     assert p4_chaos.PG_RESTART_OVERRIDE in p4_chaos.get_payload("dead", "postgresql")
@@ -411,8 +325,7 @@ def test_a_refused_injection_is_recorded_as_not_landed():
     with patch("crdblab.core.ssh.run", return_value=denied):
         result = inject_fault(_TARGET, "dead", "cockroachdb")
     assert result["landed"] is False
-    # The reason has to survive into events.json; "rc=1" alone was what made the
-    # original failure unreadable after the fact.
+    # The reason must survive into events.json; "rc=1" alone is unreadable later.
     assert "Operation not permitted" in result["detail"]
 
 
@@ -447,19 +360,13 @@ def test_preflight_passes_when_the_fault_would_be_permitted():
     assert report.ok
 
 
-# --------------------------------------------------------------------------
-# The post-fault series is the measurement, so the run has to outlive the
-# fault. Two separate things guarantee it, and the 2026-09-08 thesis run shows
-# why both are needed: the generator was given 120s of post-fault time and used
-# 7.1s of it, because `cockroach workload run` exits on its first failed
-# statement and the fault is a failed statement.
-# --------------------------------------------------------------------------
+# --- post-fault observation ---
+# The run must outlive the fault, and the generator must tolerate errors.
 
 from crdblab.config import ChaosSpec, Profile
 from crdblab.phases.p4_chaos import (
     RECOVER_HEAL_DELAY_S,
     generator_duration_s,
-    get_payload,
     restore_target,
 )
 
@@ -482,38 +389,21 @@ def test_the_window_is_never_shortened():
 
 
 def test_recover_mode_observes_from_the_heal_not_from_the_fault():
-    """The partition heals itself after RECOVER_HEAL_DELAY_S, so nothing
-    between the fault and the heal can contain a recovery. Counting the
-    post-fault window from the fault therefore buys observation of the outage
-    and none of what the phase exists to measure."""
+    """In recover mode the post-fault window is counted from the heal, not from the fault."""
     chaos = ChaosSpec(duration_s=45, inject_at_s=15, min_post_fault_s=20)
     assert generator_duration_s(chaos, "dead") == 45
     assert generator_duration_s(chaos, "recover") == 15 + RECOVER_HEAL_DELAY_S + 20
 
 
 def test_the_smoke_profile_can_actually_observe_a_recover_recovery():
-    """Regression on experiment-20260909T031334Z.log, where it could not.
-
-    The run was 45s with the fault at 15s, so it ended at 45s while the
-    partition did not lift until 60s: no post-heal sample could exist at any
-    point in the run, and both independent instruments duly reported the RTO as
-    UNMEASURED. The 45s window that follows the heal is sized on the
-    thesis-scale run of 2026-09-08, which measured writes resuming ~24s after
-    the partition lifted -- promotion and client reconnection both happen after
-    the network comes back, not during the outage."""
+    """The smoke profile runs long enough to observe a recover-mode recovery."""
     chaos = Profile.load("smoke").chaos
     heal_at = chaos.inject_at_s + RECOVER_HEAL_DELAY_S
     assert generator_duration_s(chaos, "recover") >= heal_at + 30
 
 
 def test_thesis_extended_recover_run_is_long_enough_to_settle():
-    """Regression pin for the 2026-09-10 lengthening: at the 60s default,
-    resilience.post_fault_steady_state's CV<0.25 test could not resolve
-    either chaos mode's tail on the 2026-09-09 thesis-scale PostgreSQL runs
-    (104-105 post-settle ticks, cv=0.86-0.87). 900s was chosen by replaying
-    that recover run's own recorded series and confirming its window's CV
-    crosses below 0.25 only once ~800-850 post-settle ticks are in it -- see
-    profiles/thesis-extended.yaml's comment for the full derivation."""
+    """thesis-extended runs long enough after the fault for the settled-state test to resolve."""
     chaos = Profile.load("thesis-extended").chaos
     assert chaos.min_post_fault_s == 900
     assert generator_duration_s(chaos, "recover") == 60 + RECOVER_HEAL_DELAY_S + 900
@@ -525,10 +415,7 @@ def test_thesis_extended_dead_run_is_long_enough_to_settle():
 
 
 def test_thesis_recover_run_is_long_enough_to_settle():
-    """thesis.yaml was lengthened too (2026-09-10, at the user's request),
-    to 450s -- half of thesis-extended.yaml's 900s, since this is the
-    canonical cross-engine comparability profile and its overall run budget
-    matters more here."""
+    """thesis runs long enough after the fault for the settled-state test to resolve."""
     chaos = Profile.load("thesis").chaos
     assert chaos.min_post_fault_s == 450
     assert generator_duration_s(chaos, "recover") == 60 + RECOVER_HEAL_DELAY_S + 450
@@ -555,11 +442,8 @@ def test_the_payload_and_the_run_length_read_the_same_heal_delay():
     assert f"sleep {RECOVER_HEAL_DELAY_S} " in payload, payload
 
 
-# --------------------------------------------------------------------------
-# Restoring the dead target. Two mistakes this pins, both real: an
-# unprivileged `cockroach start` cannot open the root-owned store, and asking
-# the fault target whether it is alive always answers "no".
-# --------------------------------------------------------------------------
+# --- restoring the dead target ---
+# The restart needs sudo, and liveness is read from a survivor, not the target.
 
 _FIVE = Topology(nodes=tuple(
     Node(f"n{i}", f"host{i}", "ubuntu", "gcp", "us-east1", "cloud=gcp,region=us-east1")
@@ -619,17 +503,8 @@ def test_postgresql_restarts_patroni_rather_than_cockroach():
     assert not any("cockroach start" in cmd for _, cmd in calls)
 
 
-# --- Patroni primary placement (the PostgreSQL counterpart to D7's check) ----
-#
-# Where the write path is led from is a property of the deployment, not of the
-# engine, so it has to hold identically on both arms or the comparison measures
-# cloud geography. Measured 2026-09-09: an unpinned election put the primary on
-# crdb-azure-2 (eastasia, 199 ms from the client) where a single connection cost
-# 1.02 s against 0.05 s to the gateway.
-#
-# The reason this needs its own repair, rather than the settle window
-# check_leaseholder_placement uses, is that Patroni never fails back. Waiting
-# would be waiting for something that cannot happen.
+# --- Patroni primary placement ---
+# Patroni never fails back, so the primary is repaired by switchover, not waited for.
 
 _GW = Node("gcp-1", "hostgw", "ubuntu", "gcp", "us-east1", "cloud=gcp", gateway=True)
 _OTHER = Node("azure-2", "hostaz", "ubuntu", "azure", "eastasia", "cloud=azure")
@@ -678,14 +553,7 @@ def test_primary_elsewhere_is_switched_over_to_the_gateway():
 
     def _switch(node, command, timeout=None):
         assert "switchover" in command
-        # Patroni identifies members by the `name:` in its own config, which
-        # bootstrap-patroni.tftpl sets to the node's HOSTNAME (`crdb-gcp-1`) --
-        # not this harness's short Node.name (`gcp-1`) that profiles use for
-        # chaos.target. This assertion previously demanded the short name and so
-        # locked the bug in: the live Phase IV repair on 2026-09-08 ran
-        # `switchover --leader linode-2 --candidate gcp-1`, Patroni answered
-        # "Member linode-2 is not the leader of cluster postgres-cluster", and
-        # the phase never ran.
+        # Patroni names members by hostname (`crdb-gcp-1`), not the short Node.name.
         assert "--candidate hostgw" in command, command
         assert "--leader hostaz" in command, command
         assert "gcp-1" not in command, (
@@ -708,17 +576,7 @@ def test_primary_elsewhere_is_switched_over_to_the_gateway():
 
 
 def test_a_candidate_that_is_still_catching_up_is_waited_for_not_refused():
-    """Phase IV must survive following Phase III on the PostgreSQL arm.
-
-    Phase III partitions the primary, so the demoted node's timeline diverges
-    and it has to be rewound or (per ``remove_data_directory_on_diverged_
-    timelines``) re-cloned from the leader before Patroni will hand leadership
-    back. At thesis scale that is ~6 GB across a WAN link. Phase IV starts the
-    instant Phase III returns, so with no wait the repair asks for a handover to
-    a member still taking its basebackup and Patroni answers "no good candidates
-    have been found" -- aborting the sweep on a condition that clears itself in
-    minutes.
-    """
+    """Phase IV must survive following Phase III on the PostgreSQL arm."""
     # /replica: 503 while it catches up, then 200. /primary: the far node until
     # the switchover, then the gateway.
     replica_states = iter([{"hostgw": 503}, {"hostgw": 503}, {"hostgw": 200}])
@@ -759,21 +617,7 @@ def test_a_candidate_that_is_still_catching_up_is_waited_for_not_refused():
 
 
 def test_a_replica_that_is_up_but_not_streaming_is_not_a_candidate():
-    """The 2026-09-09 failure: /replica 200 is not sufficient.
-
-    After Phase III's partition, gcp-1 came back up and answered /replica 200,
-    the wait ended immediately on "running replica, lag within bounds", and the
-    switchover that followed failed with `503, Switchover failed`. The cluster
-    table printed with that failure shows why: gcp-1 was `Role: Replica` on
-    TIMELINE 1 with `Receive LSN: unknown`, while the leader and the other three
-    members were streaming on timeline 2. It was unlagged because it was not
-    attached to anything -- lag is measured against a position it could not
-    advance -- and /replica cannot distinguish that from health.
-
-    The switchover must not be attempted here. Asking Patroni for a handover it
-    will refuse achieves nothing and buries the real reason under a second,
-    downstream error, which is precisely how the live run reported it.
-    """
+    """A replica answering /replica 200 but not streaming is not a switchover candidate."""
     report = _preflight.PreflightReport()
     with (
         patch(
@@ -805,10 +649,7 @@ def test_a_replica_that_is_up_but_not_streaming_is_not_a_candidate():
 
 
 def test_a_streaming_replica_left_on_an_older_timeline_is_not_a_candidate():
-    """The same shape one step further on: attached, but behind a timeline
-    switch it has not yet followed. The leader's timeline is read from its own
-    /patroni document, so the comparison is against the live cluster rather
-    than against a constant."""
+    """A streaming replica on an older timeline than the leader is not a candidate."""
     report = _preflight.PreflightReport()
     with (
         patch(
@@ -839,15 +680,7 @@ def test_a_streaming_replica_left_on_an_older_timeline_is_not_a_candidate():
 
 
 def test_a_streaming_correctly_timelined_replica_can_still_not_be_a_quorum_member():
-    """Regression on experiment-20260909T043036Z.log, one step further than the
-    timeline test above: gcp-1 answered /replica 200, was streaming, and was on
-    the leader's timeline -- both prior gates passed -- and the switchover still
-    failed with `503, Switchover failed`. The cluster table printed with that
-    failure showed gcp-1 as `Role: Replica`, not `Quorum Standby`, while every
-    other survivor was: it had not yet been admitted to
-    synchronous_standby_names, which Patroni tracks on its own loop_wait
-    cadence, independently of whether the node is caught up. The switchover must
-    not be attempted on a candidate /quorum does not yet accept."""
+    """A streaming replica on the right timeline is not a candidate until it is a quorum member."""
     report = _preflight.PreflightReport()
     with (
         patch(

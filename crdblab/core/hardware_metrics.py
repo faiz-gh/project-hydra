@@ -1,23 +1,9 @@
 """Per-node CPU/memory/disk/network utilisation, polled from node_exporter.
 
-Every node in this testbed (5 cluster members + the client node) runs the
-Ubuntu-packaged ``prometheus-node-exporter`` on its default port, ``:9100``
-(see ``terraform/scripts/bootstrap-{cockroachdb,patroni,client}.tftpl``).
-This module polls it directly over HTTP -- the same idiom
-``core/preflight.py`` already uses for Patroni's ``:8008`` REST API -- rather
-than through a standalone Prometheus server; there is no long-lived service
-between runs, and every scraped row lands in the measured run's own
-directory, consistent with this project's "every figure traces back to
-retained raw output on disk" design commitment.
-
-node_exporter exposes raw, monotonic *counters* (bytes transferred, seconds
-busy), not pre-normalised rates -- unlike CockroachDB's own ``/_status/vars``
-endpoint that ``phases/bench.py``'s (currently dead) ``HostSampler`` expects.
-Turning a counter into a rate needs two scrapes, so :class:`HardwareMetricsSampler`
-keeps the previous scrape's counters per node and differences them; a node's
-first observed poll therefore has no rate to report, and is written as an
-empty string rather than 0 or NaN, distinguishing "not yet measured" from
-"measured as zero" (D5).
+Every node runs ``prometheus-node-exporter`` on ``:9100``; it is polled
+directly over HTTP. node_exporter exposes monotonic counters, so rates come
+from differencing consecutive scrapes, and a node's first poll has no rate
+(written as ``""``, not 0).
 """
 
 from __future__ import annotations
@@ -26,28 +12,23 @@ import re
 import threading
 import time
 import urllib.request
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any
 
 from ..topology import Node
 from .recorder import HARDWARE_METRICS_COLUMNS, MetricsWriter, utcnow
 
-#: Matches one Prometheus text-exposition line for a `node_*` metric, with or
-#: without a label set. Deliberately narrower than the full exposition
-#: grammar (no ``# HELP``/``# TYPE`` handling beyond skipping comment lines,
-#: no ``+Inf``/quantile support) -- only the ~9 families this project reads
-#: are ever matched, out of the hundreds node_exporter exposes, so a minimal
-#: hand-rolled parser is simpler to audit than pulling in a general-purpose
-#: one for cases that never arise here.
+#: One Prometheus text line for a ``node_*`` metric. A minimal parser is enough
+#: for the few families read here.
 _LINE_RE = re.compile(
     r"^(?P<name>node_[A-Za-z0-9_]+)(\{(?P<labels>[^}]*)\})?\s+(?P<value>\S+)\s*$"
 )
 _LABEL_RE = re.compile(r'(?P<key>[A-Za-z0-9_]+)="(?P<value>[^"]*)"')
 
-#: The only metric families this project reads. Everything else in a scrape
-#: body (filesystem, systemd, textfile-collector metrics, ...) is ignored.
+#: The only metric families read; everything else in a scrape is ignored.
 _WANTED = frozenset(
     {
         "node_cpu_seconds_total",
@@ -62,11 +43,8 @@ _WANTED = frozenset(
     }
 )
 
-#: name -> [(labels, value), ...], unaggregated. Kept ungrouped until the
-#: caller combines per-core/per-device series, because CPU is summed across
-#: every core+mode, disk is summed across every device, and network is summed
-#: across every device except `lo` -- three different aggregation rules,
-#: applied by the sampler, not here.
+#: name -> [(labels, value), ...], unaggregated; the sampler applies
+#: per-family aggregation (all cores, all disks, all non-loopback NICs).
 _Families = dict[str, list[tuple[dict[str, str], float]]]
 
 
@@ -153,16 +131,8 @@ def _rate(curr: float, prev: float, dt: float) -> float | str:
 class HardwareMetricsSampler:
     """Polls every node's node_exporter in the background; writes one CSV at the end.
 
-    Modeled on ``AuditWriter``'s "collect into memory, write the CSV once at
-    the end" shape (``phases/p4_chaos.py``) rather than ``HostSampler``'s
-    per-tick-blended-column shape (``phases/bench.py``): hardware metrics is
-    its own table, not a column blended into an existing per-tick row, so
-    nothing in the phase's own tick loop needs to read it live.
-
-    A node's scrape failure (timeout, connection refused, malformed body)
-    increments :attr:`scrape_failures` for that node and produces no row for
-    that tick; it never blocks or corrupts another node's row, the same
-    isolation ``phases/p1_network.py``'s per-node fan-out already relies on.
+    A failed scrape counts against that node in :attr:`scrape_failures` and
+    produces no row for that tick, without affecting other nodes.
     """
 
     def __init__(
@@ -182,9 +152,7 @@ class HardwareMetricsSampler:
         self._prev: dict[str, _RawCounters] = {}
         self.rows: list[dict[str, Any]] = []
         self.scrape_failures: dict[str, int] = {n.name: 0 for n in self._nodes}
-        #: Incremented if a whole tick fails outside of a single node's own
-        #: scrape (e.g. the thread pool itself raising) -- distinct from
-        #: ``scrape_failures``, which is per-node and covers the common case.
+        #: Ticks that failed as a whole, outside any single node's scrape.
         self.tick_failures = 0
 
     def _sample_node(self, node: Node) -> dict[str, Any] | None:
@@ -262,7 +230,7 @@ class HardwareMetricsSampler:
                 self.tick_failures += 1
             self._stop.wait(max(0.0, self._interval - (time.monotonic() - started)))
 
-    def __enter__(self) -> "HardwareMetricsSampler":
+    def __enter__(self) -> HardwareMetricsSampler:
         self._pool = ThreadPoolExecutor(max_workers=max(1, len(self._nodes)))
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()

@@ -1,17 +1,8 @@
-"""The house style every figure in this project is drawn with.
+"""Shared figure style: palette, rcParams, provenance filenames and PNG+SVG export.
 
-Extracted from :mod:`crdblab.report.figures` so that module and
-:mod:`crdblab.insights` draw with one palette, one set of rcParams, one
-provenance slug and one PNG+SVG writer rather than two copies that drift.
-``figures.py`` re-exports the names it used to define, so nothing that imported
-them from there broke.
-
-Design notes. These are print figures for a Word document, so they are rendered
-for a light surface only; a screen palette's dark mode does not apply. Series are
-distinguished by hue *and* by marker and dash pattern, so the figures survive
-greyscale printing, which is the paper equivalent of the colour-vision case. The
-two-hue categorical palette was validated rather than eyeballed (worst adjacent
-CVD Delta E 24.7 against a >= 8 target).
+Used by both :mod:`crdblab.report.figures` and :mod:`crdblab.insights`. Figures
+are for print on a light background; series differ by hue *and* by marker and
+dash, so they survive greyscale printing.
 """
 
 from __future__ import annotations
@@ -25,9 +16,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
 
-# --- palette ---------------------------------------------------------------
-# Light-surface values from the validated reference palette. Categorical slots
-# are assigned in fixed order and never cycled; text never wears a series colour.
+# Palette: categorical slots in fixed order; text never uses a series colour.
 SURFACE = "#fcfcfb"
 INK = "#0b0b0b"
 INK_SECONDARY = "#52514e"
@@ -41,34 +30,21 @@ DASHES = ("-", "--", "-.")
 CRITICAL = "#d03b3b"  # status: reserved for the fault, never for a series
 WARNING = "#fab219"
 
-#: Sequential ramp for magnitude: one hue, light to dark. Steps 100-700 of the
-#: reference blue ramp, which is what a continuous scale is allowed to use.
+#: Single-hue sequential ramp for magnitudes.
 BLUE_RAMP = ["#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b"]
 SEQUENTIAL = LinearSegmentedColormap.from_list("crdblab_blue", BLUE_RAMP)
 
-#: Minimum exported width in pixels. 4K (3840) so a figure survives being scaled
-#: to a full text column in print and still stands up to a reader zooming in on
-#: the printed page.
-#:
-#: Resolution is raised through the *export* DPI, never by enlarging the figure.
-#: Font sizes, line widths and marker sizes are all specified in points, so a
-#: higher DPI renders exactly the same layout onto more pixels; making the figure
-#: physically larger instead would shrink the text relative to the plot and
-#: quietly undo the label placement.
+#: Minimum exported width in pixels (4K). Reached by raising export DPI, never by
+#: enlarging the figure, so the layout is unchanged.
 EXPORT_WIDTH_PX = 3840
 
-#: Vector companion, written alongside the PNG rather than instead of it: Word
-#: handles PNG more predictably for inline placement, and SVG opens in a browser
-#: and in every vector editor without a conversion step. Nothing depends on the
-#: format beyond the extension, so this is the only line that decides it.
+#: Vector copy written beside every PNG.
 EXPORT_VECTOR_EXT = ".svg"
 
 
 def _slug(value: object) -> str:
     """Filename-safe form of one provenance component."""
-    # ``_`` is kept, not replaced: run ids contain it (``..Z_bench_cluster``)
-    # and rewriting it would make the filename disagree with the run directory
-    # it names, which is the one thing this slug exists to state.
+    # Keep ``_`` so the filename matches the run directory name.
     text = str(value or "unknown")
     return "".join(c if c.isalnum() or c in "-._" else "-" for c in text).strip("-") or "unknown"
 
@@ -91,18 +67,8 @@ def _manifest_field(run, *path: str, default: str = "unknown") -> str:
 def _provenance_slug(*runs) -> str:
     """The filename tail naming the engine, profile and run(s) behind a figure.
 
-    A footer stamped inside an image cannot tell two files in one directory
-    apart, which is how a figure from a pre-redeploy cluster once sat unnoticed
-    beside five from the current one. So the filename says it too.
-
-    Every figure is named this way, Phase I included: ping does not care which
-    engine is listening, but switching engines replaces every cluster node, so a
-    matrix from each deployment describes a different set of machines.
-
-    Where several runs disagree on engine or profile the component becomes
-    ``mixed``, rather than picking one and misattributing the figure to it; the
-    run ids that follow always name all of them. With no runs at all -- a figure
-    about the run inventory itself -- both components are ``mixed``.
+    E.g. ``_cockroachdb_thesis_<run_id>``. Where runs disagree, the component is
+    ``mixed-engine`` or ``mixed-profile``; every run id is always listed.
     """
     present = [r for r in runs if r is not None]
     engines = {_manifest_field(r, "engine", default="cockroachdb") for r in present}
@@ -154,10 +120,7 @@ def _finish(fig, ax_or_axes, provenance: Sequence[str], path: Path) -> Path:
         for side in ("left", "bottom"):
             ax.spines[side].set_linewidth(0.8)
 
-    # Placed below the figure's own coordinate box rather than inside it. The
-    # tight bounding box expands to include it, which guarantees separation from
-    # the x-axis label; at a positive y it overlapped the axis label on every
-    # figure whose x-axis carried rotated tick labels.
+    # Below the axes box, so it never overlaps the x-axis label.
     fig.text(
         0.0,
         -0.045,
@@ -169,10 +132,7 @@ def _finish(fig, ax_or_axes, provenance: Sequence[str], path: Path) -> Path:
     )
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Derive the export DPI from the *tight* bounding box, not from the declared
-    # figure size: every figure is saved with bbox_inches="tight", which crops or
-    # expands the canvas to fit its artists, so figsize alone does not predict
-    # the exported width.
+    # DPI from the tight bounding box, which is what bbox_inches="tight" exports.
     fig.canvas.draw()
     bbox = fig.get_tightbbox(fig.canvas.get_renderer())
     dpi = EXPORT_WIDTH_PX / bbox.width

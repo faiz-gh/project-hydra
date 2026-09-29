@@ -1,15 +1,8 @@
-"""Tests for the post-run consistency checks.
-
-The Little's law tests below carry the most weight. That check is the project's
-only defence against a latency column bound to the wrong header position (D2),
-and it is also the check most capable of rejecting sound data if its lower bound
-is chosen carelessly -- which it originally was.
-"""
+"""Tests for the post-run consistency checks."""
 
 from __future__ import annotations
 
 import pandas as pd
-import pytest
 
 from crdblab.analysis.validation import (
     check_error_monotonicity,
@@ -47,28 +40,20 @@ def _rows(concurrency, ticks, ops):
     return pd.DataFrame(out)
 
 
-#: Measured on the cluster, 2026-09-02: reads are served by the local leaseholder
-#: while updates pay cross-region Raft quorum, an 84x spread between operation
-#: types. N/X = 10/660 * 1000 = 15.15 ms; the frequency-weighted median is
-#: 15.14 ms, so Little's law holds to better than a tenth of a percent.
+#: Local reads vs cross-region quorum updates (84x apart): N/X = 15.15 ms against a
+#: weighted median of 15.14 ms, so Little's law holds.
 HETEROGENEOUS = _rows(
     10, 12, {"read": (526.0, 0.85, 3.9, 5.8, 7.6), "update": (134.0, 71.3, 104.9, 121.6, 125.8)}
 )
 
 
 def test_littles_law_accepts_a_heterogeneous_workload():
-    """The bound is the frequency-weighted median, not the slowest component.
-
-    Comparing N/X against the maximum per-operation p50 rejects this frame --
-    15.15 ms against 71.3 ms -- even though it is a faithful recording of a sound
-    run. A check that rejects correct data is not conservative but broken, and
-    this formulation blocked every tier of the first real cluster benchmark.
-    """
+    """The bound is the frequency-weighted median, not the slowest component."""
     assert check_littles_law(HETEROGENEOUS) == []
 
 
 def test_littles_law_still_catches_latency_bound_to_the_wrong_column():
-    """D2: binding p95 into the p50 column inflates the weighted median."""
+    """Binding p95 into the p50 column inflates the weighted median."""
     shifted = HETEROGENEOUS.copy()
     shifted["p50_ms"] = shifted["p95_ms"]  # what positional indexing produced
     findings = check_littles_law(shifted)
@@ -77,21 +62,14 @@ def test_littles_law_still_catches_latency_bound_to_the_wrong_column():
 
 
 def test_littles_law_catches_throughput_over_counted():
-    """A cumulative total admitted as an interval sample collapses N/X (D3)."""
+    """A cumulative total admitted as an interval sample collapses N/X."""
     inflated = HETEROGENEOUS.copy()
     inflated["tps"] = inflated["tps"] * 20.0
     assert check_littles_law(inflated), "over-counted throughput must be detected"
 
 
 def test_littles_law_is_insensitive_to_under_counted_throughput():
-    """Documents the direction this check does *not* cover.
-
-    Averaging the per-operation rates instead of summing them (D1) halves ``X``
-    and therefore *raises* ``N / X``, moving the run away from the failure
-    condition. This check cannot detect that and must not be described as
-    though it can; D1 is prevented structurally by the parser retaining the
-    operation type as an explicit dimension.
-    """
+    """Documents the direction this check does *not* cover."""
     halved = HETEROGENEOUS.copy()
     halved["tps"] = halved["tps"] / 2.0
     assert check_littles_law(halved) == []
@@ -105,7 +83,7 @@ def test_littles_law_ignores_ticks_with_no_throughput():
 # --- the other checks ------------------------------------------------------
 
 def test_plausibility_catches_a_cumulative_total_admitted_as_a_sample():
-    """D3: the summary block's ops(total) read as an instantaneous rate."""
+    """The summary block's ops(total) read as an instantaneous rate."""
     df = HETEROGENEOUS.copy()
     df.loc[0, "tps"] = 185_000.0
     findings = check_plausibility(df, ceiling=20_000.0)
@@ -152,11 +130,7 @@ def _manifest(engine, version, cpus=2, mem=4007004, flags="", pg_memory=None):
 
 
 def test_two_engines_differing_in_version_is_the_comparison_not_a_confound():
-    """This refused every CockroachDB vs PostgreSQL comparison the project
-    exists to produce -- "ran against different server versions (v26.3.0 vs
-    None)" -- because the version check did not know the engines were meant to
-    differ. It is reported, since which build was measured is part of the
-    claim, but it is not grounds for refusal."""
+    """Different engines having different versions is the comparison, not a confound."""
     from crdblab.analysis.validation import check_run_comparability
 
     findings = check_run_comparability(
@@ -179,7 +153,7 @@ def test_two_runs_of_the_same_engine_still_must_match_versions():
     assert any(f.severity == "error" and "server versions" in f.message for f in findings)
 
 
-def test_a_legacy_run_records_its_version_only_as_cockroach_version():
+def test_an_older_run_records_its_version_only_as_cockroach_version():
     """Runs written before `server_version` existed carry it in the old field;
     reading both keeps an old CockroachDB run comparable with a new one."""
     from crdblab.analysis.validation import check_run_comparability
@@ -216,7 +190,7 @@ def test_same_engine_cache_mismatch_still_errors():
         "a", "b",
     )
     assert any(
-        f.severity == "error" and "--cache" in f.message and "D9" in f.message
+        f.severity == "error" and "--cache" in f.message and "cache residency" in f.message
         for f in findings
     )
 
@@ -237,10 +211,7 @@ def test_cross_engine_with_no_pg_memory_data_warns_but_does_not_error():
 
 
 def test_cross_engine_cache_within_tolerance_is_clean():
-    """CockroachDB's --cache=0.25 of 4,007,004 kB implies ~1,001,751 kB;
-    978 MiB of shared_buffers (1,001,472 kB) is the value this project's own
-    bootstrap template actually derives on these nodes -- well within
-    tolerance, and should raise no finding at all about the cache budget."""
+    """A CockroachDB --cache and PostgreSQL shared_buffers within tolerance raise no error."""
     from crdblab.analysis.validation import check_run_comparability
 
     findings = check_run_comparability(
@@ -253,10 +224,7 @@ def test_cross_engine_cache_within_tolerance_is_clean():
 
 
 def test_cross_engine_cache_outside_tolerance_errors():
-    """Reproduces the historical asymmetry documented in CLAUDE.md: PostgreSQL
-    on the packaged 128 MiB shared_buffers default against CockroachDB's
-    --cache=0.25 (~978 MiB on these nodes) -- an eightfold difference that
-    must be refused, not silently compared."""
+    """PostgreSQL's 128 MiB default shared_buffers against --cache=0.25 is refused."""
     from crdblab.analysis.validation import check_run_comparability
 
     findings = check_run_comparability(
@@ -264,7 +232,7 @@ def test_cross_engine_cache_outside_tolerance_errors():
         _manifest("postgresql", "16.15", pg_memory=(131072, 3004416)),
         "crdb", "pg",
     )
-    assert any(f.severity == "error" and "D9" in f.message for f in findings)
+    assert any(f.severity == "error" and "cache residency" in f.message for f in findings)
 
 
 def test_max_sql_memory_is_never_compared_cross_engine():

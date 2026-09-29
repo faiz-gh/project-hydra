@@ -1,9 +1,6 @@
-"""Command-line entry point.
+"""Command-line entry point for ``crdblab``.
 
-The standard library's ``argparse`` is used in preference to a third-party CLI
-framework to keep the dependency surface of the measurement path as small as
-possible: every additional runtime dependency is one more thing whose version
-must be pinned and reported for the results to be reproducible.
+Uses stdlib ``argparse`` to keep the measurement path's dependencies minimal.
 """
 
 from __future__ import annotations
@@ -22,29 +19,11 @@ from .core.workload import PERIODIC, SUMMARY, WorkloadParser, group_ticks
 
 
 def _generator_flags(args: argparse.Namespace) -> str:
-    """Assemble the generator-specific portion of the workload invocation.
+    """Build the generator-specific flags of a ``cockroach workload run`` command.
 
-    The two generators express their read/write mix incompatibly.
-
-    ``--seed`` is the load-bearing argument here and is passed unconditionally
-    (defect D8). The generator derives its keys from a pseudo-random sequence
-    whose seed *changes on every invocation by default*, so a table populated by
-    ``workload init`` is addressed by a different keyspace than a subsequent
-    ``workload run`` consults. Every point lookup then matches nothing. This
-    fails silently and, worse, fails *fast*: unmatched reads and updates return
-    in ~3 ms against the ~75 ms a genuine quorum write costs on this topology,
-    so the corrupted configuration looks like a spectacularly good result rather
-    than a broken one. Measured against v26.3.0, matching the seed between load
-    and run moves the row-match rate from 0.0000 to 1.0000 and update latency
-    from 3.1 ms to 75.5 ms, the latter agreeing with the 70.6 ms
-    second-fastest-follower RTT that bounds Raft quorum.
-
-    ``CUSTOM`` with an explicit read/update split preserves the 80/20 mix of the
-    original design, so corrected results remain comparable with the legacy
-    figures reproduced in the error case study. ``request_distribution`` is
-    pinned to ``uniform`` because ``CUSTOM`` defaults to zipfian, which would
-    concentrate accesses on a hot subset and is not what ``kv``'s uniformly
-    scattered keys did.
+    ``--seed`` is always passed: without the seed used at load time every lookup
+    matches no rows, which looks like a fast, healthy result. ``CUSTOM`` keeps
+    the 80/20 read/update mix, and the key distribution is pinned to ``uniform``.
     """
     if args.generator == "ycsb":
         flags = (
@@ -66,12 +45,10 @@ def _generator_flags(args: argparse.Namespace) -> str:
 
 
 def _cmd_capture(args: argparse.Namespace) -> int:
-    """Capture raw generator output verbatim and report the column layout.
+    """Capture raw generator output and report the column layout it uses.
 
-    This must be run once against the provisioned testbed before any
-    measurement sweep. It pins the exact column layout emitted by the
-    CockroachDB version in use, which is the fact the legacy tooling assumed
-    rather than verified.
+    Run once against a new deployment, before any sweep, to confirm the layout
+    the installed CockroachDB version emits.
     """
     settings = Settings.from_env()
     node = settings.topology.get(args.node)
@@ -121,12 +98,9 @@ def _cmd_capture(args: argparse.Namespace) -> int:
 
 
 def _cmd_net_probe(args: argparse.Namespace) -> int:
-    """Phase I: characterise the substrate and derive the quorum floor.
+    """Phase I: measure the all-pairs RTT matrix and derive the quorum floor.
 
-    Run this before any benchmark. Its round-trip matrix is what makes the
-    write-latency floor check possible, and that check is the only assertion in
-    the project capable of detecting a workload that reports excellent numbers
-    while touching no data.
+    Must run before any benchmark, whose write-latency floor check needs it.
     """
     from .core import preflight
     from .phases import p1_network
@@ -142,7 +116,7 @@ def _cmd_net_probe(args: argparse.Namespace) -> int:
 
     ok = [p for p in probes if not p.error]
     if ok:
-        print(f"\nMTU: " + ", ".join(f"{p.node}={p.mtu}" for p in ok))
+        print("\nMTU: " + ", ".join(f"{p.node}={p.mtu}" for p in ok))
         print("\nmean RTT (ms), source -> destination:")
         for p in ok:
             cells = ", ".join(
@@ -163,13 +137,8 @@ def _cmd_net_probe(args: argparse.Namespace) -> int:
     report = preflight.PreflightReport()
     if args.checks:
         preflight.check_clock_offset(report, settings.topology)
-        # Leaseholder placement is a CockroachDB concept and the check reads it
-        # with `cockroach sql` on the gateway, so against a PostgreSQL
-        # deployment it does not merely not apply -- it fails, and Phase I with
-        # it. Patroni has no equivalent to assert: its leader is an etcd
-        # election with nothing biasing it, which is why `chaos run` resolves
-        # the primary live instead of trusting the profile. Skipped for the
-        # same reason `bench.py` skips it.
+        # Leaseholder placement only exists on CockroachDB; the Patroni primary
+        # is resolved live by `chaos run` instead.
         if args.engine == "cockroachdb":
             preflight.check_leaseholder_placement(
                 report,
@@ -266,24 +235,20 @@ def _cmd_chaos(args: argparse.Namespace) -> int:
         f"  recovery floor    {events['recovery_floor_tps']:.1f} tps "
         f"({events['recovery_threshold']:.0%} held for {events['recovery_hold_s']}s)"
     )
-    # Two different quantities, both legitimately called RTO. Availability is the
-    # headline for a failover claim; performance qualifies it, and is undefined
-    # while a fast-triangle member is down because the surviving quorum is
-    # intercontinental. Reporting either alone misleads.
+    # Availability RTO is the headline; performance RTO qualifies it and can be
+    # undefined while the surviving quorum is intercontinental.
     avail = events.get("availability", {})
     a_rto = avail.get("availability_rto_s")
     res = avail.get("resolution_s")
     print(
-        f"  RTO availability  "
+        "  RTO availability  "
         + (f"{a_rto:.2f} s" if a_rto is not None else avail.get("detail", "not measured"))
         + (f"   (resolution ~{res:.2f} s)" if res else "")
     )
     if avail.get("write_gap_s") is not None:
         print(f"     write outage   {avail['write_gap_s']:.2f} s between acknowledged writes")
-    # Printed adjacent to the figure it disqualifies, not in a footer. An
-    # instrument that stopped observing reports the same "nothing happened" as
-    # one that watched a healthy cluster, and on 2026-09-09 that difference was
-    # invisible in the terminal, in events.json and in the figures alike.
+    # An instrument that stopped observing looks like one that saw no outage,
+    # so the warning sits right next to the figure it disqualifies.
     if avail.get("coverage_truncated"):
         print(
             f"     ⚠ coverage     the audit writer stopped observing "
@@ -292,10 +257,8 @@ def _cmd_chaos(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
 
-    # The probe measures the same thing as `RTO availability` above, from a
-    # separate client at a finer resolution. Both are printed, and printed
-    # adjacently, because the useful thing about a second measurement is whether
-    # it agrees with the first.
+    # Same quantity as `RTO availability`, from an independent client at finer
+    # resolution; printed adjacently so agreement is easy to check.
     probe = events.get("probe") or {}
     if not probe.get("enabled"):
         print("  RTO probe         disabled for this run (chaos.probe_enabled)")
@@ -315,10 +278,8 @@ def _cmd_chaos(args: argparse.Namespace) -> int:
                     "served canary writes (the offset-cancelling figure; prefer it)"
                 )
             else:
-                # The gap exists but failed the exceedance-rate test: it is not
-                # distinguishable from this probe's own tail over a longer
-                # window. The claim string above already says so; this is the
-                # supporting evidence for it, not a second number to quote.
+                # The gap failed the exceedance-rate test, so it is not
+                # distinguishable from the probe's own tail latency.
                 attribution = p_rto.get("attribution", {})
                 print(
                     f"     (unattributed gap {p_rto['observed_outage_s'] * 1000:.0f} ms; "
@@ -353,7 +314,7 @@ def _cmd_chaos(args: argparse.Namespace) -> int:
             )
     p_rto = events["performance_rto_s"]
     print(
-        f"  RTO performance   "
+        "  RTO performance   "
         + (
             f"{p_rto:.1f} s"
             if p_rto is not None
@@ -381,8 +342,8 @@ def _cmd_chaos(args: argparse.Namespace) -> int:
 
 
 def _cmd_analyze(args: argparse.Namespace) -> int:
-    """Stage 5 analysis. Every path here loads through the canonical loader,
-    which refuses a run that has no manifest or does not pass validation."""
+    """Run one analysis. Every run loads through ``load_run``, which refuses
+    runs without a manifest or that fail validation."""
     from .analysis import engine_comparison, resilience, steady_state
     from .analysis.loader import RunLoadError, load_run
 
@@ -437,8 +398,9 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
             print(f"PostgreSQL  {pg.run_id}")
             print(f"\nthroughput-latency curve ({args.op}):")
             print(engine_comparison.curves(crdb, pg, args.op).to_string(index=False))
-            for phase, sat in result["saturation"].items():
-                print(f"  {phase}: {sat['detail']}")
+            names = {"crdb": "CockroachDB", "pg": "PostgreSQL"}
+            for key, sat in result["saturation"].items():
+                print(f"  {names[key]}: {sat['detail']}")
 
             matched = result["matched_throughput"]
             print("\nat matched throughput:")
@@ -451,24 +413,19 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
                     util = ""
                     if point.get("utilisation_gap") is not None:
                         util = (
-                            f"  [util {point['phase_ii_utilisation']:.2f} vs "
-                            f"{point['phase_iii_utilisation']:.2f}, "
+                            f"  [util {point['crdb_utilisation']:.2f} vs "
+                            f"{point['pg_utilisation']:.2f}, "
                             f"gap {point['utilisation_gap']:.2f}]"
                         )
-                    # The utilisation gap is printed against every point, and the
-                    # narrowest is named, because matching throughput does not
-                    # match utilisation: at one engine's peak it is at 100% of
-                    # its capacity while the other is at 72% of its, so most of
-                    # the ratio there is queueing rather than replication cost.
-                    # Printing the four ratios undifferentiated invites the
-                    # largest one to be quoted.
+                    # Matched throughput is not matched utilisation, so the point
+                    # with the narrowest utilisation gap is marked as the one to quote.
                     mark = " <-- least confounded" if point is best or (
                         best and point["throughput_tps"] == best.get("throughput_tps")
                     ) else ""
                     print(
                         f"  {point['throughput_tps']:>8.0f} ops/s: "
-                        f"CockroachDB {point['phase_ii_latency_ms']:.2f} ms, "
-                        f"PostgreSQL {point['phase_iii_latency_ms']:.2f} ms "
+                        f"CockroachDB {point['crdb_latency_ms']:.2f} ms, "
+                        f"PostgreSQL {point['pg_latency_ms']:.2f} ms "
                         f"({point['overhead_x']:.2f}x){util}{mark}"
                     )
                 if best:
@@ -485,16 +442,16 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
                 print(f"  NOT AVAILABLE. {util.get('reason')}")
             else:
                 print(
-                    f"  capacity: CockroachDB {util['phase_ii_peak_tps']:.0f} ops/s, "
-                    f"PostgreSQL {util['phase_iii_peak_tps']:.0f} ops/s"
+                    f"  capacity: CockroachDB {util['crdb_peak_tps']:.0f} ops/s, "
+                    f"PostgreSQL {util['pg_peak_tps']:.0f} ops/s"
                 )
                 for point in util["points"]:
                     print(
                         f"  {point['utilisation']:>5.0%} of capacity: "
-                        f"CockroachDB {point['phase_ii_latency_ms']:.2f} ms "
-                        f"@{point['phase_ii_tps']:.0f} ops/s, "
-                        f"PostgreSQL {point['phase_iii_latency_ms']:.2f} ms "
-                        f"@{point['phase_iii_tps']:.0f} ops/s "
+                        f"CockroachDB {point['crdb_latency_ms']:.2f} ms "
+                        f"@{point['crdb_tps']:.0f} ops/s, "
+                        f"PostgreSQL {point['pg_latency_ms']:.2f} ms "
+                        f"@{point['pg_tps']:.0f} ops/s "
                         f"({point['overhead_x']:.2f}x)"
                     )
                 print(f"  caveat: {util['caveat']}")
@@ -503,10 +460,10 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
             if light.get("ratio_x"):
                 print(
                     f"\nlightest-load write median: "
-                    f"CockroachDB {light['phase_ii']['p50_ms']:.2f} ms at "
-                    f"{light['phase_ii']['offered_load_tps']:.0f} ops/s, "
-                    f"PostgreSQL {light['phase_iii']['p50_ms']:.2f} ms at "
-                    f"{light['phase_iii']['offered_load_tps']:.0f} ops/s "
+                    f"CockroachDB {light['crdb']['p50_ms']:.2f} ms at "
+                    f"{light['crdb']['offered_load_tps']:.0f} ops/s, "
+                    f"PostgreSQL {light['pg']['p50_ms']:.2f} ms at "
+                    f"{light['pg']['offered_load_tps']:.0f} ops/s "
                     f"({light['ratio_x']:.2f}x)"
                 )
                 print(f"  caveat: {light['caveat']}")
@@ -536,11 +493,8 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
                 "and is not a resilience result.\n"
                 "  See events.json -> injected.detail, and the manifest note."
             )
-        # The fault landing and the instruments watching are two separate
-        # preconditions for an RTO, and until 2026-09-09 only the first was
-        # checked. A run can have a fault that landed perfectly and still
-        # produce no RTO, because the clients measuring it stopped observing --
-        # and that failure reads in every artefact as an excellent result.
+        # A landed fault still yields no RTO if the instruments stopped
+        # observing, which would otherwise read as an excellent result.
         stalled = [
             (name, section)
             for name, section in (
@@ -657,11 +611,9 @@ def _latest_run(runs_dir: Path, suffix: str) -> str | None:
 
 
 def _cmd_report(args: argparse.Namespace) -> int:
-    """Render the dissertation figures from validated runs.
+    """Render the dissertation figures, defaulting to the newest run of each phase.
 
-    Inputs default to the most recent run of each phase. Every figure resolves
-    through the analysis loader, so a run that has no manifest or does not
-    validate cannot reach a figure at all.
+    Every input loads through the analysis loader, so only validated runs are drawn.
     """
     from .analysis.loader import RunLoadError, load_network_run, load_run
     from .report import figures
@@ -674,10 +626,7 @@ def _cmd_report(args: argparse.Namespace) -> int:
         "network": args.network or _latest_run(runs, "p1-network"),
         "cluster": args.cluster or _latest_run(runs, "bench_cluster"),
     }
-    # One Phase III/IV figure per fault class, so the default is the most recent run
-    # of *each* class. Defaulting to the recover run alone left the dead-fault
-    # timeline unreachable without an explicit argument, and the figure of it in
-    # ``figures/`` therefore had no invocation that reproduced it.
+    # One figure per fault class: default to the newest run of each.
     chaos_picks = args.chaos or [
         run_id
         for run_id in (
@@ -708,18 +657,12 @@ def _cmd_report(args: argparse.Namespace) -> int:
 
 
 def _cmd_validate(args: argparse.Namespace) -> int:
-    import pandas as pd
-
     from .analysis.validation import validate, validate_probe
 
     path = Path(args.run)
     probe_dir = path if path.is_dir() else path.parent
     if path.is_dir():
-        # A Phase I run records network.csv under a different schema -- network
-        # data shares no dimensions with a workload sample -- so it has no
-        # metrics.csv and nothing here to check. Say so in a sentence; a
-        # traceback at this point reads as a broken harness rather than as the
-        # wrong command, and this is a documented step in instructions.md.
+        # A Phase I run has only network.csv; its checks live in preflight.json.
         if not (path / "metrics.csv").exists():
             if (path / "network.csv").exists():
                 print(
@@ -728,10 +671,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
                     "assertions are in preflight.json."
                 )
                 return 0
-            # A standalone `crdblab probe rto` run has no generator behind it and
-            # so no workload table. It is still a measurement with a manifest and
-            # a schema, so it validates -- under its own checks rather than under
-            # the workload ones, which have nothing to say about it.
+            # A standalone `probe rto` run has no workload, only the probe log.
             if (path / "rto_probe.csv").exists():
                 report = validate_probe(pd.read_csv(path / "rto_probe.csv"))
                 for finding in report.findings:
@@ -758,10 +698,8 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     for finding in report.findings:
         print(f"[{finding.severity.upper():7}] {finding.check}: {finding.message}")
 
-    # A Phase III/IV run may also carry a probe log, under its own schema. It is
-    # checked here rather than in a separate command so that "the run validates"
-    # keeps meaning "everything this run recorded validates" -- a second gate
-    # nobody remembers to run is not a gate.
+    # A chaos run's probe log is validated too, so a passing run means every
+    # file it recorded is consistent.
     probe_report = None
     probe_csv = probe_dir / "rto_probe.csv" if probe_dir else None
     if probe_csv is not None and probe_csv.exists():
@@ -786,25 +724,19 @@ def _cmd_validate(args: argparse.Namespace) -> int:
 
 
 def _cmd_probe(args: argparse.Namespace) -> int:
-    """Run the RTO probe on its own, with no workload generator anywhere.
+    """Run the RTO probe standalone, with no workload generator.
 
-    The probe is designed to run *beside* a Phase III or IV chaos run and does so by
-    default, but it is genuinely independent of the generator and this is the
-    command that demonstrates it. Two uses:
-
-    * Verifying that the probe reaches the cluster, and reading its achieved rate
-      and resolution against the live link, before committing a chaos run to
-      them. The numbers in its docstring are from one testbed on one day.
-    * Measuring an outage caused by something other than this harness -- a manual
-      restart, a provider event, a change being rolled out -- where there is no
-      benchmark to attach to and the question is only how long writes stopped.
-
-    It produces a normal run directory: manifest, probe log, attempt CSV. A
-    measurement without a manifest is not usable later, and there is no reason
-    for this one to be the exception.
+    Useful to check the probe's achieved rate and resolution before a chaos run,
+    or to time an outage caused outside the harness. Writes a normal run directory.
     """
-    from .core import ssh
-    from .core.recorder import PROBE_COLUMNS, Manifest, MetricsWriter, RunDirectory, new_run_id, utcnow
+    from .core.recorder import (
+        PROBE_COLUMNS,
+        Manifest,
+        MetricsWriter,
+        RunDirectory,
+        new_run_id,
+        utcnow,
+    )
     from .core.rto_probe import CREATE_TABLE_SQL, RtoProbe
 
     settings = Settings.from_env()
@@ -817,11 +749,8 @@ def _cmd_probe(args: argparse.Namespace) -> int:
     interval = args.interval if args.interval is not None else chaos.probe_interval_s
 
     if not args.keep_table:
-        # Resolved via the gateway's own `tailscale ip -4`, not `gateway.host`:
-        # this command runs ON the gateway, and a bare hostname resolved by
-        # the node's own OS can answer with an address cockroach never bound
-        # to (see the matching comment in preflight.py's
-        # `_read_leaseholder_placement`).
+        # Runs on the gateway itself, where the bare hostname can resolve to an
+        # address cockroach is not bound to; use the Tailscale IP.
         ssh.run(
             gateway,
             f"TS_IP=$(tailscale ip -4); cockroach sql --insecure --host=$TS_IP:26257 "
@@ -854,9 +783,7 @@ def _cmd_probe(args: argparse.Namespace) -> int:
         log_path=run_dir.probe_log,
     )
     manifest.clock_epoch_utc = probe.epoch_utc
-    # Carriage-return progress only when someone is watching. run-experiment.sh
-    # tees this to a log file, where \r produces one unreadable kilometre-long
-    # line; a non-tty gets a periodic newline-terminated line instead.
+    # \r progress on a terminal; periodic full lines when teed to a log.
     tty = sys.stdout.isatty()
     with probe:
         deadline = time.monotonic() + args.duration
@@ -909,12 +836,7 @@ def _cmd_probe(args: argparse.Namespace) -> int:
 
 
 def _cmd_insights(args: argparse.Namespace) -> int:
-    """Render the chart catalogue from every run on disk (or one profile's).
-
-    Each invocation writes into its own ``<out>/<stamp>_<profile|all>/``, the
-    same naming idiom ``runs/`` uses for a measured run, so successive renders
-    coexist instead of the newest silently overwriting the last.
-    """
+    """Render the chart catalogue into a fresh ``<out>/<stamp>_<profile|all>/``."""
     from datetime import datetime, timezone
 
     from .insights import generate
@@ -966,11 +888,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="crdblab",
         description="Multi-cloud Database benchmarking and chaos testbed harness",
     )
-    # Top-level rather than per-subcommand because it selects the deployment
-    # under test, not one command's behaviour: `bench`, `chaos run` and
-    # `net probe` all read it and all record it in their manifest. Being
-    # top-level, argparse requires it *before* the subcommand name --
-    # `crdblab --engine postgresql bench ...`, never `crdblab bench --engine`.
+    # Selects the deployment under test, so it is top-level and must precede
+    # the subcommand: `crdblab --engine postgresql bench ...`.
     parser.add_argument(
         "--engine",
         default="cockroachdb",
@@ -998,12 +917,11 @@ def build_parser() -> argparse.ArgumentParser:
     cap.add_argument("--generator", default="ycsb", choices=("ycsb", "kv"))
     cap.add_argument("--concurrency", type=int, default=10)
     cap.add_argument("--duration", type=int, default=15)
-    # ycsb
     cap.add_argument(
         "--workload",
         default="CUSTOM",
-        help="ycsb workload type A-F or CUSTOM (default: CUSTOM, to hold the "
-        "80/20 read/update mix of the original design)",
+        help="ycsb workload type A-F or CUSTOM (default: CUSTOM, with the "
+        "80/20 read/update mix below)",
     )
     cap.add_argument("--read-freq", type=float, default=0.8)
     cap.add_argument("--update-freq", type=float, default=0.2)
@@ -1012,7 +930,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=42,
         help="generator key seed; MUST match the seed the table was loaded with, "
-        "or every lookup silently matches nothing (D8)",
+        "or every lookup silently matches nothing",
     )
     cap.add_argument(
         "--insert-count",
@@ -1027,14 +945,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="ycsb key distribution; uniform matches kv's scattered keys, whereas "
         "the CUSTOM default of zipfian would concentrate on a hot subset",
     )
-    # kv (retained for comparison against the legacy configuration only)
     cap.add_argument("--read-percent", type=int, default=80)
     cap.add_argument(
         "--cycle-length",
         type=int,
         default=1_000_000,
-        help="kv only; note that kv reads cannot reach pre-loaded rows regardless "
-        "of this value (D8)",
+        help="kv only; kv reads cannot reach pre-loaded rows regardless of this value",
     )
     cap.add_argument("--pty", action="store_true", help="allocate a pseudo-terminal")
     cap.add_argument("--output", default="tests/fixtures/workload/captured.txt")
@@ -1135,7 +1051,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     ana = sub.add_parser(
         "analyze",
-        help="Stage 5: steady-state, Raft overhead and resilience analysis",
+        help="steady-state, engine-comparison and resilience analysis",
     )
     ana_sub = ana.add_subparsers(dest="analysis", required=True)
 

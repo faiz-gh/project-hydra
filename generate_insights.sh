@@ -1,23 +1,6 @@
 #!/usr/bin/env bash
-#
-# generate_insights.sh — draw the 31-chart insights catalogue from the runs on disk.
-#
-# Needs no testbed. Wraps `crdblab insights`, which loads every run under runs/
-# through the gated loader (a run that fails validation or pre-flight is refused
-# and listed, never charted), draws charts A1-E4, and writes them into a fresh
-# insights/<stamp>_<profile|all>/ beside insights.md, a self-contained
-# dashboard.html, summary.json, summary.csv and chart_status.csv.
-#
-#   ./generate_insights.sh                            # asks which profile (on a terminal)
-#   ./generate_insights.sh --profile thesis-extended  # only runs of that profile
-#   ./generate_insights.sh --all                      # every profile, newest run of each kind
-#   ./generate_insights.sh --out <dir>                # parent directory (default insights)
-#   ./generate_insights.sh --open                     # open the dashboard when done (macOS)
-#
-# Charts take the newest passing run of each kind per engine within the chosen
-# scope. Run with no arguments on a terminal, it lists the profiles found under
-# runs/ and asks; with no terminal it renders every profile, like --all.
-#
+# generate_insights.sh: draw the insights chart catalogue from the runs on disk.
+# Run with --help for usage; full documentation is in docs-app/index.html.
 set -euo pipefail
 
 PROFILE=""
@@ -51,7 +34,22 @@ die()   { printf '\n%sFAILED:%s %s\n' "$R" "$N" "$*" >&2
           exit 1; }
 
 usage() {
-  sed -n '3,21p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  cat <<'USAGE'
+generate_insights.sh: draw the 31-chart insights catalogue from the runs on disk.
+
+Needs no testbed. Wraps `crdblab insights`, which loads every run under runs/
+through the gated loader (refused runs are listed, never charted), draws charts
+A1-E4 and writes them into a fresh insights/<stamp>_<profile|all>/ beside
+insights.md, dashboard.html, summary.json, summary.csv and chart_status.csv.
+
+  ./generate_insights.sh                            # asks which profile (on a terminal)
+  ./generate_insights.sh --profile thesis-extended  # only runs of that profile
+  ./generate_insights.sh --all                      # every profile, newest run of each kind
+  ./generate_insights.sh --out <dir>                # parent directory (default insights)
+  ./generate_insights.sh --open                     # open the dashboard when done (macOS)
+
+Without a terminal and without --profile it renders every profile, like --all.
+USAGE
   exit 0
 }
 
@@ -74,10 +72,7 @@ done
 [ -x "$CRDBLAB" ] || die "$CRDBLAB not found. Run:
     python3 -m venv .venv && .venv/bin/python -m pip install -e \".[dev]\""
 
-# Profiles that have at least one chartable run, newest first, as
-# "<name> <runs> <newest run stamp>". Read from the manifests -- the same field
-# `crdblab insights --profile` filters on -- so the menu offers exactly what the
-# render can find.
+# Profiles with at least one chartable run, newest first: "<name> <runs> <newest stamp>".
 list_profiles() {
   "$PY" - <<'PYEOF'
 import json
@@ -140,9 +135,7 @@ ARGS=(insights --out "$OUT")
 [ -n "$PROFILE" ] && ARGS+=(--profile "$PROFILE")
 "$CRDBLAB" "${ARGS[@]}" || die "crdblab insights failed"
 
-# The render just written is the newest <stamp>_<scope> directory under $OUT:
-# stamps sort as time, the same "sort by name, take the last" idiom
-# run-experiment.sh's latest() uses for runs/.
+# The render just written is the newest <stamp>_<scope> directory under $OUT.
 RENDER="$(ls -1d "$OUT"/*_"${PROFILE:-all}" 2>/dev/null | tail -1)"
 [ -n "$RENDER" ] || die "crdblab insights reported success but wrote no render under $OUT"
 

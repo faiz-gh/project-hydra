@@ -1,29 +1,19 @@
 """Centralised SSH invocation.
 
-Every remote command in the project routes through this module so that the
-connection policy is declared once and can be described accurately in the
-methodology. The host-key options below disable verification; this is a
-deliberate and disclosed accommodation for a testbed that is destroyed and
-rebuilt between configurations (providers routinely reassign the same address
-to a new instance, which would otherwise trigger SSH's man-in-the-middle
-refusal), and is not a posture appropriate to a persistent fleet.
-
-``bufsize=1`` with line-wise iteration is mandatory rather than incidental:
-buffering the generator's output and processing it afterwards is what allowed
-the terminal cumulative-summary block to be mistaken for a per-interval sample
-in the legacy tooling.
+Every remote command routes through here. Host-key checking is disabled because
+the testbed is destroyed and rebuilt, and providers reuse addresses. Output is
+streamed line by line (``bufsize=1``) so samples are parsed as they arrive.
 """
 
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Iterator, Sequence
 
 from ..topology import Node
 
-#: Options applied to every invocation. Kept as a module constant so the run
-#: manifest can record the exact policy used.
+#: Options for every invocation; recorded in each run manifest.
 SSH_OPTIONS: tuple[str, ...] = (
     "-q",
     "-o", "StrictHostKeyChecking=no",
@@ -33,21 +23,8 @@ SSH_OPTIONS: tuple[str, ...] = (
     "-o", "ServerAliveCountMax=3",
 )
 
-#: Prefix for any remote command that needs privilege. The SSH user is *not*
-#: root on most of this testbed: ``crdb-gcp-1`` and the Azure nodes are reached
-#: as ``ubuntu`` while ``cockroach``/``patroni`` run as root, ``tailscale down``
-#: needs the daemon socket, and ``patronictl`` needs to read Patroni's config.
-#: Without this prefix ``killall -9 cockroach`` returns ``Operation not
-#: permitted`` (rc=1) and ``tailscale down`` returns ``Access denied`` -- in both
-#: cases the node under test carries on serving and the run silently measures a
-#: fault that never happened. That is exactly what the 2026-09-07/08 chaos runs
-#: recorded (``"detail": "rc=1"``, and the target's ``cockroach`` pid unchanged
-#: across the whole run). ``-n`` keeps it non-interactive: if passwordless sudo
-#: is unavailable we want a hard, immediate failure rather than a hung prompt
-#: eating the injection window.
-#:
-#: Lives here rather than in ``phases.p4_chaos`` because ``core.preflight``
-#: needs it too and ``core`` may not import ``phases``.
+#: Prefix for privileged remote commands (several nodes log in as ``ubuntu``).
+#: ``-n`` fails fast instead of hanging on a password prompt.
 SUDO = "sudo -n"
 
 
@@ -80,10 +57,8 @@ def run(node: Node, remote: str, timeout: float | None = 60.0) -> RemoteResult:
 class StreamingRemote:
     """Line-wise streaming execution of a long-running remote command.
 
-    Lines are yielded as they arrive and, if ``tee`` is supplied, written
-    verbatim to that file object first. Persisting raw generator output
-    alongside every derived CSV means a future dispute about parsing can be
-    settled against the original bytes rather than re-run from scratch.
+    Lines are yielded as they arrive and, if ``tee`` is given, written to it
+    first, so every run keeps the raw generator output.
     """
 
     node: Node
@@ -91,7 +66,7 @@ class StreamingRemote:
     tee: object | None = None
     _proc: subprocess.Popen | None = field(default=None, init=False, repr=False)
 
-    def __enter__(self) -> "StreamingRemote":
+    def __enter__(self) -> StreamingRemote:
         self._proc = subprocess.Popen(
             build_command(self.node, self.remote),
             stdout=subprocess.PIPE,
@@ -120,12 +95,8 @@ class StreamingRemote:
 def force_tty(remote: str) -> str:
     """Wrap a command so the generator believes it is writing to a terminal.
 
-    ``cockroach workload run`` suppresses its per-interval progress line when
-    stdout is a pipe, emitting only cumulative totals at the end. Allocating a
-    pseudo-terminal via ``script`` restores the per-second stream over an SSH
-    pipe. The parser tolerates either shape, but Phase II-IV require the
-    per-interval samples, so this wrapper is applied to benchmark commands and
-    the resulting sample count is asserted in pre-flight.
+    ``cockroach workload run`` prints per-interval lines only to a terminal, so
+    the command is wrapped in ``script`` to allocate a pseudo-terminal.
     """
     escaped = remote.replace("'", "'\\''")
     return f"script -qefc '{escaped}' /dev/null"

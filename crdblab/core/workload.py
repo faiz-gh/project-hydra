@@ -1,37 +1,17 @@
 """Header-driven parser for ``cockroach workload run`` output.
 
-Rationale
----------
-The legacy tooling identified sample lines positionally: it accepted any line
-with exactly nine whitespace-separated fields and read ``fields[2]`` as
-throughput, ``fields[5]`` as p50 and ``fields[7]`` as p99. That heuristic is
-unsound for three reasons, all of which corrupted the Phase II/III exports:
-
-1. When the workload reports more than one operation type, each interval emits
-   one line *per op type* carrying an unheaded trailing label. Positional
-   parsing silently treated read and write lines as independent samples of the
-   same quantity, so summing versus averaging became ambiguous downstream.
-2. That trailing label makes the periodic line nine fields wide while its
-   header is only eight columns wide, shifting every latency index by one:
-   ``fields[5]`` is p95, not p50, and ``fields[7]`` is pMax, not p99.
-3. The terminal cumulative-summary block is also nine fields wide and carries
-   an elapsed value equal to the run duration, so it passed the legacy
-   ``elapsed <= duration`` guard and was recorded as a one-second sample with a
-   throughput of ~185,000 ops/sec.
-
-This module therefore refuses to interpret any data line until it has seen a
-header line to bind names to positions, distinguishes periodic from cumulative
-blocks by header content rather than by field count, and preserves the op-type
-label instead of discarding it. Aggregation policy (sum throughput across op
-types, never pool latency distributions) is applied explicitly in
-:func:`aggregate_tick`, not implicitly by the parser.
+Column positions are bound from the generator's own header line, never guessed
+from field counts. Each periodic interval emits one line per operation type,
+with an unheaded trailing op label; the cumulative summary block has a
+different header and is kept apart from per-interval samples. Aggregation
+(sum throughput across ops, never pool latency) happens in :func:`aggregate_tick`.
 """
 
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
-from typing import Iterable, Iterator
 
 # A header line is a run of column names padded with underscores, e.g.
 #   _elapsed___errors__ops/sec(inst)___ops/sec(cum)__p50(ms)__p95(ms)__p99(ms)_pMax(ms)
@@ -61,14 +41,8 @@ SUMMARY = "summary"
 #: Columns that identify a cumulative summary block rather than a periodic one.
 _SUMMARY_MARKERS = frozenset({"ops_total", "avg_ms"})
 
-#: Canonical names of measured quantities. Any *trailing* header token outside
-#: this set names the operation-type column rather than a measurement. Observed
-#: against CockroachDB v26.3.0, whose periodic and cumulative blocks label that
-#: column differently: the periodic header ends at ``pMax(ms)`` and leaves the
-#: op-type label unheaded, whereas the cumulative header ends ``..._pMax(ms)__total``
-#: and therefore declares one more column than the periodic header does. A field
-#: count alone cannot distinguish the two, which is why the binding is made from
-#: the header text in both cases.
+#: Measured quantities. A trailing header token outside this set names the
+#: operation-type column, which periodic and summary headers label differently.
 _METRIC_COLUMNS = frozenset(_COLUMN_ALIASES.values())
 
 
@@ -80,10 +54,8 @@ class WorkloadParseError(RuntimeError):
 class Sample:
     """One parsed line of generator output.
 
-    ``kind`` distinguishes a genuine per-interval observation (:data:`PERIODIC`)
-    from a terminal cumulative total (:data:`SUMMARY`). Only periodic samples
-    are measurements; summary samples are retained solely as an independent
-    cross-check on the periodic stream.
+    Only :data:`PERIODIC` samples are measurements; :data:`SUMMARY` samples are
+    the generator's cumulative totals, kept as a cross-check.
     """
 
     kind: str
@@ -129,11 +101,7 @@ class WorkloadParser:
         raw = [tok for tok in _UNDERSCORE_RUN_RE.split(line.strip()) if tok]
         columns = [_COLUMN_ALIASES.get(tok, tok) for tok in raw]
 
-        # A trailing token that names no known measurement is the operation-type
-        # column. Removing it here means the remainder of the binding logic sees
-        # the same shape for both block types, rather than special-casing the
-        # cumulative block by its width -- the conflation that admitted the
-        # summary totals as a per-interval sample in the legacy tooling.
+        # Strip a trailing op-type column so both block types bind the same way.
         op_column: str | None = None
         if columns and columns[-1] not in _METRIC_COLUMNS:
             op_column = columns.pop()
@@ -171,10 +139,7 @@ class WorkloadParser:
     def _bind(self, fields: list[str], header: _Header) -> Sample:
         ncols = len(header.columns)
         if len(fields) == ncols + 1:
-            # The operation-type label, whether the header named it (cumulative
-            # blocks, "__total") or left it unheaded (periodic blocks). Its
-            # inconsistent presence in the header is precisely what made
-            # field-count heuristics unsafe.
+            # Trailing operation-type label, headed or not.
             op = fields[-1].strip("_") or "all"
             payload = fields[:-1]
             if _NUMERIC_TOKEN_RE.match(op):
@@ -205,9 +170,6 @@ class WorkloadParser:
                 else:
                     values[name] = float(token)
             except ValueError as exc:
-                # Reported against the column *name* rather than its index, so a
-                # future layout change is legible instead of arriving as a bare
-                # "could not convert string to float".
                 raise WorkloadParseError(
                     f"column {name!r} received non-numeric token {token!r}; the "
                     f"active header does not describe this line: {' '.join(fields)!r}"
@@ -231,13 +193,10 @@ class WorkloadParser:
 
 @dataclass(frozen=True)
 class Tick:
-    """All operation types observed at a single elapsed offset.
+    """All operation types observed at one elapsed offset.
 
-    ``total_tps`` sums throughput across operation types, which is the only
-    correct aggregation: read and write rates are components of one offered
-    load, not repeated measurements of it. Latency is deliberately *not*
-    pooled; per-op quantiles are kept separate because the arithmetic mean of
-    a read p99 and a write p99 is not a quantile of anything.
+    ``total_tps`` sums throughput across ops. Latency stays per op: averaging a
+    read p99 and a write p99 is not a quantile of anything.
     """
 
     elapsed_s: float
@@ -288,18 +247,10 @@ def aggregate_tick(samples: Iterable[Sample]) -> Tick:
 def _grouped_pairs(
     arrivals: Iterable[tuple[float | None, Sample]],
 ) -> Iterator[list[tuple[float | None, Sample]]]:
-    """Split a periodic sample stream at each change of elapsed offset.
+    """Lazily split a periodic sample stream at each change of elapsed offset.
 
-    Lazy, so a caller streaming a three-minute run sees each interval as soon as
-    the next one begins rather than at the end. Summary blocks are dropped here
-    rather than by the caller: a cumulative total is not an interval, and the
-    single place that decides which lines constitute one is this function.
-
-    Grouping is implemented once and shared by :func:`group_ticks` and
-    :func:`group_timed_ticks`. Phases III-IV previously carried their own near-identical
-    copy; maintaining two implementations of the rule that defines a measurement
-    interval is the shape of defect D1 and is not reintroduced for the sake of
-    attaching a timestamp.
+    Summary blocks are dropped. Shared by :func:`group_ticks` and
+    :func:`group_timed_ticks` so the interval rule lives in one place.
     """
     buffer: list[tuple[float | None, Sample]] = []
     current: float | None = None
@@ -326,26 +277,10 @@ def group_timed_ticks(
 ) -> Iterator[tuple[float, Tick]]:
     """As :func:`group_ticks`, but pairing each tick with when it was observed.
 
-    ``arrivals`` supplies, for every sample, the reading on the *harness's*
-    monotonic clock at the moment the line was read from the pipe. The tick is
-    stamped with the arrival of its first line.
-
-    This exists because the generator's ``elapsed`` column and the harness's own
-    clock are different clocks with different origins. The generator's begins
-    when it starts issuing operations; the harness's begins when the phase does,
-    which is earlier by the cost of establishing the SSH session and starting the
-    process -- about 5.4 s on this testbed. Events scheduled by the harness (the
-    chaos injection, above all) are timed on the latter. Recording only the
-    former makes the two files in a run directory silently incomparable, so that
-    a fault marker drawn against a throughput series is displaced by an interval
-    nobody has measured. Both clocks are therefore recorded per tick, and the
-    offset between them becomes an observation rather than an assumption.
-
-    The stamp includes SSH transport and the harness's own scheduling delay. It
-    is an upper bound on when the generator printed the line, not the instant it
-    did so; at a one-second cadence that is immaterial, and it is the correct
-    quantity anyway, since what must be aligned is when the *harness* could have
-    known a thing against when it did one.
+    Each sample comes with the harness's monotonic clock reading when its line
+    was read; a tick is stamped with its first line's arrival. The generator's
+    ``elapsed`` clock starts ~5 s later (SSH and process startup), so both are
+    recorded and the offset between them is observed rather than assumed.
     """
     for group in _grouped_pairs(arrivals):
         arrived = group[0][0]

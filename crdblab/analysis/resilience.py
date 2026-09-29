@@ -1,46 +1,17 @@
 """Phases III-IV analysis: recovery time, recovery point, and their limits.
 
-This module replaces ``evaluate_resilience.py``. Three things it does are
-corrections rather than refinements, and each is load-bearing.
+* **Clock alignment.** ``events.json`` uses the harness clock; ``metrics.csv``
+  also has the generator's ``elapsed``. Schema 2.1 runs record both, so the
+  offset is measured; for schema 2.0 runs :func:`align` bounds it and every
+  derived timing becomes an interval.
+* **Two RTOs.** *Availability RTO* (fault to writes resuming, from the audit log
+  and the RTO probe) and *performance RTO* (throughput back to a fraction of
+  baseline, held). If the cluster settles into a new, lower stable state,
+  performance RTO is reported as undefined rather than infinite.
+* **RPO** counts only acknowledged writes that went missing; ambiguous writes
+  are reported separately.
 
-**The two clocks are reconciled before anything is drawn against anything.**
-A run directory contains two timelines with different origins. ``events.json``
-records offsets on the harness's monotonic clock, which starts when the phase
-does; ``metrics.csv`` carries the generator's own ``elapsed`` accounting, which
-starts only once the generator is running -- later by the cost of opening the
-SSH session and starting the process, about 5.4 s on this testbed. Plotting a
-fault time from the first against a throughput series from the second displaces
-the fault by an interval nobody measured, and on a 9.3 s recovery that is not a
-rounding error. Schema 2.1 runs record both clocks per interval, so the offset
-is measured; schema 2.0 runs do not, so :func:`align` reports it as a **bounded
-interval** and every derived timing becomes an interval too. It does not
-substitute an estimate for the missing measurement.
-
-**Two quantities are called RTO and both are reported, each with its limit.**
-*Availability RTO* is the interval from the fault to the next acknowledged
-write, taken from the audit client's own attempt log. It is the headline for a
-failover claim, and it is bounded below by the audit cadence -- which is itself
-bounded by the cost of a quorum write, ~70 ms here, not by the nominal
-``audit_interval_s``. A value below that cadence is indistinguishable from no
-interruption at all and must be reported as such rather than as a number.
-*Performance RTO* is the interval until throughput returns to a stated fraction
-of baseline and holds. Where the cluster instead settles into a *new stable
-state* below the threshold, this reports the metric as **undefined**, not as an
-infinite recovery time: losing a member of the fast quorum triangle raises the
-write path's floor from ~66.8 ms to ~190 ms, and a level the cluster will not
-return to while the node is down is not a recovery the metric can time. Whether
-that happens is not fixed by the geometry alone -- the Phase III and IV runs
-here share a target and disagree, the ``dead`` run at C=50 settling at 0.67 of
-baseline while the ``recover`` run at C=100 regained the threshold in about 9 s
--- so the classification is made from the observed post-fault series and the
-geometry is reported alongside as the explanation. Reporting only availability
-would conceal a degraded cluster; reporting only performance would describe a
-cluster that never stopped accepting writes as having never recovered.
-
-**RPO counts acknowledged writes, and only those.** A gap in the audit table
-establishes nothing on its own; a gap in the writes the client was *told* had
-committed is data loss. Ambiguous writes are neither, and are reported
-separately rather than collapsed into either.
+Everything is re-derived from the run's CSVs rather than copied from events.json.
 """
 
 from __future__ import annotations
@@ -55,38 +26,20 @@ import pandas as pd
 from ..core.preflight import quorum_floor_ms
 from ..core.rto_probe import attempts_from_rows, measure_rto, outage_windows
 
-# Recovery detection is imported from the phase that performs it rather than
-# reimplemented. The legacy pipeline used one recovery threshold in the runner
-# and a different one in the evaluator (D5); a second implementation of the
-# predicate is how two artefacts come to disagree about the same run.
+# Shared with the chaos phase so both use one recovery predicate.
 from ..phases.p4_chaos import availability_rto, find_recovery
 from ..topology import DEFAULT_TOPOLOGY, Topology
 from .loader import Run
 
-#: Interval after a fault during which the cluster is still detecting it and
-#: transferring leases, excluded when characterising the *settled* post-fault
-#: state. CockroachDB's liveness detection alone was observed at ~6 s on this
-#: testbed -- the lag between injection and any throughput impact -- and lease
-#: transfer follows it. Performance RTO deliberately *includes* this interval,
-#: because it is part of the outage; only the question "what did the cluster
-#: settle to" excludes it.
+#: Post-fault interval (failure detection, lease transfer) excluded when describing
+#: the settled state. Performance RTO still includes it.
 LIVENESS_SETTLE_S = 15.0
 
-#: A post-fault throughput series whose standard deviation is within this
-#: fraction of its mean is treated as having settled, rather than as still
-#: recovering. Loose, because the quantity being distinguished -- a new stable
-#: level versus a trend -- is coarse, and a tight threshold here would assert
-#: more precision than a 1 Hz sample stream supports.
+#: Coefficient of variation below which a post-fault series counts as settled.
 SETTLED_CV = 0.25
 
-#: A settled post-fault write latency within this fraction of its pre-fault
-#: baseline is reported as "returned to baseline" rather than as a structural
-#: shift. Not a claim of measurement precision -- it exists only to keep
-#: ordinary run-to-run noise (a few percent, observed) from being reported as
-#: a permanent latency change when it is not one. 15% is loose enough to clear
-#: that noise and tight enough to still catch a real quorum-geometry shift,
-#: which on this testbed is not subtle: losing a fast-triangle member measured
-#: at 2.7x the write floor (69.7 ms to 190 ms), not 1.15x.
+#: A settled write latency within this fraction of baseline counts as "returned";
+#: beyond it, a structural shift (losing a fast-quorum member is ~2.7x).
 LATENCY_SHIFT_TOLERANCE = 0.15
 
 
@@ -96,13 +49,11 @@ class AlignmentError(RuntimeError):
 
 @dataclass(frozen=True)
 class Alignment:
-    """How the generator's ``elapsed_s`` maps onto the harness's clock.
+    """How the generator's ``elapsed_s`` maps onto the harness clock.
 
-    ``offset_s`` is where the generator's zero falls on the harness clock, so
     ``wall_offset_s = elapsed_s + offset_s``. ``method`` is ``"measured"`` when
-    both clocks were recorded per interval and ``"bounded"`` when only the
-    generator's was, in which case ``offset_s`` is ``None`` and the true value
-    lies in ``[lower_s, upper_s]``.
+    both clocks were recorded, or ``"bounded"``, in which case ``offset_s`` is
+    ``None`` and the true value lies in ``[lower_s, upper_s]``.
     """
 
     method: str
@@ -153,19 +104,10 @@ def _parse_utc(stamp: str | None) -> datetime | None:
 def align(run: Run) -> Alignment:
     """Relate the run's two timelines, measuring the offset where possible.
 
-    For a schema 2.1 run the offset is observed per interval and reported with
-    its spread: a constant offset means the two clocks differ only in origin,
-    which is what licenses converting between them, while a drifting one would
-    mean they run at different *rates* and that no single conversion exists. The
-    legacy pipeline's failure was exactly a clock running at the wrong rate (D4),
-    so rate agreement is checked rather than assumed.
-
-    For a schema 2.0 run the offset was never recorded and is bounded instead.
-    The generator cannot have started before the run's epoch, so the offset is at
-    least zero; and the run's wall-clock envelope must contain the generator's
-    whole ``elapsed`` span, so it is at most the difference between them. Every
-    timing derived through this alignment is then an interval, which is the
-    honest representation of a quantity that was not measured.
+    Schema 2.1: the offset is measured per interval and reported with its spread
+    (a small spread shows the clocks run at the same rate). Schema 2.0: the
+    offset is bounded between 0 and the run's wall-clock envelope minus the
+    generator's elapsed span.
     """
     events = run.events or {}
     last_elapsed = float(run.metrics["elapsed_s"].max())
@@ -248,11 +190,8 @@ def fault_offsets(run: Run, alignment: Alignment) -> dict[str, Any]:
 def degradation_profile(run: Run, alignment: Alignment) -> pd.DataFrame:
     """Throughput against time since the fault, on one clock.
 
-    When the alignment is measured, ``since_fault_s`` is a single column and the
-    series can be plotted directly against the event timeline. When it is only
-    bounded, that column is absent and ``since_fault_lower_s`` /
-    ``since_fault_upper_s`` are given instead, so a figure cannot silently
-    collapse an interval into a point.
+    Measured alignment gives ``since_fault_s``; bounded alignment gives
+    ``since_fault_lower_s`` and ``since_fault_upper_s`` instead.
     """
     ticks = run.ticks()
     fault = fault_offsets(run, alignment)
@@ -276,17 +215,9 @@ def degradation_profile(run: Run, alignment: Alignment) -> pd.DataFrame:
 
 
 def _observation_end(run: Run) -> float | None:
-    """When the measurement window demonstrably was still open, in wall offset.
+    """The generator's last tick: a lower bound on when the run's window closed.
 
-    Taken from the generator's own last tick rather than from the profile's
-    ``duration_s``, because it has to be a fact about the run rather than an
-    intention: the generator emitted that sample, so the run had certainly not
-    ended before it. That makes this a *lower* bound on the end of the window,
-    which is the conservative direction -- an instrument judged to have stopped
-    early against this bound really did stop early.
-
-    ``None`` when the run has no usable tick series, in which case the coverage
-    check downstream is skipped rather than guessed.
+    ``None`` if there is no tick series, in which case coverage is not checked.
     """
     metrics = getattr(run, "metrics", None)
     if metrics is None or len(metrics) == 0:
@@ -302,15 +233,9 @@ def _observation_end(run: Run) -> float | None:
 def availability(run: Run) -> dict[str, Any]:
     """Availability RTO, re-derived from the audit log where it survives.
 
-    ``audit.csv`` is written from schema 2.1 onward precisely so this figure can
-    be recomputed from its underlying observations rather than taken on trust.
-    Where it is absent the summary recorded at measurement time is reported and
-    labelled as not re-derivable.
-
-    The returned ``claim`` is the sentence that may be quoted. Where the measured
-    interval is below the audit cadence, that sentence contains no number: the
-    two are indistinguishable, and quoting the smaller of them as a result would
-    assert a precision the sampling never had.
+    Falls back to the summary in ``events.json`` for runs without ``audit.csv``.
+    The returned ``claim`` is the quotable sentence; below the audit cadence it
+    contains no number, since the interval is indistinguishable from none.
     """
     events = run.events or {}
     audit_csv = run.path / "audit.csv"
@@ -347,11 +272,7 @@ def availability(run: Run) -> dict[str, Any]:
     out: dict[str, Any] = {"available": True, **measured}
 
     if rto is None and measured.get("coverage_truncated"):
-        # Distinct from "no write was acknowledged after the fault", which is a
-        # statement about the cluster. This one is a statement about the
-        # instrument, and the difference is the whole point of tracking
-        # coverage: the run below has an unmeasured outage, not a measured
-        # absence of one.
+        # About the instrument, not the cluster: the outage is unmeasured.
         out["claim"] = (
             "the audit writer stopped observing "
             f"{measured.get('coverage_gap_s')} s before the run ended; the "
@@ -387,26 +308,10 @@ def availability(run: Run) -> dict[str, Any]:
 def probe_availability(run: Run) -> dict[str, Any]:
     """Availability RTO re-derived from the high-frequency probe, if one ran.
 
-    A third reading of the same quantity :func:`availability` reports, at a
-    resolution the RPO audit writer's serialised single connection cannot reach.
-    It is reported *beside* that one and never in place of it: they are separate
-    clients over separate connections writing separate tables, so agreement
-    between them is corroboration and disagreement is a fact about the run that a
-    single figure would have hidden.
-
-    Like :func:`availability`, it recomputes from ``rto_probe.csv`` rather than
-    reading back the summary the phase wrote, so the published number can be
-    disputed against the observations behind it.
-
-    ``observed_outage_s`` is the quantity to prefer when the two differ. Every
-    completion timestamp carries the probe's own write path as a systematic
-    offset -- 123 ms from the client node where the probe runs, and 332 ms back
-    when it ran from the operator's workstation. That offset appears identically
-    on the last write before the fault and the first after it, so it cancels in
-    their difference but not in the interval measured from the fault, which is
-    timestamped by the injector rather than by the probe. Moving the probe onto
-    the client node shrank the offset; it did not remove the reason to prefer
-    the difference.
+    Reported beside :func:`availability`, never instead of it: separate clients,
+    connections and tables, so agreement is corroboration. Prefer
+    ``observed_outage_s`` (probe-to-probe) when the two differ, because the
+    probe's own write delay cancels in it.
     """
     probe_csv = run.path / "rto_probe.csv"
     events = run.events or {}
@@ -441,10 +346,7 @@ def probe_availability(run: Run) -> dict[str, Any]:
         "source": "re-derived from rto_probe.csv",
         **measured,
     }
-    # The longest gap between served writes anywhere in the run, which is not
-    # necessarily the one the fault caused. Reported so that an outage the fault
-    # did not produce -- a stall on the client, a lease moving for its own
-    # reasons -- is visible rather than absorbed into the headline number.
+    # The longest gap anywhere in the run, which the fault may not have caused.
     if windows:
         out["longest_gap_between_served_writes"] = windows[0]
     for key in ("achieved_rate_per_s", "served_rate_per_s", "workers", "dispatch_interval_s"):
@@ -456,17 +358,9 @@ def probe_availability(run: Run) -> dict[str, Any]:
 def performance(run: Run, alignment: Alignment) -> dict[str, Any]:
     """Performance RTO, re-derived from the metrics table.
 
-    Recomputed here rather than copied from ``events.json``, so the recorded
-    figure has an independent check against the artefact it was derived from.
-    Where the alignment is only bounded the recomputation is run at both ends of
-    the interval and reported as a range.
-
-    Where no recovery is found, this distinguishes two cases the legacy evaluator
-    conflated under "NOT RECOVERED": a cluster still degrading or oscillating, and
-    a cluster that has settled into a *new stable state* below the threshold. The
-    second is not a slow recovery. It is the correct behaviour of a quorum system
-    that has lost a fast replica, and the metric, not the cluster, is what fails
-    to apply.
+    With a bounded alignment it runs at both ends of the interval and reports a
+    range. With no recovery it separates a cluster still degrading from one that
+    settled into a new stable state below the threshold (the metric does not apply).
     """
     events = run.events or {}
     chaos = run.profile.get("chaos", {}) or {}
@@ -569,10 +463,7 @@ def performance(run: Run, alignment: Alignment) -> dict[str, Any]:
 def post_fault_steady_state(run: Run, alignment: Alignment) -> dict[str, Any]:
     """What the cluster settled to after the fault, once detection had completed.
 
-    Excludes :data:`LIVENESS_SETTLE_S` after the fault, during which the cluster
-    is still detecting the failure and moving leases. That interval belongs in
-    the recovery time and is deliberately part of performance RTO; it does not
-    belong in a description of the state the cluster reached.
+    Excludes :data:`LIVENESS_SETTLE_S` after the fault (detection and lease moves).
     """
     fault = fault_offsets(run, alignment)
     wall = fault.get("wall_offset_s")
@@ -586,9 +477,7 @@ def post_fault_steady_state(run: Run, alignment: Alignment) -> dict[str, Any]:
     else:
         times = ticks["elapsed_s"].astype(float)
         _, upper = alignment.to_generator(float(wall))
-        # The later bound, so the window cannot accidentally include pre-fault
-        # intervals: an alignment that is uncertain must err towards excluding
-        # data, never towards including data from the wrong side of the fault.
+        # Use the later bound so no pre-fault interval leaks in.
         fault_at = upper
 
     window = ticks[times >= fault_at + LIVENESS_SETTLE_S]
@@ -621,28 +510,10 @@ def write_latency_recovery(
 ) -> dict[str, Any]:
     """Did the write path itself come back, independent of aggregate throughput.
 
-    ``post_fault_steady_state`` answers "did throughput recover" and can answer
-    yes even when the write path did not: this workload is 80% reads served
-    locally by the leaseholder, so a permanently slower write path can be
-    invisible in aggregate TPS while it is fully visible in the write
-    operation's own latency. Losing a fast-quorum member is the case this
-    project's own topology produces (see :func:`quorum_geometry`) -- the write
-    floor measured 69.7 ms with the member up and 190 ms without it, a 2.7x
-    change that a throughput-only view can miss entirely if the workload has
-    enough read share and offered concurrency to hide it.
-
-    This is not a replacement for :func:`performance`; it is a second,
-    independent axis. A run can be `recovered` on throughput and
-    `structural_latency_shift` here at the same time, and that combination is
-    itself the finding: the system survived and kept serving its throughput
-    target, but it is no longer the same system it was before the fault.
-
-    Settling is judged the same way :func:`post_fault_steady_state` judges
-    throughput -- coefficient of variation over a window that excludes
-    :data:`LIVENESS_SETTLE_S` after the fault, so failover itself is not
-    mistaken for an unstable new state. Baseline is the mean of the last 20
-    pre-fault intervals of the same operation type, matching how every other
-    baseline in this module is taken.
+    Reads are most of the workload, so a permanently slower write path can hide
+    in aggregate throughput. A run can recover on throughput and still show a
+    ``structural_latency_shift`` here. Settling is judged as in
+    :func:`post_fault_steady_state`; baseline is the last 20 pre-fault intervals.
     """
     fault = fault_offsets(run, alignment)
     wall = fault.get("wall_offset_s")
@@ -658,9 +529,7 @@ def write_latency_recovery(
         fault_at = float(wall)
     else:
         times = op_rows["elapsed_s"].astype(float)
-        # The later bound, for the same reason `post_fault_steady_state` takes
-        # it: an uncertain alignment must err toward excluding data, never
-        # toward smuggling a pre-fault interval into the post-fault window.
+        # Use the later bound so no pre-fault interval leaks in.
         _, fault_at = alignment.to_generator(float(wall))
 
     pre = op_rows.loc[times < fault_at, "p50_ms"].astype(float)
@@ -737,71 +606,15 @@ def quorum_geometry(
 ) -> dict[str, Any]:
     """Why performance RTO may be undefined, derived from measured round trips.
 
-    A write commits when a majority of the five voting replicas has acknowledged
-    it, so the binding constraint is the round trip to the second-fastest
-    *available* follower. Removing a follower from the fast triangle does not stop
-    writes -- a quorum survives -- but it raises that floor, on this testbed from
-    ~66.8 ms to ~190 ms, because the next-fastest replica is in South Asia.
+    The write floor is the RTT to the follower that completes quorum. Losing a
+    fast follower raises it; losing the leader (the usual case here, since the
+    gateway is the target) means a survivor takes over with its own RTT row, so
+    every survivor is evaluated and a range is reported.
 
-    What this does **not** establish is that total throughput must stay below the
-    recovery threshold. The Phase III and IV runs in this project disagree on
-    that while sharing a target: the ``dead`` run at C=50 settled at 0.67 of baseline
-    and never recovered, while the ``recover`` run at C=100 regained the threshold
-    in about 9 s with the same node partitioned. A closed workload can absorb
-    higher per-operation latency by keeping more operations outstanding. So the
-    floor is a hard statement about the write path and a soft one about aggregate
-    throughput, and it is reported that way: the ratio below explains why a
-    performance RTO *may* be undefined for a fault on this member, and is not on
-    its own a prediction that it will be.
-
-    **The read half of that reasoning is engine-dependent, and stating it
-    engine-blind was wrong.** This function used to assert flatly that 80% of the
-    workload's operations are reads served by the local leaseholder and therefore
-    unaffected. That holds for CockroachDB. It is false for PostgreSQL/Patroni,
-    where there is one primary and the generator reaches it through HAProxy, so
-    *every* operation follows the primary when it moves -- and the primary moves
-    to another continent precisely when the pinned one is the fault target.
-    Measured on ``20260909T040914Z_p4-chaos-recover`` (smoke, PostgreSQL): after
-    Patroni promoted ``azure-2`` (eastasia), read p50 went from **0.92 ms to
-    209.7 ms** and update p50 from 75.5 ms to 369.1 ms, and throughput settled at
-    ~43 ops/s -- C=10 divided by a ~230 ms round trip, which is arithmetic, not
-    recovery. Attributing that to the write-path floor below would credit a 2.1x
-    write-floor change for a 228x change on the operation class this function
-    called unaffected. The consequence text therefore branches on the engine; the
-    floor computation itself does not, because the quorum geometry is genuinely
-    the same shape on both arms (leader plus the two fastest acks of the
-    survivors).
-
-    Computed from the Phase I matrix rather than asserted, so "the target was in
-    the fast quorum" is a measurement.
-
-    **The leaseholder-is-the-target case is handled separately, and has to be.**
-    Every chaos profile in this project targets the gateway (``gcp-1``), which
-    ``lease_preferences`` also pins as the leaseholder -- so the ordinary case
-    this function was first written for, "the leader survives and loses one
-    follower," never actually occurs here; what happens instead is "the leader
-    is the one that dies." Computing ``after`` by removing the target's entry
-    from *the gateway's own RTT row* is meaningless once the gateway is the
-    thing that died: there is no row left to remove an entry from, since
-    :func:`crdblab.core.preflight.gateway_rtts` only returns a node's RTT to
-    *other* nodes and the dead node never had an entry for itself in the first
-    place. The earlier implementation did exactly this and it silently
-    degenerated into a no-op -- ``after`` always equalled ``before`` -- which
-    reported "the write path is unaffected" on every ``dead``/``recover`` run
-    in this project regardless of what the run actually measured. It was
-    caught only because :func:`write_latency_recovery`, computed independently
-    from the metrics table rather than from this RTT matrix, disagreed with it
-    on a live run (1.38x settled shift, reported here as "unaffected").
-
-    Which surviving node is promoted is not something this static matrix can
-    predict on either arm -- CockroachDB's allocator decides it, and
-    ``lease_preferences`` names only the dead node's region, so there is no
-    configured fallback to read; Patroni holds an election, and
-    ``failover_priority`` likewise ranks only the pinned node above the rest,
-    leaving the other four equal.
-    Every survivor is therefore evaluated as a candidate leader, using *its
-    own* RTT row, and the result is reported as the range across candidates
-    rather than a single value dressed up as a prediction of which one wins.
+    This explains why performance RTO *may* be undefined; it does not predict
+    it. The consequence text differs by engine: on PostgreSQL every operation,
+    reads included, follows the primary through HAProxy, so a promotion to a
+    distant node also moves the read path.
     """
     events = run.events or {}
     target_name = events.get("target")
@@ -811,13 +624,7 @@ def quorum_geometry(
             "detail": "no Phase I network matrix supplied; run `crdblab net probe`",
         }
 
-    # Vocabulary only. The geometry is the same on both arms -- leader plus the
-    # two fastest acknowledgements of the survivors, which is 3-of-5 Raft quorum
-    # and Patroni's `ANY 2 (...)` alike -- but calling a Patroni primary "the
-    # leaseholder", and naming CockroachDB's allocator as the thing that promotes
-    # it, put a false claim in front of every PostgreSQL resilience figure. The
-    # dict KEYS keep their original names (`leaseholder_displaced`) so existing
-    # run artefacts and figures stay readable; only the prose branches.
+    # Same geometry on both engines; only the wording differs.
     is_pg = run.engine == "postgresql"
     leader_word = "primary" if is_pg else "leaseholder"
     promoter = "Patroni" if is_pg else "CockroachDB's allocator"
@@ -840,10 +647,7 @@ def quorum_geometry(
         return {"available": False, "detail": str(exc)}
 
     if not leaseholder_displaced:
-        # The ordinary case: the leaseholder survives, and losing a follower
-        # only removes one entry from its own row. Unchanged from the original
-        # implementation, and still correct -- the bug is specific to the case
-        # handled below.
+        # The leader survives and loses one follower.
         surviving = {host: v for host, v in before_rtts.items() if host != target.host}
         try:
             after = quorum_floor_ms(surviving, voters)
@@ -882,9 +686,7 @@ def quorum_geometry(
             ),
         }
 
-    # The leaseholder is the target. Evaluate every surviving node as a
-    # candidate leader, from its own measured RTTs, rather than reusing the
-    # dead node's row.
+    # The leader is the target: evaluate every survivor as a candidate leader.
     candidates: dict[str, float] = {}
     for candidate in topology.nodes:
         if candidate.host == target.host:
@@ -936,13 +738,6 @@ def quorum_geometry(
             "survives among any three of the four remaining voters -- so this is "
             "a latency change, not an outage, in every candidate"
         ),
-        # The two arms differ in what the client keeps paying after the failover,
-        # and that difference dominates the write-floor change above. See the
-        # docstring: on PostgreSQL every operation follows the primary through
-        # HAProxy, so a promotion into another region moves the READ path too --
-        # measured 0.92 ms -> 209.7 ms on 2026-09-09, against a 2.1x write-floor
-        # change. Quoting the CockroachDB sentence on a Patroni run would explain
-        # a 228x effect with a 2.1x cause.
         "consequence": (
             (
                 "whether aggregate throughput regains the recovery threshold "
@@ -1024,26 +819,13 @@ def summarise(
         "mode": (run.events or {}).get("mode"),
         "target": (run.events or {}).get("target"),
         "clock_alignment": alignment.to_dict(),
-        # Whether the injection command actually succeeded, as opposed to
-        # whether a run directory exists. A refused fault (`landed is False`)
-        # still yields a complete, internally consistent run whose every figure
-        # describes an undisturbed cluster, so this has to be carried all the
-        # way out to the report rather than left in events.json. `None` means
-        # the transport died mid-injection, which for a `dead` fault is evidence
-        # it landed, and for older runs simply means it was not recorded.
+        # False: the fault was refused, so every figure describes an undisturbed
+        # cluster. None: transport died (likely landed) or not recorded.
         "fault_landed": (run.events or {}).get("fault_landed"),
         "fault": fault_offsets(run, alignment),
         "availability_rto": availability(run),
-        # The same quantity at a finer resolution, from an independent client.
-        # Added as a sibling key rather than folded into `availability_rto`
-        # because a consumer that predates the probe must keep reading the audit
-        # figure it was written against, and because two readings that disagree
-        # should be visible as two readings.
         "probe_rto": probe_availability(run),
         "performance_rto": performance(run, alignment),
-        # A second, independent axis from performance_rto: whether the write
-        # path itself came back, not whether aggregate throughput did. See
-        # write_latency_recovery's docstring for why the two can disagree.
         "write_latency_recovery": write_latency_recovery(run, alignment),
         "quorum_geometry": quorum_geometry(run, network_csv, topology),
         "rpo": rpo(run),

@@ -1,10 +1,4 @@
-"""Tests for the Stage 5 analysis layer.
-
-Each test pins a decision the analysis layer makes about what may and may not be
-inferred from a run, rather than a numeric output. The numbers are the easy part;
-the defects this project exists to document were all failures of inference from
-numbers that were individually fine.
-"""
+"""Tests for the analysis layer: loading, steady state, engine comparison and resilience."""
 
 from __future__ import annotations
 
@@ -63,7 +57,7 @@ def _write_run(
     tmp_path: Path,
     name: str,
     rows,
-    phase="p3_cluster",
+    phase="bench_cluster",
     events=None,
     manifest_extra=None,
     schema_version="2.1",
@@ -105,13 +99,7 @@ def _write_run(
 
 
 def test_a_run_without_a_manifest_is_not_loadable(tmp_path):
-    """Provenance is a precondition of analysis, not an optional extra.
-
-    D9 -- a fifteen-fold block-cache asymmetry between the two phases being
-    compared -- was invisible precisely because the artefact recorded the client
-    side and not the server side. A run that cannot say how it was produced
-    cannot be cited, so it does not load at all.
-    """
+    """Provenance is a precondition of analysis, not an optional extra."""
     path = _write_run(tmp_path, "no_manifest", _rows([(10, 800, 1.0, 200, 40.0)]))
     (path / "manifest.json").unlink()
     with pytest.raises(RunLoadError, match="manifest"):
@@ -119,12 +107,7 @@ def test_a_run_without_a_manifest_is_not_loadable(tmp_path):
 
 
 def test_a_run_that_fails_validation_is_refused(tmp_path):
-    """Validation gates analysis; it is not advisory.
-
-    The row below is a cumulative total leaking into the per-interval stream,
-    which is D3. The legacy pipeline had one script that filtered such rows and
-    another that did not, and the second produced the results tables.
-    """
+    """Validation gates analysis; it is not advisory."""
     rows = _rows([(10, 800, 1.0, 200, 40.0)])
     rows[0]["tps"] = 150_000.0
     path = _write_run(tmp_path, "implausible", rows)
@@ -135,13 +118,7 @@ def test_a_run_that_fails_validation_is_refused(tmp_path):
 
 
 def test_throughput_sums_across_op_types_but_errors_do_not(tmp_path):
-    """D1: the read and write rates are components of one load, not samples of it.
-
-    The cumulative error counter is the opposite case -- each operation type
-    reports the same running total -- so it is taken as the maximum. Getting
-    either backwards is invisible in review unless the op-type dimension is being
-    watched explicitly.
-    """
+    """Read and write rates are components of one load, so throughput sums across ops."""
     rows = _rows([(10, 800, 1.0, 200, 40.0)], ticks=3)
     for row in rows:
         row["errors_cum"] = 7
@@ -169,11 +146,7 @@ def test_latency_is_never_pooled_across_operation_types(tmp_path):
 
 
 def test_a_single_repetition_yields_no_interval(tmp_path):
-    """An unmeasured spread is None, never zero.
-
-    A half-width of 0.0 asserts perfect agreement between repetitions that were
-    never run. Recording an unmeasured quantity as a constant is D5.
-    """
+    """An unmeasured spread is None, never zero."""
     run = load_run(_write_run(tmp_path, "one_rep", _rows([(10, 800, 1.0, 200, 40.0)])))
     tier = steady_state.per_tier(run).iloc[0]
     assert tier["repetitions"] == 1
@@ -182,12 +155,7 @@ def test_a_single_repetition_yields_no_interval(tmp_path):
 
 
 def test_the_interval_is_computed_over_repetitions_not_pooled_samples(tmp_path):
-    """Successive seconds of one run are not independent observations.
-
-    They share a process, a cache state and a thermal state. Pooling them would
-    give an interval far narrower than the experiment supports -- the reason
-    three repetitions in randomised order were adopted over single-shot tiers.
-    """
+    """Successive seconds of one run are not independent observations."""
     run = load_run(
         _write_run(tmp_path, "three_reps", _rows([(10, 800, 1.0, 200, 40.0)], repetitions=3))
     )
@@ -198,38 +166,33 @@ def test_the_interval_is_computed_over_repetitions_not_pooled_samples(tmp_path):
     assert tier["ci95_half_width_tps"] == pytest.approx(0.0)
 
 
-# --- raft overhead ---------------------------------------------------------
+# --- engine comparison -----------------------------------------------------
 
 
 def _pair(tmp_path):
-    baseline = load_run(
+    crdb = load_run(
         _write_run(
             tmp_path,
-            "p2",
+            "crdb",
             _rows([(10, 2800, 2.0, 700, 5.5), (50, 2900, 12.0, 720, 19.0)]),
-            phase="p2_baseline",
+            phase="bench_cluster",
         )
     )
-    cluster = load_run(
+    pg = load_run(
         _write_run(
             tmp_path,
-            "p3",
+            "pg",
             _rows([(10, 520, 0.9, 130, 71.0), (50, 1330, 10.0, 330, 106.0)]),
-            phase="p3_cluster",
+            phase="bench_cluster",
         )
     )
-    return baseline, cluster
+    return crdb, pg
 
 
 def test_matched_throughput_refuses_when_the_ranges_do_not_overlap(tmp_path):
-    """No load level was measured in both phases, so the scalar is not produced.
-
-    Extrapolating one curve past its highest measured tier to meet the other is
-    the tempting move here, and it would be an assertion about load levels the
-    experiment never applied.
-    """
-    baseline, cluster = _pair(tmp_path)
-    matched = engine_comparison.matched_throughput(baseline, cluster, "update")
+    """No load level was measured for both engines, so no matched-throughput scalar is produced."""
+    crdb, pg = _pair(tmp_path)
+    matched = engine_comparison.matched_throughput(crdb, pg, "update")
     assert matched["comparable"] is False
     assert "do not overlap" in matched["reason"]
     assert matched["points"] == []
@@ -237,23 +200,23 @@ def test_matched_throughput_refuses_when_the_ranges_do_not_overlap(tmp_path):
 
 def test_matched_throughput_compares_only_inside_the_measured_range(tmp_path):
     """Where the ranges do overlap, every point lies within both curves."""
-    baseline = load_run(
+    crdb = load_run(
         _write_run(
             tmp_path,
-            "p2_wide",
+            "crdb_wide",
             _rows([(10, 800, 2.0, 200, 5.0), (50, 1600, 8.0, 400, 9.0)]),
-            phase="p2_baseline",
+            phase="bench_cluster",
         )
     )
-    cluster = load_run(
+    pg = load_run(
         _write_run(
             tmp_path,
-            "p3_wide",
+            "pg_wide",
             _rows([(10, 600, 1.0, 150, 70.0), (50, 1200, 6.0, 300, 90.0)]),
-            phase="p3_cluster",
+            phase="bench_cluster",
         )
     )
-    matched = engine_comparison.matched_throughput(baseline, cluster, "update")
+    matched = engine_comparison.matched_throughput(crdb, pg, "update")
     assert matched["comparable"] is True
     lo, hi = matched["overlap_tps"]
     assert all(lo <= p["throughput_tps"] <= hi for p in matched["points"])
@@ -261,31 +224,18 @@ def test_matched_throughput_compares_only_inside_the_measured_range(tmp_path):
 
 
 def test_the_same_concurrency_delta_is_produced_only_as_a_labelled_artefact(tmp_path):
-    """The intuitive comparison is computed, and marked as not a result.
-
-    It is retained because Chapter 5 needs the numbers the original dissertation
-    reported, and because refuting the intuitive comparison is more useful than
-    omitting it. In this data it makes the replicated cluster's reads look
-    *faster* than the unreplicated baseline's.
-    """
-    baseline, cluster = _pair(tmp_path)
-    delta = engine_comparison.same_concurrency_delta(baseline, cluster)
+    """The intuitive comparison is computed, and marked as not a result."""
+    crdb, pg = _pair(tmp_path)
+    delta = engine_comparison.same_concurrency_delta(crdb, pg)
     assert delta["comparable"] is False
     assert "error case study" in delta["use"]
     assert delta["rows"][0]["read_p50_ratio_x"] < 1.0
 
 
 def test_a_comparison_across_mismatched_block_caches_is_refused(tmp_path):
-    """D9, which no check on a single run can detect.
-
-    Both runs are internally valid and pass every check in ``validate``. The
-    error is in the inference from their difference: the baseline served a 205 MB
-    working set from a ~1 GiB cache while the cluster had CockroachDB's 128 MiB
-    default. Correcting it moved the apparent write-latency overhead from 18.3x
-    to 12.8x.
-    """
-    baseline, cluster = _pair(tmp_path)
-    starved = dict(cluster.manifest)
+    """Mismatched block caches make a comparison invalid; no single-run check can detect it."""
+    crdb, pg = _pair(tmp_path)
+    starved = dict(pg.manifest)
     # No --cache flag at all, i.e. CockroachDB's 128 MiB default.
     starved["notes"] = [
         (
@@ -293,45 +243,44 @@ def test_a_comparison_across_mismatched_block_caches_is_refused(tmp_path):
             "--store=/var/lib/cockroach"
         )
     ]
-    report = validate_comparison(baseline.manifest, starved, "p2", "p3")
+    report = validate_comparison(crdb.manifest, starved, "crdb", "pg")
     assert report.ok is False
     assert "--cache" in report.findings[0].message
     assert "128 MiB default" in report.findings[0].message
 
 
 def test_a_comparison_across_different_workloads_is_refused(tmp_path):
-    """A seed mismatch means the two runs did different work (D8)."""
-    baseline, cluster = _pair(tmp_path)
-    other = json.loads(json.dumps(cluster.manifest))
+    """A seed mismatch means the two runs did different work."""
+    crdb, pg = _pair(tmp_path)
+    other = json.loads(json.dumps(pg.manifest))
     other["profile"]["workload"]["seed"] = 1
-    report = validate_comparison(baseline.manifest, other, "p2", "p3")
+    report = validate_comparison(crdb.manifest, other, "crdb", "pg")
     assert report.ok is False
     assert "seed" in report.findings[0].message
 
 
 def test_compare_refuses_outright_when_the_runs_are_not_comparable(tmp_path):
-    baseline, _ = _pair(tmp_path)
+    crdb, _ = _pair(tmp_path)
     broken = load_run(
         _write_run(
             tmp_path,
-            "p3_v2",
+            "pg_v2",
             _rows([(10, 520, 0.9, 130, 71.0)]),
-            phase="p3_cluster",
+            phase="bench_cluster",
             manifest_extra={"cockroach_version": "v25.1.0"},
         )
     )
     with pytest.raises(engine_comparison.NotComparable):
-        engine_comparison.compare(baseline, broken)
+        engine_comparison.compare(crdb, broken)
 
 
 def test_a_still_rising_curve_reports_its_peak_as_a_lower_bound(tmp_path):
-    """Calling a number that is still climbing "capacity" is how the original
-    C=200 result asserted a property of the system from the edge of the sweep."""
-    baseline, cluster = _pair(tmp_path)
-    rising = engine_comparison._saturation(steady_state.per_tier(cluster))
+    """A throughput that is still climbing is a lower bound, not the capacity."""
+    crdb, pg = _pair(tmp_path)
+    rising = engine_comparison._saturation(steady_state.per_tier(pg))
     assert rising["saturated"] is False
     assert "lower bound" in rising["detail"]
-    flat = engine_comparison._saturation(steady_state.per_tier(baseline))
+    flat = engine_comparison._saturation(steady_state.per_tier(crdb))
     assert flat["saturated"] is True
 
 
@@ -367,14 +316,7 @@ def test_alignment_is_measured_when_both_clocks_were_recorded(tmp_path):
 
 
 def test_alignment_is_bounded_when_only_the_generator_clock_was_recorded(tmp_path):
-    """A schema 2.0 run gets an interval, not an estimate.
-
-    The generator cannot have started before the run's epoch, and the run's
-    wall-clock envelope must contain its whole elapsed span. Those two facts
-    bound the offset; nothing in the artefact narrows it further, and inventing a
-    point value would be the same move as recording an unmeasured quantity as a
-    constant (D5).
-    """
+    """A schema 2.0 run gets an interval, not an estimate."""
     run = load_run(
         _write_run(
             tmp_path,
@@ -430,11 +372,7 @@ def test_a_measured_alignment_puts_the_fault_on_the_throughput_axis(tmp_path):
 
 
 def test_an_availability_rto_below_the_audit_cadence_is_not_quotable(tmp_path):
-    """0.07 s against a 0.40 s sampling interval is not a recovery time.
-
-    It is indistinguishable from no interruption, and the honest claim names the
-    resolution instead of the number.
-    """
+    """0.07 s against a 0.40 s sampling interval is not a recovery time."""
     events = dict(_EVENTS)
     events["availability"] = {
         "availability_rto_s": 0.068,
@@ -483,9 +421,8 @@ def test_availability_rto_is_rederived_from_the_audit_log_when_present(tmp_path)
         phase="p4_chaos",
         events=_EVENTS,
     )
-    # A realistic cadence: writes every 0.5 s until the fault at 10.0 s, then a
-    # gap, then resumption. The cadence has to be denser than the outage for the
-    # outage to be measurable at all, which is the point the resolution encodes.
+    # Writes every 0.5 s, a gap after the fault at 10.0 s, then resumption. The
+    # cadence must be denser than the outage for it to be measurable.
     attempts = [
         {"wall_offset_s": round(0.5 * i, 3), "seq_id": i, "outcome": "ack"}
         for i in range(1, 20)  # last ack at 9.5 s, just before the fault at 10.0 s
@@ -506,12 +443,7 @@ def test_availability_rto_is_rederived_from_the_audit_log_when_present(tmp_path)
 
 
 def test_a_new_stable_state_is_reported_as_undefined_not_as_no_recovery(tmp_path):
-    """The distinction the legacy evaluator collapsed into "NOT RECOVERED".
-
-    Throughput here drops to a stable two thirds of baseline and stays there.
-    That is not a slow recovery; it is the correct behaviour of a quorum system
-    that has lost a fast replica, and it is the *metric* that fails to apply.
-    """
+    """A new stable state below the threshold is reported as undefined, not as no recovery."""
     rows = _rows([(10, 800, 1.0, 200, 40.0)], ticks=40, wall_offset=0.0)
     for row in rows:
         if row["elapsed_s"] > 12:
@@ -565,12 +497,7 @@ def test_a_bounded_alignment_makes_the_performance_rto_an_interval(tmp_path):
 
 
 def test_the_metrics_schema_is_pinned():
-    """Changing the measurement schema must be a deliberate, reviewed edit.
-
-    The analysis layer binds to these names. A column added or renamed without
-    updating this list is the drift the schema-enforcing writer exists to
-    prevent, and it is cheaper to catch here than in the middle of a sweep.
-    """
+    """Changing the measurement schema must be a deliberate, reviewed edit."""
     from crdblab.core.recorder import AUDIT_COLUMNS, SCHEMA_VERSION
 
     assert SCHEMA_VERSION == "2.1"
@@ -597,14 +524,7 @@ def test_the_metrics_schema_is_pinned():
 
 @pytest.mark.parametrize("module", ["bench", "p4_chaos"])
 def test_every_phase_writes_a_row_matching_the_declared_schema(module):
-    """Catch schema drift statically, not thirty minutes into a measurement.
-
-    ``MetricsWriter`` rejects a mismatched row, but only when the phase actually
-    runs -- against the live testbed, part-way through a sweep that then has to
-    be discarded. Reading the row literals out of the source turns that into a
-    test failure. This is the same reasoning as running pre-flight before a
-    sweep rather than validating afterwards.
-    """
+    """Catch schema drift statically, not thirty minutes into a measurement."""
     import ast
     import inspect
 
@@ -632,13 +552,7 @@ def test_every_phase_writes_a_row_matching_the_declared_schema(module):
 
 
 def test_a_run_whose_preflight_failed_is_refused(tmp_path):
-    """Pre-flight is a separate gate from validation and must be enforced too.
-
-    ``validate`` asks whether the recorded numbers are consistent with each
-    other. Pre-flight asks whether the system was fit to be measured. D7 and D8
-    both produce perfectly consistent data from a misconfigured system, so the
-    run whose pre-flight failed is precisely the run whose numbers look fine.
-    """
+    """Pre-flight is a separate gate from validation and must be enforced too."""
     import json as _json
 
     path = _write_run(tmp_path, "preflight_failed", _rows([(10, 800, 1.0, 200, 40.0)]))
@@ -659,32 +573,24 @@ def test_a_run_whose_preflight_failed_is_refused(tmp_path):
 
 
 def test_the_overlap_remedy_does_not_advise_raising_a_saturated_phase(tmp_path):
-    """Once the slower phase has saturated, more concurrency cannot close the gap.
-
-    Measured 2026-09-02: the cluster peaked at 1,855 ops/s at C=100 and fell to
-    1,732 at C=200, while the single node's *slowest* tier was 2,502. The
-    cluster's ceiling sits below the baseline's floor, so the intuitive advice --
-    "run the cluster at higher concurrency" -- costs half an hour of sweep and
-    produces the same refusal. The only route to an overlap is measuring the
-    baseline lower.
-    """
-    baseline = load_run(
+    """Once the slower engine has saturated, more concurrency cannot close the gap."""
+    crdb = load_run(
         _write_run(
-            tmp_path, "p2_sat",
+            tmp_path, "crdb_sat",
             _rows([(10, 2000, 2.0, 500, 6.0), (50, 2020, 8.0, 505, 24.0)]),
-            phase="p2_baseline",
+            phase="bench_cluster",
         )
     )
-    # Cluster peaks then declines: saturated, and its ceiling is below the
-    # baseline's floor.
-    cluster = load_run(
+    # PostgreSQL peaks then declines: saturated, with its ceiling below
+    # CockroachDB's floor.
+    pg = load_run(
         _write_run(
-            tmp_path, "p3_sat",
+            tmp_path, "pg_sat",
             _rows([(10, 400, 1.0, 100, 74.0), (50, 380, 9.0, 95, 108.0)]),
-            phase="p3_cluster",
+            phase="bench_cluster",
         )
     )
-    remedy = engine_comparison.matched_throughput(baseline, cluster, "update")["remedy"]
+    remedy = engine_comparison.matched_throughput(crdb, pg, "update")["remedy"]
     assert "saturated" in remedy
     assert "lower" in remedy
     assert "higher concurrency tier cannot" in remedy
@@ -692,44 +598,38 @@ def test_the_overlap_remedy_does_not_advise_raising_a_saturated_phase(tmp_path):
 
 def test_the_overlap_remedy_suggests_extending_a_still_rising_phase(tmp_path):
     """While the slower phase is still climbing, extending its sweep is right."""
-    baseline = load_run(
+    crdb = load_run(
         _write_run(
-            tmp_path, "p2_rise",
+            tmp_path, "crdb_rise",
             _rows([(10, 2000, 2.0, 500, 6.0), (50, 2020, 8.0, 505, 24.0)]),
-            phase="p2_baseline",
+            phase="bench_cluster",
         )
     )
-    cluster = load_run(
+    pg = load_run(
         _write_run(
-            tmp_path, "p3_rise",
+            tmp_path, "pg_rise",
             _rows([(10, 300, 1.0, 75, 74.0), (50, 700, 9.0, 175, 108.0)]),
-            phase="p3_cluster",
+            phase="bench_cluster",
         )
     )
-    remedy = engine_comparison.matched_throughput(baseline, cluster, "update")["remedy"]
+    remedy = engine_comparison.matched_throughput(crdb, pg, "update")["remedy"]
     assert "still rising" in remedy
 
 
 def test_interpolation_does_not_cross_the_saturation_fold(tmp_path):
-    """Past saturation one throughput maps to two latencies; don't average them.
-
-    Measured 2026-09-02: the cluster reached 1,728 ops/s at C=50 with an update
-    median of 108 ms, and 1,732 ops/s at C=200 with 230 ms -- the same throughput
-    at twice the latency. Interpolating across that fold would silently blend two
-    operating points that differ by a factor of two.
-    """
-    cluster = load_run(
+    """Past saturation one throughput maps to two latencies; don't average them."""
+    pg = load_run(
         _write_run(
-            tmp_path, "p3_fold",
+            tmp_path, "pg_fold",
             _rows([
                 (10, 400, 1.0, 100, 74.0),    # 500 tps
                 (50, 1000, 8.0, 250, 108.0),  # 1250 tps  <- peak
                 (200, 800, 90.0, 200, 230.0),  # 1000 tps, folded back
             ]),
-            phase="p3_cluster",
+            phase="bench_cluster",
         )
     )
-    curve = engine_comparison.throughput_latency_curve(cluster, "update")
+    curve = engine_comparison.throughput_latency_curve(pg, "update")
     # Ordered by the control variable, so the fold is visible rather than sorted away.
     assert curve["concurrency"].tolist() == [10, 50, 200]
 
@@ -743,40 +643,31 @@ def test_interpolation_does_not_cross_the_saturation_fold(tmp_path):
 
 
 def test_matched_throughput_reports_overhead_where_the_ranges_meet(tmp_path):
-    """The comparison the low-tier Phase II sweep exists to make possible.
-
-    Once the baseline is measured at low enough concurrency to reach into the
-    cluster's throughput band, replication cost can be stated at a *common load*
-    rather than at a common worker count. This is the only form of the scalar
-    that is a property of the systems rather than of an arbitrary parameter.
-
-    Each comparison point must be measured in at least one phase, and the
-    interpolated side must lie inside that phase's own measured range.
-    """
-    # Baseline swept down to 600 ops/s, so it overlaps the cluster's band.
-    baseline = load_run(
+    """Matched throughput reports latency overhead where the two ranges meet."""
+    # CockroachDB swept down to 600 ops/s, so it overlaps PostgreSQL's band.
+    crdb = load_run(
         _write_run(
-            tmp_path, "p2_low",
+            tmp_path, "crdb_low",
             _rows([
                 (1, 480, 0.9, 120, 1.6),      # 600 tps
                 (2, 960, 1.1, 240, 2.0),      # 1200 tps
                 (10, 2000, 3.0, 500, 6.7),    # 2500 tps
             ]),
-            phase="p2_baseline",
+            phase="bench_cluster",
         )
     )
-    cluster = load_run(
+    pg = load_run(
         _write_run(
-            tmp_path, "p3_low",
+            tmp_path, "pg_low",
             _rows([
                 (10, 500, 1.0, 125, 74.0),    # 625 tps
                 (50, 1400, 8.7, 350, 107.6),  # 1750 tps
             ]),
-            phase="p3_cluster",
+            phase="bench_cluster",
         )
     )
 
-    matched = engine_comparison.matched_throughput(baseline, cluster, "update")
+    matched = engine_comparison.matched_throughput(crdb, pg, "update")
     assert matched["comparable"] is True
     lo, hi = matched["overlap_tps"]
     assert lo == pytest.approx(625.0) and hi == pytest.approx(1750.0)
@@ -795,50 +686,41 @@ def test_matched_throughput_reports_overhead_where_the_ranges_meet(tmp_path):
 
 
 def test_matched_throughput_reports_how_loaded_each_phase_is(tmp_path):
-    """Matching throughput does not match utilisation, and the gap matters.
-
-    Two systems delivering the same work rate can sit at very different
-    distances from their own capacity. Measured 2026-09-02: at 1,856 ops/s the
-    cluster is at 100% of its peak while the single node is at 72% of its, so
-    part of the 74.9x latency ratio there is the cluster's own queueing rather
-    than the cost of replication. At 1,082 ops/s the utilisations are 58% and
-    42% and the ratio is 40.4x. Without utilisation reported, a reader would
-    reasonably quote the largest number.
-    """
-    baseline = load_run(
+    """Matched throughput reports each engine's utilisation, since the gap matters."""
+    crdb = load_run(
         _write_run(
-            tmp_path, "p2_util",
+            tmp_path, "crdb_util",
             _rows([
                 (1, 480, 0.9, 120, 1.6),      # 600 tps
                 (2, 960, 1.1, 240, 2.0),      # 1200 tps
                 (10, 2000, 3.0, 500, 6.7),    # 2500 tps = peak
             ]),
-            phase="p2_baseline",
+            phase="bench_cluster",
         )
     )
-    cluster = load_run(
+    pg = load_run(
         _write_run(
-            tmp_path, "p3_util",
+            tmp_path, "pg_util",
             _rows([
                 (10, 500, 1.0, 125, 74.0),    # 625 tps
                 (50, 1400, 8.7, 350, 107.6),  # 1750 tps = peak
             ]),
-            phase="p3_cluster",
+            phase="bench_cluster",
         )
     )
-    matched = engine_comparison.matched_throughput(baseline, cluster, "update")
+    matched = engine_comparison.matched_throughput(crdb, pg, "update")
 
     for point in matched["points"]:
-        assert 0.0 < point["phase_ii_utilisation"] <= 1.0
-        assert 0.0 < point["phase_iii_utilisation"] <= 1.0
+        assert 0.0 < point["crdb_utilisation"] <= 1.0
+        assert 0.0 < point["pg_utilisation"] <= 1.0
         assert point["utilisation_gap"] == pytest.approx(
-            abs(point["phase_ii_utilisation"] - point["phase_iii_utilisation"]), abs=1e-3
+            abs(point["crdb_utilisation"] - point["pg_utilisation"]), abs=1e-3
         )
 
-    # The cluster saturates first, so its utilisation runs ahead of the
-    # baseline's and the gap widens with throughput.
+    # PostgreSQL saturates first, so its utilisation runs ahead and the gap
+    # widens with throughput.
     top = max(matched["points"], key=lambda p: p["throughput_tps"])
-    assert top["phase_iii_utilisation"] > top["phase_ii_utilisation"]
+    assert top["pg_utilisation"] > top["crdb_utilisation"]
 
     # The nominated point is genuinely the one with the smallest gap.
     least = matched["least_confounded"]
@@ -847,29 +729,24 @@ def test_matched_throughput_reports_how_loaded_each_phase_is(tmp_path):
 
 
 def test_a_comparison_across_different_hardware_is_refused(tmp_path):
-    """Identical flags on unlike machines are not an identical configuration.
-
-    ``--cache`` and ``--max-sql-memory`` are fractions of total memory, so the
-    flag comparison passes while the absolute caches differ -- D9 in a form the
-    flag check alone cannot see.
-    """
-    baseline, cluster = _pair(tmp_path)
-    smaller = json.loads(json.dumps(cluster.manifest))
-    baseline.manifest["notes"] = baseline.manifest.get("notes", []) + [
+    """Identical flags on unlike machines are not an identical configuration."""
+    crdb, pg = _pair(tmp_path)
+    smaller = json.loads(json.dumps(pg.manifest))
+    crdb.manifest["notes"] = crdb.manifest.get("notes", []) + [
         "2026-09-03T00:00:00Z host: cpus=2 mem_total_kb=4007012 cpu_model=Xeon @ 2.80GHz"
     ]
     smaller["notes"] = smaller.get("notes", []) + [
         "2026-09-03T00:00:00Z host: cpus=2 mem_total_kb=3072000 cpu_model=Xeon @ 2.80GHz"
     ]
-    report = validate_comparison(baseline.manifest, smaller, "p2", "p3")
+    report = validate_comparison(crdb.manifest, smaller, "crdb", "pg")
     assert report.ok is False
     assert any("different hardware" in f.message for f in report.findings)
     assert any("mem_total_kb" in f.message for f in report.findings)
 
 
 def test_an_unrecorded_machine_warns_rather_than_passing_silently(tmp_path):
-    baseline, cluster = _pair(tmp_path)
-    report = validate_comparison(baseline.manifest, cluster.manifest, "p2", "p3")
+    crdb, pg = _pair(tmp_path)
+    report = validate_comparison(crdb.manifest, pg.manifest, "crdb", "pg")
     warnings = [f for f in report.findings if f.severity == "warning"]
     assert any("host hardware is unrecorded" in f.message for f in warnings)
 
@@ -878,30 +755,30 @@ def test_provider_memory_rounding_does_not_fire_the_hardware_check(tmp_path):
     """The two real machines report 4,005,712 and 4,007,012 kB. Erroring on a
     0.03% difference would make the check fire on every legitimate Phase II/III
     comparison, and a check that rejects correct data gets disabled."""
-    baseline, cluster = _pair(tmp_path)
+    crdb, pg = _pair(tmp_path)
     model = "cpu_model=AMD EPYC 7713 64-Core Processor"
-    baseline.manifest["notes"] = baseline.manifest.get("notes", []) + [
+    crdb.manifest["notes"] = crdb.manifest.get("notes", []) + [
         f"2026-09-03T00:00:00Z host: cpus=2 mem_total_kb=4005712 {model}"
     ]
-    other = json.loads(json.dumps(cluster.manifest))
+    other = json.loads(json.dumps(pg.manifest))
     other["notes"] = other.get("notes", []) + [
         f"2026-09-03T00:00:00Z host: cpus=2 mem_total_kb=4007012 {model}"
     ]
-    report = validate_comparison(baseline.manifest, other, "p2", "p3")
+    report = validate_comparison(crdb.manifest, other, "crdb", "pg")
     assert not any("different hardware" in f.message for f in report.findings)
 
 
 def test_a_materially_different_memory_size_still_fires(tmp_path):
-    baseline, cluster = _pair(tmp_path)
+    crdb, pg = _pair(tmp_path)
     model = "cpu_model=AMD EPYC 7713 64-Core Processor"
-    baseline.manifest["notes"] = baseline.manifest.get("notes", []) + [
+    crdb.manifest["notes"] = crdb.manifest.get("notes", []) + [
         f"2026-09-03T00:00:00Z host: cpus=2 mem_total_kb=4005712 {model}"
     ]
-    other = json.loads(json.dumps(cluster.manifest))
+    other = json.loads(json.dumps(pg.manifest))
     other["notes"] = other.get("notes", []) + [
         f"2026-09-03T00:00:00Z host: cpus=2 mem_total_kb=3072000 {model}"
     ]
-    report = validate_comparison(baseline.manifest, other, "p2", "p3")
+    report = validate_comparison(crdb.manifest, other, "crdb", "pg")
     assert report.ok is False
     assert any("mem_total_kb" in f.message for f in report.findings)
 
@@ -909,45 +786,45 @@ def test_a_materially_different_memory_size_still_fires(tmp_path):
 # --- matched utilisation ----------------------------------------------------
 
 def _low_tier_pair(tmp_path):
-    """Both phases swept down to a single worker, as of 2026-09-03."""
-    baseline = load_run(
+    """Both engines swept down to a single worker."""
+    crdb = load_run(
         _write_run(
             tmp_path,
-            "p2_low",
+            "crdb_low",
             _rows([(1, 865, 0.6, 216, 2.2), (10, 2000, 2.0, 500, 6.9),
                    (50, 2050, 17.0, 512, 25.3)]),
-            phase="p2_baseline",
+            phase="bench_cluster",
         )
     )
-    cluster = load_run(
+    pg = load_run(
         _write_run(
             tmp_path,
-            "p3_low",
+            "pg_low",
             _rows([(1, 53, 0.7, 13, 72.7), (10, 490, 1.1, 122, 75.3),
                    (50, 1390, 8.7, 348, 105.1)]),
-            phase="p3_cluster",
+            phase="bench_cluster",
         )
     )
-    return baseline, cluster
+    return crdb, pg
 
 
 def test_matched_utilisation_compares_at_different_throughputs_by_design(tmp_path):
-    baseline, cluster = _low_tier_pair(tmp_path)
-    out = engine_comparison.matched_utilisation(baseline, cluster)
+    crdb, pg = _low_tier_pair(tmp_path)
+    out = engine_comparison.matched_utilisation(crdb, pg)
     assert out["comparable"] is True
     assert "utilisation" in out["holds_fixed"]
     for point in out["points"]:
         # The defining property: equal utilisation, unequal throughput.
-        assert point["phase_ii_tps"] != point["phase_iii_tps"]
-    assert out["phase_ii_peak_tps"] > out["phase_iii_peak_tps"]
+        assert point["crdb_tps"] != point["pg_tps"]
+    assert out["crdb_peak_tps"] > out["pg_peak_tps"]
 
 
 def test_matched_throughput_can_never_reach_equal_utilisation(tmp_path):
     """The gap is T * (1/peak_iii - 1/peak_ii): linear in T, zero only at zero
     load. This is why both comparisons exist rather than one superseding the
     other -- no amount of extra tiers closes it."""
-    baseline, cluster = _low_tier_pair(tmp_path)
-    matched = engine_comparison.matched_throughput(baseline, cluster, "update")
+    crdb, pg = _low_tier_pair(tmp_path)
+    matched = engine_comparison.matched_throughput(crdb, pg, "update")
     gaps = [p["utilisation_gap"] for p in matched["points"] if p["utilisation_gap"]]
     assert gaps and min(gaps) > 0.0
     # Narrowest at the bottom of the overlap, widening with throughput.
@@ -963,39 +840,36 @@ def test_a_single_worker_tier_is_unqueued_structurally_not_statistically(tmp_pat
     """One worker means one operation outstanding, so there is nothing to wait
     behind. Gating this on a Little's-law threshold denied a structurally
     impossible queue on a 5.1% blend artefact."""
-    baseline, cluster = _low_tier_pair(tmp_path)
-    out = engine_comparison.lightest_load_write_latency(baseline, cluster)
-    assert out["phase_ii"]["concurrency"] == 1
-    assert out["phase_iii"]["concurrency"] == 1
+    crdb, pg = _low_tier_pair(tmp_path)
+    out = engine_comparison.lightest_load_write_latency(crdb, pg)
+    assert out["crdb"]["concurrency"] == 1
+    assert out["pg"]["concurrency"] == 1
     assert out["both_unqueued"] is True
     assert "neither median contains queueing" in out["caveat"]
 
 
 def test_a_phase_that_never_reached_one_worker_is_not_called_unqueued(tmp_path):
-    baseline, cluster = _pair(tmp_path)
-    out = engine_comparison.lightest_load_write_latency(baseline, cluster)
+    crdb, pg = _pair(tmp_path)
+    out = engine_comparison.lightest_load_write_latency(crdb, pg)
     assert out["both_unqueued"] is False
     assert "at least one side is queueing" in out["caveat"]
 
 
 def test_a_hardware_difference_can_be_accepted_explicitly_and_is_recorded(tmp_path):
-    """This study's two phases are permanently on different CPU models, which is
-    a stated limitation rather than a fixable defect. Refusing outright would
-    make its own headline result uncomputable; passing silently would hide the
-    limitation. The override is explicit and leaves a warning behind."""
-    baseline, cluster = _pair(tmp_path)
-    baseline.manifest["notes"] = baseline.manifest.get("notes", []) + [
+    """A hardware difference can be accepted explicitly, and is then recorded as a warning."""
+    crdb, pg = _pair(tmp_path)
+    crdb.manifest["notes"] = crdb.manifest.get("notes", []) + [
         "2026-09-03T00:00:00Z host: cpus=2 mem_total_kb=4007012 cpu_model=Intel(R) Xeon(R) CPU @ 2.80GHz"
     ]
-    other = json.loads(json.dumps(cluster.manifest))
+    other = json.loads(json.dumps(pg.manifest))
     other["notes"] = other.get("notes", []) + [
         "2026-09-03T00:00:00Z host: cpus=2 mem_total_kb=4005704 cpu_model=AMD EPYC 7713 64-Core Processor"
     ]
-    refused = validate_comparison(baseline.manifest, other, "p2", "p3")
+    refused = validate_comparison(crdb.manifest, other, "crdb", "pg")
     assert refused.ok is False
 
     accepted = validate_comparison(
-        baseline.manifest, other, "p2", "p3", accept_hardware_difference=True
+        crdb.manifest, other, "crdb", "pg", accept_hardware_difference=True
     )
     assert accepted.ok is True
     warning = next(f for f in accepted.findings if "different" in f.message)
@@ -1007,11 +881,11 @@ def test_a_hardware_difference_can_be_accepted_explicitly_and_is_recorded(tmp_pa
 
 def test_accepting_hardware_does_not_excuse_a_workload_difference(tmp_path):
     """The override is scoped to hardware. A seed mismatch still refuses."""
-    baseline, cluster = _pair(tmp_path)
-    other = json.loads(json.dumps(cluster.manifest))
+    crdb, pg = _pair(tmp_path)
+    other = json.loads(json.dumps(pg.manifest))
     other["profile"]["workload"]["seed"] = 1
     report = validate_comparison(
-        baseline.manifest, other, "p2", "p3", accept_hardware_difference=True
+        crdb.manifest, other, "crdb", "pg", accept_hardware_difference=True
     )
     assert report.ok is False
     assert any("seed" in f.message for f in report.findings)
@@ -1021,88 +895,75 @@ def test_the_unqueued_ratio_is_computed_before_rounding(tmp_path):
     """Rounding an input, dividing, then rounding again carries the first
     rounding's error into the result. It produced two figures for one quantity
     (50.37x against 50.38x), which a dissertation then has to reconcile."""
-    baseline, cluster = _low_tier_pair(tmp_path)
-    out = engine_comparison.lightest_load_write_latency(baseline, cluster)
-    exact = out["phase_iii"]["_p50_exact"] / out["phase_ii"]["_p50_exact"]
+    crdb, pg = _low_tier_pair(tmp_path)
+    out = engine_comparison.lightest_load_write_latency(crdb, pg)
+    exact = out["pg"]["_p50_exact"] / out["crdb"]["_p50_exact"]
     assert out["ratio_x"] == round(exact, 2)
     # ...and specifically not the ratio of the displayed values.
-    from_display = round(out["phase_iii"]["p50_ms"] / out["phase_ii"]["p50_ms"], 2)
+    from_display = round(out["pg"]["p50_ms"] / out["crdb"]["p50_ms"], 2)
     assert out["ratio_x"] == round(exact, 2) and abs(exact - from_display) < 1.0
 
 
 def test_the_same_concurrency_throughput_ratio_is_computed_before_rounding(tmp_path):
-    """The same defect as ``ratio_x``, twelve lines further down the module.
-
-    ``phase_ii_tps`` and ``phase_iii_tps`` are rounded to 1 dp for display.
-    Dividing the displayed forms rather than the measured ones reported 25.26x
-    at C=1 for a quantity whose value is 25.25x, in a table the dissertation
-    quotes.
-    """
-    baseline = load_run(
+    """The same-concurrency throughput ratio is computed from unrounded values."""
+    crdb = load_run(
         _write_run(
             tmp_path,
-            "p2_ratio",
+            "crdb_ratio",
             _rows([(1, 1365.813, 0.4, 341.453, 1.416),
                    (10, 2840.465, 2.0, 710.116, 5.093)]),
-            phase="p2_baseline",
+            phase="bench_cluster",
         )
     )
-    cluster = load_run(
+    pg = load_run(
         _write_run(
             tmp_path,
-            "p3_ratio",
+            "pg_ratio",
             _rows([(1, 54.087, 0.7, 13.522, 71.325),
                    (10, 507.062, 1.1, 126.766, 72.013)]),
-            phase="p3_cluster",
+            phase="bench_cluster",
         )
     )
     row = next(
         r
-        for r in engine_comparison.same_concurrency_delta(baseline, cluster)["rows"]
+        for r in engine_comparison.same_concurrency_delta(crdb, pg)["rows"]
         if r["concurrency"] == 1
     )
-    a = steady_state.per_tier(baseline).set_index("concurrency")
-    b = steady_state.per_tier(cluster).set_index("concurrency")
+    a = steady_state.per_tier(crdb).set_index("concurrency")
+    b = steady_state.per_tier(pg).set_index("concurrency")
     exact = float(a.loc[1, "mean_total_tps"]) / float(b.loc[1, "mean_total_tps"])
     assert row["throughput_ratio_x"] == round(exact, 2)
     # ...and specifically not the ratio of the displayed values, which differs
     # here in the second decimal.
-    from_display = round(row["phase_ii_tps"] / row["phase_iii_tps"], 2)
+    from_display = round(row["crdb_tps"] / row["pg_tps"], 2)
     assert from_display != row["throughput_ratio_x"]
 
 
 def test_a_matched_utilisation_level_is_not_rounded_before_it_is_used(tmp_path):
-    """Rounding a level and multiplying it back by the peak moves the point.
-
-    A level is a *measured* tier's share of its phase's peak. Round it to 3 dp
-    and multiply back and the throughput it names is no longer the throughput
-    that was measured, so the latency reported against it is interpolated from
-    neighbouring tiers instead of read off the tier itself -- and a level that
-    rounds below the lower bound is dropped from the table entirely.
-    """
-    baseline = load_run(
+    """Rounding a level and multiplying it back by the peak moves the point."""
+    crdb = load_run(
         _write_run(
             tmp_path,
-            "p2_util",
+            "crdb_util",
             _rows([(1, 1365.813, 0.4, 341.453, 1.416),
                    (2, 2403.626, 0.5, 600.906, 1.485),
                    (50, 2850.668, 6.0, 712.667, 19.606)]),
-            phase="p2_baseline",
+            phase="bench_cluster",
         )
     )
-    cluster = load_run(
+    pg = load_run(
         _write_run(
             tmp_path,
-            "p3_util",
+            "pg_util",
             _rows([(1, 54.087, 0.7, 13.522, 71.325),
                    (2, 107.167, 0.74, 26.792, 71.351),
                    (50, 1479.638, 3.0, 369.910, 105.472)]),
-            phase="p3_cluster",
+            phase="bench_cluster",
         )
     )
-    out = engine_comparison.matched_utilisation(baseline, cluster)
-    tiers = steady_state.per_tier(baseline).set_index("concurrency")
-    lat = steady_state.latency_by_op(baseline)
+    out = engine_comparison.matched_utilisation(crdb, pg)
+    tiers = steady_state.per_tier(crdb).set_index("concurrency")
+    lat = steady_state.latency_by_op(crdb)
     lat = lat[lat["op"] == "update"].set_index("concurrency")
     peak = float(tiers["mean_total_tps"].max())
 
@@ -1111,8 +972,8 @@ def test_a_matched_utilisation_level_is_not_rounded_before_it_is_used(tmp_path):
         level = round(tps / peak, 3)
         point = next(p for p in out["points"] if p["utilisation"] == level)
         # The point sits on the tier it came from, not near it.
-        assert point["phase_ii_tps"] == round(tps, 1)
-        assert point["phase_ii_latency_ms"] == round(
+        assert point["crdb_tps"] == round(tps, 1)
+        assert point["crdb_latency_ms"] == round(
             float(lat.loc[concurrency, "p50_ms"]), 3
         )
     # The lowest level is the bottom of the comparable range, not a casualty of
@@ -1120,13 +981,8 @@ def test_a_matched_utilisation_level_is_not_rounded_before_it_is_used(tmp_path):
     assert min(p["utilisation"] for p in out["points"]) == out["utilisation_range"][0]
 
 
-# --------------------------------------------------------------------------
-# write_latency_recovery: a second, independent recovery axis from
-# performance(). This workload is 80% reads served locally, so aggregate
-# throughput can fully recover after a fault that permanently changes the
-# write path's floor -- the point raised about the Azure round-trip. These pin
-# that the write operation's own latency is judged on its own terms.
-# --------------------------------------------------------------------------
+# --- write_latency_recovery ---
+# Throughput can recover while the write path stays permanently slower.
 
 
 def test_write_latency_that_returns_to_baseline_is_reported_as_such(tmp_path):
@@ -1179,9 +1035,7 @@ def test_write_latency_still_changing_is_reported_as_unsettled(tmp_path):
     rows = _rows([(10, 800, 1.0, 200, 40.0)], ticks=40, wall_offset=0.0)
     for row in rows:
         if row["op"] == "update" and row["elapsed_s"] > 10:
-            # Alternates far above and below baseline for the rest of the run --
-            # never settles, unlike a monotonic ramp, whose CV a short window can
-            # understate even while it is still trending.
+            # Alternates far above and below baseline: never settles.
             row["p50_ms"] = 400.0 if int(row["elapsed_s"]) % 2 == 0 else 40.0
     events = dict(_EVENTS, t_end_utc="2026-09-02T00:00:45.000000Z")
     run = load_run(
@@ -1196,22 +1050,14 @@ def test_write_latency_still_changing_is_reported_as_unsettled(tmp_path):
 def test_write_latency_recovery_reports_unavailable_without_a_fault(tmp_path):
     rows = _rows([(10, 800, 1.0, 200, 40.0)], ticks=12, wall_offset=0.0)
     run = load_run(
-        _write_run(tmp_path, "bench_no_fault", rows, phase="p3_cluster", events=None)
+        _write_run(tmp_path, "bench_no_fault", rows, phase="bench_cluster", events=None)
     )
     result = resilience.write_latency_recovery(run, resilience.align(run))
     assert result["available"] is False
 
 
-# --------------------------------------------------------------------------
-# quorum_geometry's leaseholder-displaced case. Every chaos profile in this
-# project targets the gateway itself, which is also the leaseholder -- the
-# ordinary "leader survives, loses one follower" code path this function
-# started with never actually runs here. The original implementation removed
-# the target's entry from the GATEWAY'S OWN RTT row to compute the post-fault
-# floor; when the target *is* the gateway, that row has no such entry to
-# remove (a node has no RTT to itself in the matrix), so the removal was
-# always a no-op and `after` silently equalled `before` on every real run.
-# --------------------------------------------------------------------------
+# --- quorum_geometry when the leaseholder is the target ---
+# The gateway is the target, so survivors must be evaluated as candidate leaders.
 
 _FIVE_NODES = Topology(
     nodes=(
@@ -1230,10 +1076,7 @@ _FIVE_NODES = Topology(
 
 
 def _write_network_csv(tmp_path: Path, rtts: dict) -> Path:
-    """A minimal, valid network.csv: symmetric RTTs, one row per direction.
-
-    ``rtts`` maps a frozenset({host_a, host_b}) to a mean RTT in ms.
-    """
+    """A minimal, valid network.csv: symmetric RTTs, one row per direction."""
     rows = []
     for pair, ms in rtts.items():
         a, b = tuple(pair)
@@ -1262,9 +1105,8 @@ def _write_network_csv(tmp_path: Path, rtts: dict) -> Path:
     return path
 
 
-# RTTs modelled on the live testbed's own matrix: gcp-1/linode-1/linode-2 form
-# a fast triangle under 70ms, the two Azure nodes sit at 150-230ms from
-# everything, matching the geometry that produced the 2026-09-08 bug report.
+# Modelled on the testbed: a fast triangle (gcp-1, linode-1, linode-2) under 70 ms,
+# the two Azure nodes 150-230 ms from everything.
 _TESTBED_RTTS = {
     frozenset({"crdb-gcp-1", "crdb-linode-1"}): 24.9,
     frozenset({"crdb-gcp-1", "crdb-linode-2"}): 69.7,
@@ -1279,7 +1121,7 @@ _TESTBED_RTTS = {
 }
 
 
-def test_a_fault_on_a_follower_uses_the_original_still_correct_path(tmp_path):
+def test_a_fault_on_a_follower_removes_it_from_the_leaders_row(tmp_path):
     """azure-1 dying while gcp-1 stays leaseholder: remove one entry from the
     gateway's own row. This is the case the function was first written for."""
     network_csv = _write_network_csv(tmp_path, _TESTBED_RTTS)
@@ -1301,10 +1143,9 @@ def test_a_fault_on_a_follower_uses_the_original_still_correct_path(tmp_path):
 
 
 def test_a_fault_on_the_leaseholder_is_reported_as_a_range_not_a_false_point(tmp_path):
-    """The bug this pins: gcp-1 IS the gateway for every real chaos profile, so
-    there is no "gateway's row minus one entry" to compute -- the leaseholder
-    itself is gone and a survivor takes over. The old code silently returned
-    before == after here on every run."""
+    """With the leaseholder as target, every survivor is a candidate leader and a range is
+    reported.
+    """
     network_csv = _write_network_csv(tmp_path, _TESTBED_RTTS)
     events = dict(_EVENTS, target="gcp-1")
     run = load_run(
@@ -1330,17 +1171,7 @@ def test_a_fault_on_the_leaseholder_is_reported_as_a_range_not_a_false_point(tmp
 
 
 def test_the_consequence_text_is_engine_aware_about_the_read_path(tmp_path):
-    """The claim "the read share is unaffected" is true for CockroachDB and
-    false for PostgreSQL, and it was stated engine-blind.
-
-    On the PostgreSQL arm the generator reaches the cluster through HAProxy,
-    which follows the primary, so a promotion into another region moves every
-    operation and not just the write path. Measured on
-    20260909T040914Z_p4-chaos-recover after Patroni promoted azure-2
-    (eastasia): read p50 0.92 ms -> 209.7 ms, against a write-floor change of
-    2.1x. Quoting the CockroachDB sentence there explains a 228x effect with a
-    2.1x cause -- and it is quoted directly under a resilience figure.
-    """
+    """Reads are unaffected on CockroachDB but follow the primary on PostgreSQL."""
     network_csv = _write_network_csv(tmp_path, _TESTBED_RTTS)
     events = dict(_EVENTS, target="gcp-1")
 
@@ -1372,9 +1203,7 @@ def test_the_consequence_text_is_engine_aware_about_the_read_path(tmp_path):
     assert "unaffected by which candidate takes the lease" in crdb["consequence"]
     assert "leaseholder" in crdb["detail"]
 
-    # The geometry itself is engine-neutral and must NOT have moved: leader
-    # plus the two fastest surviving acks is 3-of-5 Raft quorum and Patroni's
-    # `ANY 2 (...)` alike.
+    # The geometry is engine-neutral: 3-of-5 Raft and Patroni's `ANY 2` alike.
     assert pg["surviving_quorum_floor_range_ms"] == crdb["surviving_quorum_floor_range_ms"]
     assert pg["candidate_floors_ms"] == crdb["candidate_floors_ms"]
 

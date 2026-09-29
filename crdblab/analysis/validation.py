@@ -1,16 +1,8 @@
-"""Post-run validation.
+"""Post-run validation: is a recorded run internally consistent?
 
-Each check below corresponds to an observable symptom of a defect that actually
-occurred in this project. Running them automatically after every run converts a
-class of silent corruption into a loud, immediate failure, which is the
-methodological point: the legacy exports were not wrong because the bugs were
-subtle, but because nothing ever asserted that the numbers were internally
-consistent.
-
-The checks are deliberately cheap and assumption-light. In particular, the
-Little's law check requires no knowledge of the workload beyond the offered
-concurrency, and would alone have flagged the operation-type defect in every
-tier of both Phase II and Phase III.
+Each check targets an observable symptom of a real parsing or measurement bug.
+The cross-run checks assert that two runs being compared differ only in the
+variable under study. ``validate_probe`` checks an RTO probe log.
 """
 
 from __future__ import annotations
@@ -20,9 +12,7 @@ from typing import Any
 
 import pandas as pd
 
-#: Any observation above this is treated as a cumulative total leaking into the
-#: per-interval stream rather than a genuine sample. Set well above the
-#: hardware's plausible ceiling so it flags artefacts, not fast runs.
+#: A sample above this is a cumulative total leaking into the per-interval stream.
 DEFAULT_TPS_CEILING = 20_000.0
 
 
@@ -62,7 +52,7 @@ def _ticks(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def check_plausibility(df: pd.DataFrame, ceiling: float = DEFAULT_TPS_CEILING) -> list[Finding]:
-    """Defect 3: cumulative summary rows admitted as per-interval samples."""
+    """Cumulative summary rows admitted as per-interval samples."""
     bad = df[df["tps"] > ceiling]
     if bad.empty:
         return []
@@ -78,11 +68,7 @@ def check_plausibility(df: pd.DataFrame, ceiling: float = DEFAULT_TPS_CEILING) -
 
 
 def check_quantile_ordering(df: pd.DataFrame) -> list[Finding]:
-    """Defect 2: latency columns bound to the wrong header positions.
-
-    A positional shift does not always break ordering, but when it does the
-    violation is unambiguous, so this is a cheap first line of defence.
-    """
+    """Latency columns bound to the wrong header positions break p50 <= p95 <= p99 <= pMax."""
     cols = ["p50_ms", "p95_ms", "p99_ms", "pmax_ms"]
     present = [c for c in cols if c in df.columns]
     violations = pd.Series(False, index=df.index)
@@ -103,42 +89,12 @@ def check_quantile_ordering(df: pd.DataFrame) -> list[Finding]:
 
 
 def check_littles_law(df: pd.DataFrame, tolerance: float = 0.9) -> list[Finding]:
-    """Defect 2: latency recorded larger than the throughput can support.
+    """Little's law: implied mean latency ``N / X`` must not fall below the median.
 
-    For a closed workload of ``N`` workers each holding at most one outstanding
-    request, Little's law gives ``N = X * R``, so the implied mean residence time
-    is ``N / X``. Workers that idle between operations make ``N / X`` an
-    *over*-estimate of the true mean, so it is a legitimate upper bound.
-
-    The lower bound it is compared against must be the **frequency-weighted**
-    mean of the per-operation medians, ``sum(share_o * p50_o)``, not the largest
-    of them. ``N / X`` is the mean residence time across every operation the
-    workers performed, and in a mixed workload the cheap operations dominate that
-    average: at 80% reads of 0.85 ms and 20% updates of 71.3 ms the blend is
-    15.1 ms, while the slowest component alone is 71.3 ms.
-
-    Comparing against the maximum was this check's original formulation and it is
-    wrong. It survived because the data it was written against had only a 2.7x
-    spread between operation types; once the leaseholder was placed locally the
-    spread became 84x (reads served from the local replica, updates paying
-    cross-region quorum) and the check failed every tier of an entirely sound
-    run. A validation check that rejects correct data is not conservative, it is
-    broken, and it would have blocked the whole of Stage 6.
-
-    Detection power is retained: since mean latency is at least the median for
-    these right-skewed distributions, an implied mean below the weighted median
-    is not physically realisable. Binding p95 to the p50 column (D2) inflates the
-    weighted figure and still trips the check.
-
-    Note the *direction* this check is sensitive in, which the original message
-    stated backwards. It fires when ``N / X`` is too small, i.e. when throughput
-    is over-counted (a cumulative total admitted as an interval sample, D3) or
-    latency is recorded too large (D2). Throughput that is *under*-counted, as
-    averaging the per-operation rates produced in D1, makes ``N / X`` larger and
-    moves the run away from this condition -- which is exactly the history:
-    correcting D1 doubled ``X``, halved the implied mean, and only then did the
-    mis-bound latency of D2 push it below the median and become visible. D1 is
-    caught structurally by the parser, not here.
+    For a closed workload of ``N`` workers, ``N / X`` is an upper bound on mean
+    latency. It is compared with the throughput-weighted mean of per-op medians
+    (not the slowest op, which would reject sound mixed workloads). It fires when
+    throughput is over-counted or latency is bound to the wrong column.
     """
     findings: list[Finding] = []
     work = df[df["tps"] > 0].copy()
@@ -186,13 +142,7 @@ def check_littles_law(df: pd.DataFrame, tolerance: float = 0.9) -> list[Finding]
 
 
 def check_sample_cadence(df: pd.DataFrame, expected_interval_s: float = 1.0) -> list[Finding]:
-    """Detects doubled or dropped ticks.
-
-    The legacy chaos runner incremented its elapsed counter once per *line*
-    rather than once per interval; because two operation types were reported
-    per interval, its clock advanced at roughly twice wall-clock and injected
-    the fault at 34 s rather than the intended 60 s.
-    """
+    """Detect doubled or dropped ticks (irregular gaps between intervals)."""
     findings: list[Finding] = []
     for (concurrency, rep), group in df.groupby(["concurrency", "repetition"]):
         ticks = sorted(group["elapsed_s"].unique())
@@ -248,49 +198,20 @@ def check_error_monotonicity(df: pd.DataFrame) -> list[Finding]:
     return findings
 
 
-# --- cross-run checks ------------------------------------------------------
-#
-# Every check above interrogates one run against itself. Defect D9 is the reason
-# that is not enough: the Phase II baseline and the Phase III cluster were
-# started with block caches differing by a factor of about fifteen against a
-# 205 MB working set, so the baseline served the whole dataset from cache and
-# the cluster could not. Both runs were individually correct and passed every
-# check in this module; the error lay only in the inference drawn from their
-# difference, which no property of a single run can expose. Correcting it moved
-# the apparent write-latency overhead from 18.3x to 12.8x, a 43% revision.
-#
-# The checks below therefore take two runs and assert that the difference
-# between them is the one the comparison claims to measure.
+# Cross-run checks: two individually valid runs can still be an invalid comparison
+# (e.g. different cache sizes), so these assert they differ only in what is studied.
 
-#: Server flags that must match between two runs being compared. Cache size is
-#: here because it caused D9; the SQL memory pool because it is set alongside it
-#: and has the same character.
+#: Server flags that must match between two same-engine runs.
 _MATCHED_SERVER_FLAGS: tuple[str, ...] = ("--cache", "--max-sql-memory")
 
-#: Relative difference in total memory tolerated between two runs being
-#: compared. Below this the implied block-cache difference is immaterial against
-#: this project's 179 MiB working set; above it, ``--cache`` being a fraction
-#: means the two servers cached materially different amounts on identical flags.
+#: Tolerated relative difference in total memory (providers round differently).
 MEMORY_TOLERANCE = 0.05
 
-#: Relative difference tolerated between CockroachDB's *implied* cache size
-#: (--cache fraction * measured mem_total_kb) and PostgreSQL's actual
-#: shared_buffers, when comparing across engines. Deliberately a separate
-#: constant from MEMORY_TOLERANCE even though both currently hold 0.05: that
-#: one bounds provider rounding noise in a single raw MemTotal reading; this
-#: one bounds whether two engines' independently-computed cache budgets
-#: actually hit the shared design target (bootstrap-patroni.tftpl derives
-#: shared_buffers as a quarter of MemTotal, matching --cache=0.25) -- a
-#: conceptually different question that may need its own tuning later. 5%
-#: comfortably covers the ~0.03% quantization from shared_buffers being
-#: stored in whole MB while the CockroachDB fraction is not.
+#: Tolerated relative difference between CockroachDB's implied cache (``--cache``
+#: x RAM) and PostgreSQL's ``shared_buffers``; both target 25% of RAM.
 CACHE_EQUIVALENCE_TOLERANCE = 0.05
 
-#: Workload parameters that must match. A difference in any of these means the
-#: two runs did different work, so their difference is not replication cost.
-#: ``seed`` and ``insert_count`` are included because a mismatch against the
-#: loaded table makes every operation match zero rows and return in ~3 ms (D8),
-#: which reads as a spectacular result rather than a broken one.
+#: Workload parameters that must match, or the runs did different work.
 _MATCHED_WORKLOAD_KEYS: tuple[str, ...] = (
     "generator",
     "ycsb_workload",
@@ -305,12 +226,7 @@ _MATCHED_WORKLOAD_KEYS: tuple[str, ...] = (
 
 
 def server_flags(command: str | None) -> dict[str, str]:
-    """Flags from a recorded ``cockroach start`` command line.
-
-    Parsed from the raw argument list rather than from a curated subset, because
-    the recorded artefact deliberately keeps the whole command: the next confound
-    of this class will involve a flag not anticipated here.
-    """
+    """``--flag=value`` pairs from a recorded server command line."""
     if not command:
         return {}
     flags: dict[str, str] = {}
@@ -330,13 +246,7 @@ def _server_command(manifest: dict[str, Any]) -> str | None:
 
 
 def host_hardware(manifest: dict[str, Any]) -> dict[str, Any] | None:
-    """The ``host:`` note as a dict, or ``None`` for a run recorded before it.
-
-    Runs measured before 2026-09-03 carry no such note. They are reported as
-    unrecorded rather than as some assumed machine, because the whole reason this
-    was added is that an unrecorded machine had been silently assumed constant
-    across a redeployment that changed it.
-    """
+    """The manifest's ``host:`` note as a dict, or ``None`` if unrecorded."""
     for note in manifest.get("notes", []) or []:
         if " host: " in note:
             fields = dict(
@@ -356,11 +266,7 @@ def host_hardware(manifest: dict[str, Any]) -> dict[str, Any] | None:
 def pg_cache_config(manifest: dict[str, Any]) -> dict[str, int | None] | None:
     """The ``pg memory:`` note as a dict, or ``None`` for a run without one.
 
-    Absent for a CockroachDB run (nothing to probe), a legacy PostgreSQL run
-    recorded before this note existed, or a PostgreSQL run whose probe
-    failed -- all three are reported identically as "not recorded" by the
-    caller, since none of them can support a cross-engine cache-budget
-    comparison.
+    Absent for CockroachDB runs, and for PostgreSQL runs whose probe failed.
     """
     for note in manifest.get("notes", []) or []:
         if " pg memory: " in note:
@@ -386,12 +292,8 @@ def check_run_comparability(
 ) -> list[Finding]:
     """Assert that two runs differ only in the variable under study.
 
-    Takes manifests, not measurement tables: the asymmetry that produced D9 was
-    invisible in the data and visible only in how the servers had been started,
-    which is why ``preflight.capture_server_config`` writes that into every
-    manifest. A comparison drawn across runs whose configurations were never
-    checked against each other is exactly the artefact this project exists to
-    stop producing.
+    Compares manifests: workload parameters, server flags (or, across
+    engines, cache budgets), host hardware and server version.
     """
     findings: list[Finding] = []
 
@@ -414,12 +316,7 @@ def check_run_comparability(
             )
         )
 
-    # `server_version` for runs recorded after it existed; `cockroach_version`
-    # for every run before that, where it was the only place a version was
-    # written. Reading both means an old CockroachDB run stays comparable with
-    # a new one. Computed here (rather than just before its own check below)
-    # because the server-flags check right below also needs to know whether
-    # the two runs are the same engine.
+    # Older runs recorded the version only as `cockroach_version`.
     va = a.get("server_version") or a.get("cockroach_version")
     vb = b.get("server_version") or b.get("cockroach_version")
     ea = a.get("engine") or "cockroachdb"
@@ -433,8 +330,7 @@ def check_run_comparability(
                 "warning",
                 f"server configuration is unrecorded for "
                 f"{label_a if cmd_a is None else label_b}, so the two runs cannot be "
-                "shown to have been configured alike; this is the condition under "
-                "which D9 went unnoticed",
+                "shown to have been configured alike",
                 {},
             )
         )
@@ -457,22 +353,13 @@ def check_run_comparability(
                         for flag, (v0, v1) in mismatched.items()
                     )
                     + "; the difference between them therefore confounds the "
-                    "variable under study with cache residency (D9)",
+                    "variable under study with cache residency",
                     {"mismatched_server_flags": {k: list(v) for k, v in mismatched.items()}},
                 )
             )
     else:
-        # Cross engine: comparing _MATCHED_SERVER_FLAGS literally is meaningless
-        # here, since PostgreSQL's postmaster argv has neither flag by
-        # construction -- that used to make this refuse *every* cross-engine
-        # pair with "different --cache (0.25 vs unset)". Only --cache has a
-        # documented PostgreSQL counterpart: bootstrap-patroni.tftpl derives
-        # shared_buffers as the same fraction of measured RAM (0.25) that
-        # --cache is, so the two are meant to name the same absolute cache
-        # size on like hardware. --max-sql-memory has no counterpart at all
-        # (PostgreSQL's work_mem is per-query, not a global pool, and this
-        # workload's point lookups draw on neither budget) and is deliberately
-        # never compared cross-engine.
+        # Across engines the flags differ by construction; compare CockroachDB's
+        # implied cache with PostgreSQL's shared_buffers instead.
         if {ea, eb} == {"cockroachdb", "postgresql"}:
             crdb_a = ea == "cockroachdb"
             crdb_manifest, crdb_label, crdb_cmd = (
@@ -504,7 +391,7 @@ def check_run_comparability(
                             f"differ by {rel_diff:.1%}, more than the "
                             f"{CACHE_EQUIVALENCE_TOLERANCE:.0%} tolerance; the "
                             "difference between them therefore confounds the "
-                            "variable under study with cache residency (D9)",
+                            "variable under study with cache residency",
                             {
                                 "crdb_implied_cache_kb": round(crdb_cache_kb, 1),
                                 "pg_shared_buffers_kb": pg_cache_kb,
@@ -520,8 +407,7 @@ def check_run_comparability(
                         f"PostgreSQL's cache budget was not recorded for {pg_label} "
                         f"(or CockroachDB's --cache/mem_total_kb could not be read "
                         f"for {crdb_label}), so cross-engine cache-budget "
-                        "equivalence could not be verified; this is the condition "
-                        "under which D9 went unnoticed",
+                        "equivalence could not be verified",
                         {
                             "crdb_implied_cache_kb": crdb_cache_kb,
                             "pg_shared_buffers_kb": pg_cache_kb,
@@ -537,26 +423,13 @@ def check_run_comparability(
                 "warning",
                 f"host hardware is unrecorded for "
                 f"{label_a if ha is None else label_b}, so the two runs cannot be "
-                "shown to have run on comparable machines; this is the condition "
-                "under which the unexplained 22% Phase II baseline shift of "
-                "2026-09-02 became undiagnosable after the fact",
+                "shown to have run on comparable machines",
                 {},
             )
         )
     else:
-        # CPU count and model are compared exactly; total memory within a
-        # tolerance. Memory is compared at all -- despite --cache and
-        # --max-sql-memory already being compared -- because those flags are
-        # *fractions* of it, so identical flags on unlike machines give unlike
-        # absolute caches: D9 in a form the flag comparison cannot see.
-        #
-        # The tolerance exists because providers report memory that differs by
-        # rounding: the two machines in this topology read 4,005,712 kB and
-        # 4,007,012 kB, a 0.03% difference that changes the block cache by
-        # ~325 kB against a 179 MiB working set. Erroring on that would make the
-        # check fire on every legitimate Phase II/III comparison, and a check
-        # that rejects correct data gets disabled -- the same failure that made
-        # check_littles_law reject sound runs until it was corrected.
+        # CPU count and model must match exactly; memory within MEMORY_TOLERANCE,
+        # since cache flags are fractions of it.
         differing_hw = {
             key: (ha.get(key), hb.get(key))
             for key in ("cpus", "cpu_model")
@@ -568,20 +441,7 @@ def check_run_comparability(
         elif (ma is None) != (mb is None):
             differing_hw["mem_total_kb"] = (ma, mb)
         if differing_hw:
-            # Downgraded to a warning only when the caller has said so
-            # explicitly, and the acknowledgement is recorded in the finding
-            # rather than making the difference disappear.
-            #
-            # This override existed because the two phases *were* permanently on
-            # different CPU models -- the baseline an Intel Xeon, the gateway an
-            # AMD EPYC (D11a) -- so a hard block would have made the project's own
-            # headline result uncomputable. That is no longer the case: the
-            # gateway moved to crdb-gcp-1, the same GCP machine type as the
-            # baseline, and `run-experiment.sh` deliberately stopped passing the
-            # flag so that the claim gets tested on every sweep. It is retained
-            # for re-analysing runs measured before the move, which genuinely do
-            # differ. Defaulting to an error keeps anyone from stumbling into an
-            # unlike comparison without having decided to.
+            # Only an explicit caller override downgrades this to a warning.
             detail = ", ".join(
                 f"{k}: {v0!r} vs {v1!r}" for k, (v0, v1) in differing_hw.items()
             )
@@ -617,15 +477,8 @@ def check_run_comparability(
                     )
                 )
 
-    # va/vb/ea/eb were computed earlier, before the server-flags check above.
     if ea != eb:
-        # Two engines have different version strings by definition -- that is
-        # the variable under study, not a confound -- and treating it as an
-        # error made `analyze engine-comparison` refuse *every* CockroachDB vs
-        # PostgreSQL comparison it was written to produce: "ran against
-        # different server versions (v26.3.0 vs None)". The versions are still
-        # reported, because which build of each engine was measured is part of
-        # the claim; they are simply not grounds for refusal here.
+        # Different engines have different versions by definition; report only.
         findings.append(
             Finding(
                 "run_comparability",
@@ -664,23 +517,12 @@ def validate_comparison(
     return report
 
 
-#: Outcomes the RTO probe is allowed to record. Kept as a literal here rather
-#: than imported from the recorder so that validation of a *recorded* file does
-#: not silently follow a change to the writer: if the two ever disagree, the file
-#: on disk is what a figure was drawn from and the disagreement should be loud.
+#: Valid probe outcomes, kept literal so a writer change cannot silently pass.
 PROBE_OUTCOMES = ("ok", "timeout", "conn_error", "refused")
 
 
 def check_probe_ordering(df: pd.DataFrame) -> list[Finding]:
-    """A write cannot return before it was sent, nor a row precede its own epoch.
-
-    Both are conservation statements about the probe's two clocks rather than
-    thresholds, which is the kind of check this project trusts. They catch the
-    realistic failure: an attempt recorded against the wrong worker's dispatch
-    timestamp, or offsets written against a second epoch. Either would move an
-    outage edge without making any value look implausible, and the whole claim of
-    the probe is the position of those edges.
-    """
+    """A write cannot complete before dispatch, nor be dispatched before the epoch."""
     findings: list[Finding] = []
     backwards = df[df["complete_offset_s"] < df["dispatch_offset_s"] - 1e-9]
     if not backwards.empty:
@@ -708,17 +550,9 @@ def check_probe_ordering(df: pd.DataFrame) -> list[Finding]:
 
 
 def check_probe_outcomes(df: pd.DataFrame) -> list[Finding]:
-    """Every attempt is classified, and a classification the reader knows.
+    """Every outcome must be known, and at least one write served.
 
-    An unrecognised outcome is an error rather than a curiosity: downtime is
-    computed by partitioning attempts into served and not-served, so a value that
-    falls through that partition would be counted as an outage without anyone
-    having decided that it was one.
-
-    A ``refused`` write is reported as a *warning* and named separately. It means
-    a reachable database rejected the statement -- a duplicate key, a missing
-    table -- which is a fault in the probe rather than an outage, and it would
-    otherwise be indistinguishable from downtime in the served/not-served split.
+    ``refused`` writes are a probe defect, not downtime, so they are warned about.
     """
     findings: list[Finding] = []
     seen = set(df["outcome"].dropna().unique())
@@ -760,14 +594,9 @@ def check_probe_outcomes(df: pd.DataFrame) -> list[Finding]:
 
 
 def check_probe_sequence(df: pd.DataFrame) -> list[Finding]:
-    """No sequence number is used twice.
+    """No sequence number is used twice (a retry would double-count an observation).
 
-    Gaps are expected and are not checked: the dispatcher hands out a number per
-    tick and a run that ends with jobs still queued consumes numbers that are
-    never attempted. A *repeat*, though, means an attempt was retried under its
-    own id -- the livelock the RPO audit writer was rewritten to avoid -- and it
-    would make one observation appear as several at the exact moment the series
-    matters most.
+    Gaps are expected: numbers queued at the end of a run are never attempted.
     """
     duplicated = int(df["seq_id"].duplicated().sum())
     if not duplicated:
@@ -785,15 +614,7 @@ def check_probe_sequence(df: pd.DataFrame) -> list[Finding]:
 
 
 def validate_probe(df: pd.DataFrame) -> ValidationReport:
-    """Consistency checks for an ``rto_probe.csv``.
-
-    Deliberately separate from :func:`validate`, which is defined over the
-    workload schema and would have nothing to say here -- there is no
-    concurrency, no operation type and no throughput in a probe log, so Little's
-    law and the quantile ordering do not apply to it. Sharing one function would
-    have meant either weakening those checks or writing mostly-null rows, which
-    is the same reasoning that keeps ``NETWORK_COLUMNS`` a separate schema.
-    """
+    """Consistency checks for an ``rto_probe.csv`` (separate schema from metrics)."""
     report = ValidationReport()
     required = {"seq_id", "dispatch_offset_s", "complete_offset_s", "outcome"}
     missing = sorted(required - set(df.columns))
@@ -823,6 +644,7 @@ def validate_probe(df: pd.DataFrame) -> ValidationReport:
 
 
 def validate(df: pd.DataFrame, tps_ceiling: float = DEFAULT_TPS_CEILING) -> ValidationReport:
+    """Run every single-run check on a metrics table."""
     report = ValidationReport()
     for findings in (
         check_plausibility(df, tps_ceiling),

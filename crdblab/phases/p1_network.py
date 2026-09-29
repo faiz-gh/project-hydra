@@ -1,17 +1,9 @@
-"""Phase I: characterisation of the network substrate.
+"""Phase I: characterise the network substrate.
 
-Every latency figure in Phases II-V is bounded by facts this phase establishes,
-so it runs first and its output is an input to later pre-flight checks rather
-than a decorative appendix. In particular the round-trip matrix determines the
-quorum floor: a write committed by a majority of five voting replicas cannot be
-faster than the round trip to the second-fastest follower, which converts an
-otherwise unfalsifiable latency measurement into one with a physical lower bound
-(see ``core/preflight.py``, D8).
-
-The probe is issued from each node in parallel, one SSH session per source, with
-all destinations batched into a single remote script. Ping output is parsed by
-matching labelled quantities (``time=`` and ``packet loss``) rather than by field
-position, for the reasons set out in ``core/workload.py``.
+Measures the all-pairs RTT matrix over Tailscale. From it comes the quorum
+floor: a write committed by 3 of 5 voters cannot be faster than the round trip
+to the second-fastest follower. Each source pings every destination in one SSH
+session, all sources in parallel.
 """
 
 from __future__ import annotations
@@ -35,9 +27,7 @@ from ..core.recorder import (
 )
 from ..topology import Node, Topology
 
-#: Enough samples for a stable p99 without making the phase tedious: at 0.1 s
-#: spacing, 100 samples is ten seconds per source and every source runs
-#: concurrently.
+#: 100 samples at 0.1 s: ten seconds per source, all sources concurrently.
 PING_COUNT = 100
 PING_INTERVAL_S = 0.1
 
@@ -62,9 +52,7 @@ class LinkStats:
     rtt_p99_ms: float | None
     rtt_max_ms: float | None
     rtt_mdev_ms: float | None
-    #: Smallest difference the per-packet output could have expressed, derived
-    #: from the decimals actually printed. Quantiles are computed from those
-    #: lines, so this is the precision to which they are meaningful.
+    #: Precision of the per-packet values the quantiles were computed from.
     rtt_resolution_ms: float | None
 
 
@@ -74,21 +62,12 @@ class NodeProbe:
     mtu: int | None = None
     links: dict[str, LinkStats] = field(default_factory=dict)
     error: str | None = None
-    #: Verbatim remote output, retained so a dispute about how these figures were
-    #: derived can be settled against the original bytes rather than by re-running
-    #: (decision 5). The precision defect corrected in :func:`parse_ping` was found
-    #: exactly this way.
+    #: Verbatim remote output, saved under ``raw/``.
     raw: str = ""
 
 
 def _quantile(ordered: list[float], q: float) -> float:
-    """Nearest-rank quantile.
-
-    Stated explicitly because the legacy implementation used
-    ``times[int(count * q) - 1]``, which is off by one at the boundaries and
-    silently returns the wrong element for small samples. With a named definition
-    the figure in the results chapter can be described precisely.
-    """
+    """Nearest-rank quantile."""
     if not ordered:
         raise ValueError("no samples")
     rank = max(1, min(len(ordered), int(-(-len(ordered) * q // 1))))
@@ -98,23 +77,10 @@ def _quantile(ordered: list[float], q: float) -> float:
 def parse_ping(output: str) -> LinkStats:
     """Summarise one ping run.
 
-    Central summary statistics are read from ping's own ``rtt
-    min/avg/max/mdev`` line rather than recomputed from the per-packet lines,
-    because that line prints three decimals at any magnitude while the per-packet
-    lines do not: on this testbed a 25 ms link prints ``time=25.5 ms`` and a
-    186 ms link prints ``time=186 ms``. Recomputing the mean from the latter
-    would silently quantise the Asian links to whole milliseconds and, worse,
-    report their deviation as exactly ``0.0`` across a hundred samples -- a
-    figure that would look like an extraordinarily stable intercontinental path
-    rather than the measurement artefact it is.
-
-    Quantiles have no equivalent in the summary line and must come from the
-    per-packet values, so the resolution those values were printed at is
-    recorded alongside them and the quantiles are not rounded beyond it.
-
-    A destination that produced no replies is recorded as 100% loss with null
-    latencies rather than being omitted, so a broken link is visible in the
-    matrix instead of merely absent from it.
+    Min/mean/max/mdev come from ping's summary line (always three decimals).
+    Quantiles come from per-packet lines, whose precision drops as RTT grows,
+    so that precision is recorded as ``rtt_resolution_ms``. A destination with
+    no replies is recorded as 100% loss rather than omitted.
     """
     tokens = _TIME_RE.findall(output)
     times = [float(t) for t in tokens]
@@ -133,8 +99,7 @@ def parse_ping(output: str) -> LinkStats:
     if summary:
         r_min, r_avg, r_max, r_mdev = (float(g) for g in summary.groups())
     else:
-        # No summary line (truncated output); fall back to the per-packet values
-        # and accept their coarser precision rather than dropping the link.
+        # No summary line (truncated output): use the per-packet values.
         r_min, r_max = ordered[0], ordered[-1]
         r_avg = statistics.fmean(times)
         r_mdev = statistics.pstdev(times) if len(times) > 1 else 0.0
@@ -221,14 +186,7 @@ def run(
 ) -> tuple[RunDirectory, list[NodeProbe]]:
     """Execute Phase I and record it as an immutable run directory.
 
-    ``engine`` does not change the measurement -- ping does not care what is
-    listening on 26257 -- but it does say which deployment the substrate was
-    measured against, and that is not inferable afterwards. Switching engines is
-    a ``terraform apply -var="database_engine=..."`` that replaces every cluster
-    node, so a Phase I run belongs to one deployment as surely as a benchmark
-    does; without this the manifest silently reported whatever the field
-    defaults to, and a figure named from it would have asserted an engine nobody
-    recorded.
+    ``engine`` does not affect ping, but records which deployment was measured.
     """
     topo = topology or settings.topology
     nodes = list(topo)
