@@ -1,6 +1,6 @@
-"""Regenerate docs-app/data.js from the code, so the reference never drifts.
+"""Regenerate docs-app/data.js (CLI, profiles, run-data schemas, charts) from the code.
 
-Run from the repository root after changing code, CLI flags, profiles or schemas::
+Run from the repository root after changing CLI flags, profiles, schemas or charts::
 
     .venv/bin/python docs-app/build.py
 """
@@ -11,8 +11,6 @@ import argparse
 import ast
 import io
 import json
-import re
-import subprocess
 import sys
 import tokenize
 from dataclasses import fields
@@ -20,8 +18,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-
-SOURCE_DIRS = ("crdblab", "pipeline", "demo")
 
 #: Column descriptions for the recorded CSVs; names come from crdblab.core.recorder.
 COLUMN_NOTES: dict[str, dict[str, str]] = {
@@ -124,94 +120,18 @@ def _doc_comments(src: str) -> dict[int, str]:
     return {line + 1: " ".join(t for t in texts if t) for line, texts in runs.items()}
 
 
-def _signature(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
-    args = ast.unparse(node.args)
-    ret = f" -> {ast.unparse(node.returns)}" if node.returns else ""
-    return f"({args}){ret}"
-
-
-def _function(node, notes) -> dict:
-    return {
-        "name": node.name,
-        "kind": "function",
-        "signature": _signature(node),
-        "doc": ast.get_docstring(node) or "",
-        "line": node.lineno,
-        "decorators": [ast.unparse(d) for d in node.decorator_list],
-    }
-
-
-def _assign_target(node) -> str | None:
-    if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
-        return node.targets[0].id
-    if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-        return node.target.id
-    return None
-
-
-def _value(node) -> str:
-    value = getattr(node, "value", None)
-    if value is None:
-        return ""
-    text = ast.unparse(value)
-    return text if len(text) <= 160 else text[:157] + "..."
-
-
-def _class(node, notes) -> dict:
-    out = {
-        "name": node.name,
-        "kind": "class",
-        "bases": [ast.unparse(b) for b in node.bases],
-        "decorators": [ast.unparse(d) for d in node.decorator_list],
-        "doc": ast.get_docstring(node) or "",
-        "line": node.lineno,
-        "fields": [],
-        "methods": [],
-    }
-    for item in node.body:
-        if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            out["methods"].append(_function(item, notes))
-        elif isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
-            out["fields"].append({
-                "name": item.target.id,
-                "type": ast.unparse(item.annotation),
-                "default": _value(item),
-                "doc": notes.get(item.lineno, ""),
-            })
-    return out
-
-
-def module_reference(path: Path) -> dict:
+def field_notes(path: Path) -> dict[str, dict[str, str]]:
+    """``{class: {field: doc}}`` from the ``#:`` comments above annotated class fields."""
     src = path.read_text()
-    tree = ast.parse(src)
     notes = _doc_comments(src)
-    rel = path.relative_to(ROOT).as_posix()
-    name = rel[:-3].replace("/", ".")
-    if name.endswith(".__init__"):
-        name = name[: -len(".__init__")]
-    out = {
-        "path": rel,
-        "module": name,
-        "doc": ast.get_docstring(tree) or "",
-        "lines": len(src.splitlines()),
-        "constants": [],
-        "classes": [],
-        "functions": [],
-    }
-    for node in tree.body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            out["functions"].append(_function(node, notes))
-        elif isinstance(node, ast.ClassDef):
-            out["classes"].append(_class(node, notes))
-        else:
-            target = _assign_target(node)
-            if target and (target.isupper() or target.lstrip("_").isupper() or node.lineno in notes):
-                out["constants"].append({
-                    "name": target,
-                    "value": _value(node),
-                    "doc": notes.get(node.lineno, ""),
-                    "line": node.lineno,
-                })
+    out: dict[str, dict[str, str]] = {}
+    for node in ast.parse(src).body:
+        if isinstance(node, ast.ClassDef):
+            out[node.name] = {
+                item.target.id: notes.get(item.lineno, "")
+                for item in node.body
+                if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name)
+            }
     return out
 
 
@@ -260,10 +180,7 @@ def profile_reference() -> dict:
 
     from crdblab.config import ChaosSpec, HardwareMetricsSpec, Profile, WorkloadSpec
 
-    notes: dict[str, dict[str, str]] = {}
-    config_ref = module_reference(ROOT / "crdblab/config.py")
-    for cls in config_ref["classes"]:
-        notes[cls["name"]] = {f["name"]: f["doc"] for f in cls["fields"]}
+    notes = field_notes(ROOT / "crdblab/config.py")
 
     sections = {}
     for label, spec in (("workload", WorkloadSpec), ("chaos", ChaosSpec), ("hardware_metrics", HardwareMetricsSpec)):
@@ -310,54 +227,17 @@ def chart_reference() -> dict:
     }
 
 
-def test_reference() -> list[dict]:
-    out = []
-    for path in sorted((ROOT / "tests").glob("test_*.py")):
-        tree = ast.parse(path.read_text())
-        tests = [
-            {"name": n.name, "doc": ast.get_docstring(n) or ""}
-            for n in tree.body
-            if isinstance(n, ast.FunctionDef) and n.name.startswith("test_")
-        ]
-        out.append({"path": path.relative_to(ROOT).as_posix(), "doc": ast.get_docstring(tree) or "", "tests": tests})
-    return out
-
-
-def script_help() -> dict:
-    commands = {
-        "run-experiment.sh": ["bash", "run-experiment.sh", "--help"],
-        "generate_insights.sh": ["bash", "generate_insights.sh", "--help"],
-        "pipeline/run_all.py": [sys.executable, "pipeline/run_all.py", "--help"],
-        "demo.sh": [sys.executable, "demo/replay.py", "--help"],
-    }
-    out = {}
-    for name, cmd in commands.items():
-        result = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=60)
-        text = re.sub(r"\x1b\[[0-9;]*m", "", result.stdout or result.stderr)
-        out[name] = text.rstrip()
-    return out
-
-
 def main() -> None:
-    modules = [
-        module_reference(path)
-        for top in SOURCE_DIRS
-        for path in sorted((ROOT / top).rglob("*.py"))
-        if "__pycache__" not in path.parts
-    ]
     data = {
-        "modules": modules,
         "cli": cli_reference(),
         "profiles": profile_reference(),
         "schemas": schema_reference(),
         "charts": chart_reference(),
-        "tests": test_reference(),
-        "scripts": script_help(),
     }
     target = Path(__file__).with_name("data.js")
     target.write_text("window.HYDRA_DOCS = " + json.dumps(data, indent=1) + ";\n")
-    counts = sum(len(m["functions"]) + sum(len(c["methods"]) for c in m["classes"]) for m in modules)
-    print(f"wrote {target.relative_to(ROOT)}: {len(modules)} modules, {counts} functions and methods")
+    commands = sum(1 for c in data["cli"]["commands"] if c["leaf"] and c["path"])
+    print(f"wrote {target.relative_to(ROOT)}: {commands} commands, {len(data['charts']['charts'])} charts")
 
 
 if __name__ == "__main__":

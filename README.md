@@ -6,8 +6,8 @@ It measures steady-state throughput and latency, then injects faults and
 measures recovery time (RTO) and lost writes (RPO).
 
 **Documentation:** open [`docs-app/index.html`](docs-app/index.html) in a
-browser. It covers the testbed, the workflow, every measurement phase, the CLI,
-profiles, run data, the insights charts and a full code reference.
+browser. It covers setup, running experiments, the measurement phases, the CLI,
+profiles, run data, the insights charts and troubleshooting.
 
 ## Quick start
 
